@@ -153,7 +153,7 @@ def scan_downloads(download_dir):
 
     Returns an ordered dict mapping channel/subfolder name to a list of
     entries sorted newest-first by file mtime. Each entry is a dict with
-    keys: rel, name, size, mtime.
+    keys: rel, name, size, mtime, channel.
     """
     root = Path(download_dir)
     if not root.is_dir():
@@ -173,6 +173,7 @@ def scan_downloads(download_dir):
             "name": path.name,
             "size": stat.st_size,
             "mtime": stat.st_mtime,
+            "channel": channel,
         })
     for entries in groups.values():
         entries.sort(key=lambda e: e["mtime"], reverse=True)
@@ -206,8 +207,9 @@ def read_existing_fingerprint(index_path):
     return match.group(1) if match else None
 
 
-def generate_index_html(groups, total, channels, now_str, fp):
+def generate_index_html(groups, total, channels, now_str, fp, latest=None):
     """Build the index.html page."""
+    latest = latest or []
     lines = [
         "<!DOCTYPE html>",
         '<html lang="en">',
@@ -229,6 +231,7 @@ def generate_index_html(groups, total, channels, now_str, fp):
         "    h1 { margin: 0; font-size: 1.5rem; color: #fff; }",
         "    header p { margin: .25rem 0 0; color: #aaa; font-size: .875rem; }",
         "    .channel { margin-bottom: 2rem; }",
+        "    .latest h2 { color: #8ab4f8; }",
         "    h2 { margin: 0 0 .5rem; font-size: 1.15rem; color: #fff; }",
         "    ul { list-style: none; padding: 0; margin: 0; }",
         "    li {",
@@ -257,21 +260,39 @@ def generate_index_html(groups, total, channels, now_str, fp):
         f"      <p>Last updated: {html.escape(now_str)} &mdash; {total} video(s) across {channels} channel(s)</p>",
         "    </header>",
     ]
+
+    def entry_lines(entry, show_channel=False):
+        href = urllib.parse.quote(entry["rel"], safe="/")
+        size = format_size(entry["size"])
+        mtime_str = datetime.fromtimestamp(entry["mtime"]).strftime("%Y-%m-%d %H:%M")
+        meta_parts = [mtime_str, size]
+        if show_channel:
+            meta_parts.insert(0, html.escape(entry.get("channel", "")))
+        return [
+            "        <li>",
+            (
+                f'          <a href="{href}" title="{html.escape(entry["name"])}">'
+                f"{html.escape(entry['name'])}</a>"
+            ),
+            f'          <span class="meta">{" &middot; ".join(meta_parts)}</span>',
+            "        </li>",
+        ]
+
+    if latest:
+        lines.append('    <section class="channel latest">')
+        lines.append('      <h2>🆕 Latest</h2>')
+        lines.append('      <ul>')
+        for entry in latest:
+            lines.extend(entry_lines(entry, show_channel=True))
+        lines.append('      </ul>')
+        lines.append('    </section>')
+
     for channel, entries in groups.items():
         lines.append('    <section class="channel">')
         lines.append(f"      <h2>{html.escape(channel)}</h2>")
         lines.append("      <ul>")
         for entry in entries:
-            href = urllib.parse.quote(entry["rel"], safe="/")
-            size = format_size(entry["size"])
-            mtime_str = datetime.fromtimestamp(entry["mtime"]).strftime("%Y-%m-%d %H:%M")
-            lines.append("        <li>")
-            lines.append(
-                f'          <a href="{href}" title="{html.escape(entry["name"])}">'
-                f"{html.escape(entry['name'])}</a>"
-            )
-            lines.append(f'          <span class="meta">{mtime_str} &middot; {size}</span>')
-            lines.append("        </li>")
+            lines.extend(entry_lines(entry))
         lines.append("      </ul>")
         lines.append("    </section>")
     lines.extend([
@@ -285,7 +306,11 @@ def generate_index_html(groups, total, channels, now_str, fp):
 
 
 def update_index_html(download_dir):
-    """Regenerate download_dir/index.html if the file listing has changed."""
+    """Regenerate download_dir/index.html if the file listing has changed.
+
+    The page is always built from a full recursive scan of download_dir, so
+    deleted files disappear automatically.
+    """
     groups = scan_downloads(download_dir)
     total = sum(len(entries) for entries in groups.values())
     channels = len(groups)
@@ -293,8 +318,14 @@ def update_index_html(download_dir):
     index_path = Path(download_dir) / "index.html"
     if read_existing_fingerprint(index_path) == fp:
         return False, total, channels
+    # Top 10 newest videos across all channels.
+    latest = sorted(
+        (entry for entries in groups.values() for entry in entries),
+        key=lambda e: e["mtime"],
+        reverse=True,
+    )[:10]
     now_str = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
-    html_content = generate_index_html(groups, total, channels, now_str, fp)
+    html_content = generate_index_html(groups, total, channels, now_str, fp, latest=latest)
     tmp = index_path.with_suffix(".html.tmp")
     tmp.write_text(html_content, encoding="utf-8")
     tmp.replace(index_path)
