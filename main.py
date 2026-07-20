@@ -11,6 +11,7 @@ import hashlib
 import html
 import json
 import logging
+import os
 import re
 import subprocess
 import sys
@@ -19,7 +20,9 @@ import urllib.parse
 from datetime import datetime
 from pathlib import Path
 
+import requests
 import yaml
+from dotenv import load_dotenv
 
 CONFIG_FILE = Path(__file__).parent / "subscriptions.yaml"
 STATE_FILE = Path(__file__).parent / "state.json"
@@ -299,6 +302,60 @@ def update_index_html(download_dir):
     return True, total, channels
 
 
+# ---------------------------------------------------------------------------
+# Telegram notifications
+# ---------------------------------------------------------------------------
+
+TELEGRAM_API_URL = "https://api.telegram.org/bot{token}/sendMessage"
+
+
+def load_telegram_config():
+    """Load Telegram credentials from .env; warn once if anything is missing."""
+    load_dotenv()
+    token = os.environ.get("TELEGRAM_BOT_TOKEN")
+    chat_id = os.environ.get("TELEGRAM_CHAT_ID")
+    if not token or not chat_id:
+        log.warning(
+            "Telegram notifications disabled: TELEGRAM_BOT_TOKEN and/or "
+            "TELEGRAM_CHAT_ID not set in .env"
+        )
+        return None, None
+    return token, chat_id
+
+
+def send_telegram_message(token, chat_id, text):
+    """Send a message; failures are logged but never raised."""
+    url = TELEGRAM_API_URL.format(token=token)
+    payload = {
+        "chat_id": chat_id,
+        "text": text,
+        "disable_web_page_preview": True,
+    }
+    try:
+        response = requests.post(url, json=payload, timeout=30)
+        response.raise_for_status()
+        return True
+    except Exception as e:
+        log.error("failed to send Telegram message: %s", e)
+        return False
+
+
+def format_download_notification(item):
+    return f"{item['channel']}\n{item['title']}\n({format_size(item['size'])})"
+
+
+def notify_completed_downloads(token, chat_id, completed):
+    """Send a single summary message for all videos completed in a round."""
+    if not completed or not token or not chat_id:
+        return
+    if len(completed) == 1:
+        header = "📥 New video downloaded"
+    else:
+        header = f"📥 {len(completed)} new videos downloaded"
+    body = "\n\n".join(format_download_notification(item) for item in completed)
+    send_telegram_message(token, chat_id, f"{header}\n{body}")
+
+
 def download_video(sub, video, download_dir):
     out_dir = Path(download_dir) / sub["name"]
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -312,18 +369,29 @@ def download_video(sub, video, download_dir):
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=3600)
     if result.returncode != 0:
         if is_members_only_error(result.stderr):
-            return "members_only"
+            return "members_only", None
         log.error(
             "[%s] download FAILED for %s: %s",
             sub["name"], video["id"], result.stderr.strip()[:300],
         )
-        return "failed"
-    return "ok"
+        return "failed", None
+    # Locate the finished file by the video id embedded in its name.
+    downloaded = None
+    for f in out_dir.iterdir():
+        if video["id"] in f.name and is_video_file(f):
+            downloaded = f
+            break
+    if downloaded is None:
+        log.warning(
+            "[%s] could not locate downloaded file for %s",
+            sub["name"], video["id"],
+        )
+    return "ok", downloaded
 
 
 def process_subscription(sub, settings, seen, scan_only=False):
     name = sub["name"]
-    completed = 0
+    completed = []
     limit = settings.get("recent_videos_to_scan", 10)
     try:
         videos = fetch_recent_videos(sub["url"], limit)
@@ -355,9 +423,14 @@ def process_subscription(sub, settings, seen, scan_only=False):
         log.info("[%s] matched: %s", name, video["title"])
         log.info("[%s] downloading: %s", name, video["title"])
         try:
-            status = download_video(sub, video, settings["download_dir"])
+            status, downloaded = download_video(sub, video, settings["download_dir"])
             if status == "ok":
-                completed += 1
+                size = downloaded.stat().st_size if downloaded else 0
+                completed.append({
+                    "channel": name,
+                    "title": video["title"],
+                    "size": size,
+                })
                 log.info("[%s] done: %s", name, video["title"])
             elif status == "members_only":
                 log.info("[%s] skipped (members only): %s", name, video["title"])
@@ -366,24 +439,30 @@ def process_subscription(sub, settings, seen, scan_only=False):
     return completed
 
 
-def run_round(config, seen, scan_only=False):
+def run_round(config, seen, scan_only=False, telegram_token=None, telegram_chat_id=None):
     settings = config.get("settings", {})
     subs = config.get("subscriptions", [])
     mode = "scan-only" if scan_only else "scan"
     log.info("=== %s round started: %d subscriptions ===", mode, len(subs))
-    completed = 0
+    completed = []
     for sub in subs:
         try:
-            completed += process_subscription(sub, settings, seen, scan_only=scan_only)
+            completed.extend(
+                process_subscription(sub, settings, seen, scan_only=scan_only)
+            )
         except Exception as e:
             log.error("[%s] unexpected error: %s", sub.get("name", "?"), e)
     if not scan_only:
         save_state(seen)
-        if completed > 0:
+        if completed:
             try:
                 update_index_html(settings.get("download_dir", "/srv/files"))
             except Exception as e:
                 log.error("failed to update index.html: %s", e)
+            try:
+                notify_completed_downloads(telegram_token, telegram_chat_id, completed)
+            except Exception as e:
+                log.error("failed to send Telegram notification: %s", e)
     log.info("=== %s round finished ===", mode)
     return completed
 
@@ -403,12 +482,17 @@ def main():
         "--generate-index", action="store_true",
         help="regenerate download_dir/index.html from existing files and exit",
     )
+    parser.add_argument(
+        "--test-notify", action="store_true",
+        help="send a test Telegram message and exit",
+    )
     args = parser.parse_args()
 
     config = load_config()
     settings = config.get("settings", {})
     interval = settings.get("check_interval_minutes", 30)
     download_dir = settings.get("download_dir", "/srv/files")
+    telegram_token, telegram_chat_id = load_telegram_config()
 
     if args.scan:
         run_round(config, load_state(), scan_only=True)
@@ -418,8 +502,18 @@ def main():
         update_index_html(download_dir)
         return 0
 
+    if args.test_notify:
+        if not telegram_token or not telegram_chat_id:
+            log.warning("cannot send test notification: Telegram credentials missing")
+            return 1
+        text = "📥 Test notification from ytwatcher\nYour notification setup is working."
+        if send_telegram_message(telegram_token, telegram_chat_id, text):
+            log.info("test notification sent")
+            return 0
+        return 1
+
     if args.once:
-        run_round(config, load_state())
+        run_round(config, load_state(), telegram_token=telegram_token, telegram_chat_id=telegram_chat_id)
         return 0
 
     # Generate the initial index once at startup so an existing library is
@@ -432,7 +526,7 @@ def main():
     log.info("starting watcher loop (every %d minutes)", interval)
     while True:
         try:
-            run_round(config, load_state())
+            run_round(config, load_state(), telegram_token=telegram_token, telegram_chat_id=telegram_chat_id)
         except Exception as e:
             log.error("scan round failed: %s", e)
         time.sleep(interval * 60)

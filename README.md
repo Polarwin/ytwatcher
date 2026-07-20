@@ -7,14 +7,14 @@ videos and downloads the ones that match each subscription's filter using
 ## Requirements
 
 - Python 3.10+
-- `yt-dlp` and `PyYAML` (both installed in the project `.venv`)
+- `yt-dlp`, `PyYAML`, `requests`, and `python-dotenv` (all installed in the project `.venv`)
 - `ffmpeg` on PATH (for merging video+audio formats)
 
 ## Setup
 
 ```bash
 python -m venv .venv
-.venv/bin/pip install yt-dlp PyYAML
+.venv/bin/pip install yt-dlp PyYAML requests python-dotenv
 ```
 
 ## Configuration
@@ -68,6 +68,26 @@ videos by channel subfolder, newest first within each group, and links to each
 file with a relative path so it works behind nginx. It only rewrites the file
 when the listing actually changes, so `index.html` is not touched on rounds
 with no new downloads.
+
+## Telegram notifications
+
+Create a `.env` file next to `main.py` with your Telegram credentials:
+
+```bash
+TELEGRAM_BOT_TOKEN=your_bot_token
+TELEGRAM_CHAT_ID=your_chat_id
+```
+
+After each round that completes one or more downloads, a single summary
+message is sent to the chat. No messages are sent for skipped or
+matched-but-not-downloaded videos. If the credentials are missing, the
+watcher prints one warning at startup and continues silently.
+
+Test the notification setup without touching YouTube or `state.json`:
+
+```bash
+.venv/bin/python main.py --test-notify
+```
 
 ## How it works
 
