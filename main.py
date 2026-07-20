@@ -56,7 +56,7 @@ def fetch_recent_videos(channel_url, limit):
         "yt-dlp",
         "--flat-playlist",
         "--playlist-end", str(limit),
-        "--print", "%(id)s\t%(title)s",
+        "--print", "%(id)s\t%(title)s\t%(availability)s",
         videos_url,
     ]
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
@@ -68,10 +68,27 @@ def fetch_recent_videos(channel_url, limit):
     for line in result.stdout.splitlines():
         if not line.strip():
             continue
-        vid, _, title = line.partition("\t")
+        parts = line.split("\t")
+        vid = parts[0].strip()
         if vid:
-            videos.append({"id": vid.strip(), "title": title.strip()})
+            videos.append({
+                "id": vid,
+                "title": parts[1].strip() if len(parts) > 1 else "",
+                "availability": parts[2].strip() if len(parts) > 2 else "",
+            })
     return videos
+
+
+# yt-dlp availability values that mean "not watchable without membership"
+MEMBERS_ONLY_AVAILABILITY = {"subscriber_only", "premium_only", "needs_auth"}
+
+# stderr fragments yt-dlp prints when a video requires channel membership
+MEMBERS_ONLY_ERROR_HINTS = ("member", "subscriber", "join this channel")
+
+
+def is_members_only_error(stderr):
+    text = stderr.lower()
+    return any(hint in text for hint in MEMBERS_ONLY_ERROR_HINTS)
 
 
 def matches(sub, title):
@@ -94,12 +111,14 @@ def download_video(sub, video, download_dir):
     ]
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=3600)
     if result.returncode != 0:
+        if is_members_only_error(result.stderr):
+            return "members_only"
         log.error(
             "[%s] download FAILED for %s: %s",
             sub["name"], video["id"], result.stderr.strip()[:300],
         )
-        return False
-    return True
+        return "failed"
+    return "ok"
 
 
 def process_subscription(sub, settings, seen, scan_only=False):
@@ -116,6 +135,11 @@ def process_subscription(sub, settings, seen, scan_only=False):
         if video["id"] in seen:
             log.info("[%s] skipped (already seen): %s", name, video["title"])
             continue
+        if video.get("availability") in MEMBERS_ONLY_AVAILABILITY:
+            log.info("[%s] skipped (members only): %s", name, video["title"])
+            if not scan_only:
+                seen.add(video["id"])
+            continue
         if not matches(sub, video["title"]):
             log.info("[%s] new, no match: %s", name, video["title"])
             if not scan_only:
@@ -130,8 +154,11 @@ def process_subscription(sub, settings, seen, scan_only=False):
         log.info("[%s] matched: %s", name, video["title"])
         log.info("[%s] downloading: %s", name, video["title"])
         try:
-            if download_video(sub, video, settings["download_dir"]):
+            status = download_video(sub, video, settings["download_dir"])
+            if status == "ok":
                 log.info("[%s] done: %s", name, video["title"])
+            elif status == "members_only":
+                log.info("[%s] skipped (members only): %s", name, video["title"])
         except Exception as e:
             log.error("[%s] download error for %s: %s", name, video["id"], e)
 
