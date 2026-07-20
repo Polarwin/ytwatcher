@@ -54,6 +54,21 @@ Continuous watching (scans every `check_interval_minutes`):
 .venv/bin/python main.py
 ```
 
+Regenerate the download index from existing files without scanning YouTube:
+
+```bash
+.venv/bin/python main.py --generate-index
+```
+
+## Download index
+
+After any round that completes a download, `main.py` rebuilds
+`download_dir/index.html` from the files already on disk. The page groups
+videos by channel subfolder, newest first within each group, and links to each
+file with a relative path so it works behind nginx. It only rewrites the file
+when the listing actually changes, so `index.html` is not touched on rounds
+with no new downloads.
+
 ## How it works
 
 Each round, for every subscription, the watcher runs

@@ -7,11 +7,16 @@ subscriptions.yaml; processed video IDs are tracked in state.json.
 """
 
 import argparse
+import hashlib
+import html
 import json
 import logging
+import re
 import subprocess
 import sys
 import time
+import urllib.parse
+from datetime import datetime
 from pathlib import Path
 
 import yaml
@@ -31,6 +36,16 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 log = logging.getLogger("ytwatcher")
+
+VIDEO_EXTENSIONS = {
+    ".mp4", ".webm", ".mkv", ".mov", ".avi", ".flv", ".wmv",
+    ".m4v", ".mpg", ".mpeg", ".3gp",
+}
+SKIP_SUFFIXES = {
+    ".part", ".ytdl", ".tmp", ".temp", ".download", ".crdownload", ".aria2",
+}
+
+INDEX_FINGERPRINT_RE = re.compile(r"<!--\s*index-fingerprint:\s*([a-f0-9]{40})\s*-->")
 
 
 def load_config():
@@ -105,6 +120,185 @@ def matches(sub, title):
     return any(kw.lower() in title_lower for kw in match)
 
 
+def is_video_file(path):
+    """Return True for completed video files under download_dir."""
+    if not path.is_file():
+        return False
+    if path.name.startswith("."):
+        return False
+    if path.suffix.lower() not in VIDEO_EXTENSIONS:
+        return False
+    file_suffixes = {s.lower() for s in path.suffixes}
+    if file_suffixes & SKIP_SUFFIXES:
+        return False
+    return True
+
+
+def format_size(size):
+    """Return a human-readable byte size."""
+    if size < 1024:
+        return f"{size} B"
+    value = size / 1024
+    for unit in ("KB", "MB", "GB", "TB"):
+        if value < 1024 or unit == "TB":
+            return f"{value:.1f} {unit}"
+        value /= 1024
+
+
+def scan_downloads(download_dir):
+    """Scan download_dir recursively and group video files by top-level subfolder.
+
+    Returns an ordered dict mapping channel/subfolder name to a list of
+    entries sorted newest-first by file mtime. Each entry is a dict with
+    keys: rel, name, size, mtime.
+    """
+    root = Path(download_dir)
+    if not root.is_dir():
+        return {}
+    groups = {}
+    for path in root.rglob("*"):
+        if not is_video_file(path):
+            continue
+        rel = path.relative_to(root)
+        if len(rel.parts) > 1:
+            channel = rel.parts[0]
+        else:
+            channel = "(root)"
+        stat = path.stat()
+        groups.setdefault(channel, []).append({
+            "rel": rel.as_posix(),
+            "name": path.name,
+            "size": stat.st_size,
+            "mtime": stat.st_mtime,
+        })
+    for entries in groups.values():
+        entries.sort(key=lambda e: e["mtime"], reverse=True)
+    return dict(sorted(groups.items(), key=lambda kv: kv[0].casefold()))
+
+
+def fingerprint(groups):
+    """Return a stable hash of the current download listing."""
+    data = []
+    for channel, entries in groups.items():
+        data.append({
+            "channel": channel,
+            "entries": [
+                {"rel": e["rel"], "size": e["size"], "mtime": e["mtime"]}
+                for e in entries
+            ],
+        })
+    canonical = json.dumps(data, sort_keys=True, ensure_ascii=True, separators=(",", ":"))
+    return hashlib.sha1(canonical.encode("utf-8")).hexdigest()
+
+
+def read_existing_fingerprint(index_path):
+    """Read the fingerprint embedded in an existing index.html, if any."""
+    if not index_path.exists():
+        return None
+    try:
+        text = index_path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    match = INDEX_FINGERPRINT_RE.search(text)
+    return match.group(1) if match else None
+
+
+def generate_index_html(groups, total, channels, now_str, fp):
+    """Build the index.html page."""
+    lines = [
+        "<!DOCTYPE html>",
+        '<html lang="en">',
+        "<head>",
+        '  <meta charset="UTF-8">',
+        '  <meta name="viewport" content="width=device-width, initial-scale=1.0">',
+        "  <title>Downloads</title>",
+        "  <style>",
+        "    :root { color-scheme: dark; }",
+        "    body {",
+        "      margin: 0;",
+        '      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;',
+        "      background: #121212;",
+        "      color: #e0e0e0;",
+        "      line-height: 1.5;",
+        "    }",
+        "    .container { max-width: 900px; margin: 0 auto; padding: 1rem; }",
+        "    header { border-bottom: 1px solid #333; margin-bottom: 1.5rem; padding-bottom: 1rem; }",
+        "    h1 { margin: 0; font-size: 1.5rem; color: #fff; }",
+        "    header p { margin: .25rem 0 0; color: #aaa; font-size: .875rem; }",
+        "    .channel { margin-bottom: 2rem; }",
+        "    h2 { margin: 0 0 .5rem; font-size: 1.15rem; color: #fff; }",
+        "    ul { list-style: none; padding: 0; margin: 0; }",
+        "    li {",
+        "      display: flex;",
+        "      justify-content: space-between;",
+        "      align-items: flex-start;",
+        "      gap: 1rem;",
+        "      padding: .75rem;",
+        "      border-bottom: 1px solid #2a2a2a;",
+        "    }",
+        "    li:last-child { border-bottom: none; }",
+        "    a { color: #8ab4f8; text-decoration: none; word-break: break-word; flex: 1; }",
+        "    a:hover { text-decoration: underline; }",
+        "    .meta { white-space: nowrap; color: #999; font-size: .85rem; flex-shrink: 0; text-align: right; }",
+        "    footer { margin-top: 2rem; padding-top: 1rem; border-top: 1px solid #333; color: #888; font-size: .85rem; text-align: center; }",
+        "    @media (max-width: 600px) {",
+        "      li { flex-direction: column; gap: .25rem; }",
+        "      .meta { text-align: left; white-space: normal; }",
+        "    }",
+        "  </style>",
+        "</head>",
+        "<body>",
+        '  <div class="container">',
+        "    <header>",
+        "      <h1>Downloads</h1>",
+        f"      <p>Last updated: {html.escape(now_str)} &mdash; {total} video(s) across {channels} channel(s)</p>",
+        "    </header>",
+    ]
+    for channel, entries in groups.items():
+        lines.append('    <section class="channel">')
+        lines.append(f"      <h2>{html.escape(channel)}</h2>")
+        lines.append("      <ul>")
+        for entry in entries:
+            href = urllib.parse.quote(entry["rel"], safe="/")
+            size = format_size(entry["size"])
+            mtime_str = datetime.fromtimestamp(entry["mtime"]).strftime("%Y-%m-%d %H:%M")
+            lines.append("        <li>")
+            lines.append(
+                f'          <a href="{href}" title="{html.escape(entry["name"])}">'
+                f"{html.escape(entry['name'])}</a>"
+            )
+            lines.append(f'          <span class="meta">{mtime_str} &middot; {size}</span>')
+            lines.append("        </li>")
+        lines.append("      </ul>")
+        lines.append("    </section>")
+    lines.extend([
+        "    <footer>Generated by ytwatcher</footer>",
+        "  </div>",
+        f"<!-- index-fingerprint: {fp} -->",
+        "</body>",
+        "</html>",
+    ])
+    return "\n".join(lines)
+
+
+def update_index_html(download_dir):
+    """Regenerate download_dir/index.html if the file listing has changed."""
+    groups = scan_downloads(download_dir)
+    total = sum(len(entries) for entries in groups.values())
+    channels = len(groups)
+    fp = fingerprint(groups)
+    index_path = Path(download_dir) / "index.html"
+    if read_existing_fingerprint(index_path) == fp:
+        return False, total, channels
+    now_str = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
+    html_content = generate_index_html(groups, total, channels, now_str, fp)
+    tmp = index_path.with_suffix(".html.tmp")
+    tmp.write_text(html_content, encoding="utf-8")
+    tmp.replace(index_path)
+    log.info("index.html updated (%d videos across %d channels)", total, channels)
+    return True, total, channels
+
+
 def download_video(sub, video, download_dir):
     out_dir = Path(download_dir) / sub["name"]
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -129,12 +323,13 @@ def download_video(sub, video, download_dir):
 
 def process_subscription(sub, settings, seen, scan_only=False):
     name = sub["name"]
+    completed = 0
     limit = settings.get("recent_videos_to_scan", 10)
     try:
         videos = fetch_recent_videos(sub["url"], limit)
     except Exception as e:
         log.error("[%s] failed to list videos: %s", name, e)
-        return
+        return completed
 
     log.info("[%s] scanned %d recent videos", name, len(videos))
     for video in videos:
@@ -162,11 +357,13 @@ def process_subscription(sub, settings, seen, scan_only=False):
         try:
             status = download_video(sub, video, settings["download_dir"])
             if status == "ok":
+                completed += 1
                 log.info("[%s] done: %s", name, video["title"])
             elif status == "members_only":
                 log.info("[%s] skipped (members only): %s", name, video["title"])
         except Exception as e:
             log.error("[%s] download error for %s: %s", name, video["id"], e)
+    return completed
 
 
 def run_round(config, seen, scan_only=False):
@@ -174,14 +371,21 @@ def run_round(config, seen, scan_only=False):
     subs = config.get("subscriptions", [])
     mode = "scan-only" if scan_only else "scan"
     log.info("=== %s round started: %d subscriptions ===", mode, len(subs))
+    completed = 0
     for sub in subs:
         try:
-            process_subscription(sub, settings, seen, scan_only=scan_only)
+            completed += process_subscription(sub, settings, seen, scan_only=scan_only)
         except Exception as e:
             log.error("[%s] unexpected error: %s", sub.get("name", "?"), e)
     if not scan_only:
         save_state(seen)
+        if completed > 0:
+            try:
+                update_index_html(settings.get("download_dir", "/srv/files"))
+            except Exception as e:
+                log.error("failed to update index.html: %s", e)
     log.info("=== %s round finished ===", mode)
+    return completed
 
 
 def main():
@@ -195,18 +399,35 @@ def main():
         help="dry run: list new videos and match decisions without "
              "downloading or updating state.json",
     )
+    parser.add_argument(
+        "--generate-index", action="store_true",
+        help="regenerate download_dir/index.html from existing files and exit",
+    )
     args = parser.parse_args()
 
     config = load_config()
-    interval = config.get("settings", {}).get("check_interval_minutes", 30)
+    settings = config.get("settings", {})
+    interval = settings.get("check_interval_minutes", 30)
+    download_dir = settings.get("download_dir", "/srv/files")
 
     if args.scan:
         run_round(config, load_state(), scan_only=True)
         return 0
 
+    if args.generate_index:
+        update_index_html(download_dir)
+        return 0
+
     if args.once:
         run_round(config, load_state())
         return 0
+
+    # Generate the initial index once at startup so an existing library is
+    # browseable before the first new download completes.
+    try:
+        update_index_html(download_dir)
+    except Exception as e:
+        log.error("failed to generate initial index.html: %s", e)
 
     log.info("starting watcher loop (every %d minutes)", interval)
     while True:
