@@ -1,0 +1,35 @@
+settings:
+  download_dir: /srv/files/
+  check_interval_minutes: 30
+  recent_videos_to_scan: 10
+
+subscriptions:
+  - name: 小左第一视角
+    url: https://www.youtube.com/@小左第一视角
+    match: all
+    quality: "bestvideo[height<=720]+bestaudio/best[height<=720]"
+
+  - name: SUNNYFINANCE
+    url: https://www.youtube.com/@SUNNYFINANCE
+    match: all
+    quality: "bestvideo[height<=720]+bestaudio/best[height<=720]"
+
+  - name: NaNaShuoMeiGu
+    url: https://www.youtube.com/@NaNaShuoMeiGu
+    match: all
+    quality: "bestvideo[height<=720]+bestaudio/best[height<=720]"
+
+  - name: RhinoFinance
+    url: https://www.youtube.com/@RhinoFinance
+    match: all
+    quality: "bestvideo[height<=720]+bestaudio/best[height<=720]"
+
+  - name: 阅文动画
+    url: https://www.youtube.com/@yuewenanimation
+    match: ["Battle Through the Heavens", "斗破苍穹"]
+    quality: "bestvideo+bestaudio/best"
+
+  - name: MadeByBilibili
+    url: https://www.youtube.com/@MadeByBilibili
+    match: ["A Mortal's Journey", "凡人修仙传", "A Record of a Mortal"]
+    quality: "bestvideo+bestaudio/best"
