@@ -36,12 +36,21 @@ RestartSec=10
 WantedBy=multi-user.target
 EOF
 
+# Daily yt-dlp upgrade timer (render placeholders in the shipped unit files)
+for unit in yt-dlp-update.service yt-dlp-update.timer; do
+    sed -e "s|@PROJECT_DIR@|$PROJECT_DIR|g" -e "s|@USER@|$USER|g" \
+        "$PROJECT_DIR/$unit" | sudo tee "/etc/systemd/system/$unit" > /dev/null
+done
+
 sudo systemctl daemon-reload
 sudo systemctl enable "$SERVICE_NAME"
 sudo systemctl restart "$SERVICE_NAME"
+sudo systemctl enable --now yt-dlp-update.timer
 
 echo
 sudo systemctl status "$SERVICE_NAME" --no-pager || true
+echo
+systemctl list-timers yt-dlp-update.timer --no-pager || true
 
 cat <<EOF
 
@@ -51,5 +60,7 @@ cat <<EOF
   sudo systemctl stop $SERVICE_NAME       # stop
   sudo systemctl start $SERVICE_NAME      # start
   journalctl -u $SERVICE_NAME -f          # follow logs
-  ./uninstall_service.sh                  # remove the service
+  systemctl list-timers yt-dlp-update.timer      # next scheduled yt-dlp upgrade
+  sudo systemctl start yt-dlp-update.service     # run an upgrade now
+  ./uninstall_service.sh                  # remove the service and timer
 EOF

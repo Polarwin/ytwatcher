@@ -19,6 +19,12 @@ import yaml
 CONFIG_FILE = Path(__file__).parent / "subscriptions.yaml"
 STATE_FILE = Path(__file__).parent / "state.json"
 
+# Prefer the yt-dlp next to the running interpreter (the project venv);
+# systemd units have a minimal PATH where a bare "yt-dlp" won't resolve.
+YT_DLP = str(Path(sys.executable).parent / "yt-dlp")
+if not Path(YT_DLP).exists():
+    YT_DLP = "yt-dlp"
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(message)s",
@@ -53,7 +59,7 @@ def fetch_recent_videos(channel_url, limit):
     """Return a list of {id, title} for the channel's N most recent videos."""
     videos_url = channel_url.rstrip("/") + "/videos"
     cmd = [
-        "yt-dlp",
+        YT_DLP,
         "--flat-playlist",
         "--playlist-end", str(limit),
         "--print", "%(id)s\t%(title)s\t%(availability)s",
@@ -103,7 +109,7 @@ def download_video(sub, video, download_dir):
     out_dir = Path(download_dir) / sub["name"]
     out_dir.mkdir(parents=True, exist_ok=True)
     cmd = [
-        "yt-dlp",
+        YT_DLP,
         "-f", sub["quality"],
         "-o", str(out_dir / "%(title)s [%(id)s].%(ext)s"),
         "--no-playlist",

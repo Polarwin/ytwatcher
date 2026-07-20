@@ -1,0 +1,12 @@
+[Unit]
+Description=Daily yt-dlp upgrade for ytwatcher
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=@USER@
+Environment=PYTHONUNBUFFERED=1
+ExecStart=@PROJECT_DIR@/.venv/bin/pip install --upgrade "yt-dlp[default]"
+# '+' runs this one command as root so the system service can be restarted
+ExecStart=+/usr/bin/systemctl restart ytwatcher.service
