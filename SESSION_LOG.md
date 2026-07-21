@@ -261,3 +261,42 @@ sudo systemctl start yt-dlp-update.service
 - `7d6e861` — Add Telegram notifications for completed downloads
 - `afb0788` — Add 🆕 Latest section and ensure full-scan index rebuilds
 - `<this commit>` — Add `SESSION_LOG.md`
+
+---
+
+## 4. Feature: watched marks in `index.html` (2026-07-21)
+
+### What was asked
+
+Mark which videos have been watched and move watched entries to the
+bottom of the list.
+
+### What was done
+
+- Added `VIDEO_ID_RE` to extract the YouTube video ID from download
+  filenames (`<title> [<id>].<ext>`).
+- `entry_lines()` now emits `data-id="<video id>"` on each `<li>` plus a
+  "Mark watched" button (entries without an ID in the filename get
+  neither).
+- Added CSS: watched entries are dimmed and struck through; the button
+  turns green and reads "✓ Watched".
+- Added an inline `<script>` to the generated page: watched IDs are kept
+  in `localStorage` (`ytwatcher:watched`), toggling updates storage and
+  re-renders; on load, watched entries in each `<ul>` are moved to the
+  bottom while unwatched entries keep their original (newest-first)
+  order. Applies independently to the Latest section and each channel.
+- Regenerated `/srv/files/index.html` (had to delete it first — the
+  fingerprint only covers the file listing, so template changes alone
+  don't trigger a rewrite).
+- Updated `README.md`.
+
+### Key design decisions
+
+- **Client-side, no backend**: the page is served as a static file by
+  nginx, so watched state lives in `localStorage`. It survives index
+  rebuilds (keyed by video ID, not filename) but is per-browser and does
+  not sync across devices.
+- **Original order preserved in JS**: the script snapshots each list's
+  DOM order at load and re-sorts as [unwatched…, watched…] on every
+  toggle, so un-marking an entry restores its original position without
+  a page reload.

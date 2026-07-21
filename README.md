@@ -69,6 +69,12 @@ file with a relative path so it works behind nginx. It only rewrites the file
 when the listing actually changes, so `index.html` is not touched on rounds
 with no new downloads.
 
+Each entry has a **Mark watched** button. Watched videos are dimmed,
+struck through, and moved to the bottom of their list. The watched state
+is kept in the browser's `localStorage` (keyed by the YouTube video ID in
+the filename), so it survives index rebuilds but is per-browser — it does
+not sync across devices.
+
 ## Telegram notifications
 
 Create a `.env` file next to `main.py` with your Telegram credentials:
