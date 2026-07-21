@@ -76,6 +76,14 @@ struck through, and moved to the bottom of their list. The watched state
 is kept in the browser's `localStorage` (keyed by the YouTube video ID in
 the filename), so it survives index rebuilds.
 
+Manually downloaded videos work too: drop the file anywhere under
+`download_dir` and it appears in the index after the next rebuild. Since
+its filename has no YouTube `[id]`, it gets a stable pseudo-ID derived
+from its path, so it can be marked watched like any other entry. The
+pseudo-ID changes if you rename or move the file. Unlike watcher
+downloads, manual files are **never auto-deleted** when marked watched —
+deletion only applies to files whose filename carries a real YouTube ID.
+
 Every mark is also reported to a small HTTP endpoint embedded in the
 watcher (`POST /watched` on `settings.api_port`, default `8791`), which
 records the video ID in `watched.json`. At the start of each scan round,

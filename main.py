@@ -61,6 +61,22 @@ INDEX_FINGERPRINT_RE = re.compile(r"<!--\s*index-fingerprint:\s*([a-f0-9]{40})\s
 VIDEO_ID_RE = re.compile(r"\[([A-Za-z0-9_-]{11})\]")
 
 
+def entry_id(entry):
+    """Stable watch-mark ID for an index entry.
+
+    Files downloaded by the watcher carry their YouTube ID in the name.
+    Manually added files get a pseudo-ID derived from their path
+    ("m" + 10 hex chars, matching the 11-char ID shape the API accepts),
+    so they can be marked watched too. The pseudo-ID changes if the file
+    is renamed or moved.
+    """
+    match = VIDEO_ID_RE.search(entry["name"])
+    if match:
+        return match.group(1)
+    digest = hashlib.sha1(entry["rel"].encode("utf-8")).hexdigest()
+    return "m" + digest[:10]
+
+
 def load_config():
     with open(CONFIG_FILE, "r", encoding="utf-8") as f:
         return yaml.safe_load(f)
@@ -105,13 +121,14 @@ def save_watched(watched):
 
 
 def fetch_recent_videos(channel_url, limit):
-    """Return a list of {id, title} for the channel's N most recent videos."""
+    """Return a list of {id, title, availability, duration} for the
+    channel's N most recent videos. duration is seconds (int) or None."""
     videos_url = channel_url.rstrip("/") + "/videos"
     cmd = [
         YT_DLP,
         "--flat-playlist",
         "--playlist-end", str(limit),
-        "--print", "%(id)s\t%(title)s\t%(availability)s",
+        "--print", "%(id)s\t%(title)s\t%(availability)s\t%(duration)s",
         videos_url,
     ]
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
@@ -125,12 +142,20 @@ def fetch_recent_videos(channel_url, limit):
             continue
         parts = line.split("\t")
         vid = parts[0].strip()
-        if vid:
-            videos.append({
-                "id": vid,
-                "title": parts[1].strip() if len(parts) > 1 else "",
-                "availability": parts[2].strip() if len(parts) > 2 else "",
-            })
+        if not vid:
+            continue
+        duration = None
+        if len(parts) > 3:
+            try:
+                duration = int(float(parts[3]))
+            except ValueError:
+                duration = None
+        videos.append({
+            "id": vid,
+            "title": parts[1].strip() if len(parts) > 1 else "",
+            "availability": parts[2].strip() if len(parts) > 2 else "",
+            "duration": duration,
+        })
     return videos
 
 
@@ -152,6 +177,22 @@ def matches(sub, title):
         return True
     title_lower = title.lower()
     return any(kw.lower() in title_lower for kw in match)
+
+
+def is_short(video, sub):
+    """Return True if the video looks like a YouTube Short.
+
+    Based on duration only: anything at or below the subscription's
+    shorts_max_duration (default 60s) counts as a Short. Unknown
+    durations are not treated as Shorts, to avoid skipping normal
+    videos on missing metadata.
+    """
+    if not sub.get("skip_shorts", False):
+        return False
+    duration = video.get("duration")
+    if duration is None:
+        return False
+    return duration <= sub.get("shorts_max_duration", 60)
 
 
 def is_video_file(path):
@@ -313,11 +354,9 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         meta_parts = [mtime_str, size]
         if show_channel:
             meta_parts.insert(0, html.escape(entry.get("channel", "")))
-        id_match = VIDEO_ID_RE.search(entry["name"])
-        data_attr = f' data-id="{id_match.group(1)}"' if id_match else ""
+        data_attr = f' data-id="{entry_id(entry)}"'
         watch_btn = (
             '          <button class="watch-btn" type="button">Mark watched</button>'
-            if id_match else ""
         )
         return [line for line in [
             f"        <li{data_attr}>",
@@ -629,6 +668,11 @@ def process_subscription(sub, settings, seen, scan_only=False):
             continue
         if video.get("availability") in MEMBERS_ONLY_AVAILABILITY:
             log.info("[%s] skipped (members only): %s", name, video["title"])
+            if not scan_only:
+                seen.add(video["id"])
+            continue
+        if is_short(video, sub):
+            log.info("[%s] skipped (short): %s", name, video["title"])
             if not scan_only:
                 seen.add(video["id"])
             continue

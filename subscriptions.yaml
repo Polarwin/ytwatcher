@@ -4,33 +4,80 @@ settings:
   recent_videos_to_scan: 10
   api_port: 8791
 
+# Per-subscription Shorts filter (optional, per subscription):
+#   skip_shorts: true          skip videos that look like YouTube Shorts
+#   shorts_max_duration: 60    videos this many seconds or shorter count
+#                              as Shorts (default 60)
+
 subscriptions:
   - name: 小左第一视角
     url: https://www.youtube.com/@小左第一视角
     match: all
     quality: "bestvideo[height<=720]+bestaudio/best[height<=720]"
+    skip_shorts: true
+    shorts_max_duration: 60
 
   - name: SUNNYFINANCE
     url: https://www.youtube.com/@SUNNYFINANCE
     match: all
     quality: "bestvideo[height<=720]+bestaudio/best[height<=720]"
+    skip_shorts: true
+    shorts_max_duration: 60
 
   - name: NaNaShuoMeiGu
     url: https://www.youtube.com/@NaNaShuoMeiGu
     match: all
     quality: "bestvideo[height<=720]+bestaudio/best[height<=720]"
+    skip_shorts: true
+    shorts_max_duration: 60
 
   - name: RhinoFinance
     url: https://www.youtube.com/@RhinoFinance
     match: all
     quality: "bestvideo[height<=720]+bestaudio/best[height<=720]"
+    skip_shorts: true
+    shorts_max_duration: 60
 
   - name: 阅文动画
     url: https://www.youtube.com/@yuewenanimation
     match: ["Battle Through the Heavens", "斗破苍穹"]
     quality: "bestvideo+bestaudio/best"
+    skip_shorts: true
+    shorts_max_duration: 60
 
   - name: MadeByBilibili
     url: https://www.youtube.com/@MadeByBilibili
     match: ["A Mortal's Journey", "凡人修仙传", "A Record of a Mortal"]
     quality: "bestvideo+bestaudio/best"
+    skip_shorts: true
+    shorts_max_duration: 60
+
+  - name: SabineHossenfelder
+    url: https://www.youtube.com/@SabineHossenfelder
+    match: all
+    quality: "bestvideo[height<=720]+bestaudio/best[height<=720]"
+    skip_shorts: true
+    shorts_max_duration: 60
+
+  - name: 老鳴TV
+    url: https://www.youtube.com/@laoming
+    match: all
+    quality: "bestvideo[height<=720]+bestaudio/best[height<=720]"
+    skip_shorts: true
+    shorts_max_duration: 60
+
+  - name: 记者易速利
+    url: https://www.youtube.com/@yisuli2023
+    match: all
+    quality: "bestvideo[height<=720]+bestaudio/best[height<=720]"
+    skip_shorts: true
+    shorts_max_duration: 1200
+
+  - name: KimsObservation
+    url: https://www.youtube.com/@wongkim728
+    match: all
+    quality: "bestvideo[height<=720]+bestaudio/best[height<=720]"
+    skip_shorts: true
+    shorts_max_duration: 1800
+
+

@@ -360,3 +360,27 @@ toggle calls `applyAll()`, so both copies of a video update together
 (style, button text, position). Verified with a node DOM-stub test:
 marking in Latest moves/dims the channel copy too, and un-marking from
 either section restores both.
+
+### Feature: watch marks for manually added videos
+
+Manually downloaded files (no `[video id]` in the name) previously
+appeared in the index without a **Mark watched** button, because the
+button and `data-id` were only rendered when `VIDEO_ID_RE` matched the
+filename.
+
+- New `entry_id(entry)` in `main.py`: returns the YouTube ID from the
+  filename when present, otherwise a pseudo-ID `"m" + sha1(rel path)[:10]`
+  (11 chars, passes the API's `[A-Za-z0-9_-]{11}` validation). Stable as
+  long as the file isn't renamed/moved.
+- `entry_lines()` now always renders `data-id` and the button.
+- `delete_watched_videos()` is unchanged: it only matches real YouTube
+  IDs in filenames, so manual files marked watched are never auto-deleted
+  (safe default — the watcher doesn't own those files).
+- Tested with a temp-dir scan + template render (manual file gets a
+  pseudo-ID and button; YouTube files keep their real ID).
+- Regenerated `/srv/files/index.html` (delete-then-regenerate, since the
+  fingerprint doesn't cover template changes).
+- **Note**: the running `ytwatcher.service` still uses the old code until
+  restarted (`sudo systemctl restart ytwatcher`); until then, its next
+  index rebuild (after a completed download) would drop the buttons for
+  manual files again.
