@@ -121,14 +121,16 @@ def save_watched(watched):
 
 
 def fetch_recent_videos(channel_url, limit):
-    """Return a list of {id, title, availability, duration, live_status} for
-    the channel's N most recent videos. duration is seconds (int) or None."""
+    """Return a list of {id, title, availability, duration, live_status,
+    timestamp} for the channel's N most recent videos. duration is seconds
+    (int) or None; timestamp is the upload time as a unix timestamp (int)
+    or None."""
     videos_url = channel_url.rstrip("/") + "/videos"
     cmd = [
         YT_DLP,
         "--flat-playlist",
         "--playlist-end", str(limit),
-        "--print", "%(id)s\t%(title)s\t%(availability)s\t%(duration)s\t%(live_status)s",
+        "--print", "%(id)s\t%(title)s\t%(availability)s\t%(duration)s\t%(live_status)s\t%(timestamp)s\t%(upload_date)s",
         videos_url,
     ]
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
@@ -150,12 +152,27 @@ def fetch_recent_videos(channel_url, limit):
                 duration = int(float(parts[3]))
             except ValueError:
                 duration = None
+        timestamp = None
+        if len(parts) > 5:
+            try:
+                timestamp = int(float(parts[5]))
+            except ValueError:
+                timestamp = None
+        if timestamp is None and len(parts) > 6:
+            # Fall back to upload_date (YYYYMMDD) when no exact timestamp.
+            try:
+                timestamp = int(
+                    datetime.strptime(parts[6].strip(), "%Y%m%d").timestamp()
+                )
+            except ValueError:
+                timestamp = None
         videos.append({
             "id": vid,
             "title": parts[1].strip() if len(parts) > 1 else "",
             "availability": parts[2].strip() if len(parts) > 2 else "",
             "duration": duration,
             "live_status": parts[4].strip() if len(parts) > 4 else "",
+            "timestamp": timestamp,
         })
     return videos
 
@@ -632,6 +649,51 @@ def notify_completed_downloads(token, chat_id, completed):
     send_telegram_message(token, chat_id, f"{header}\n{body}")
 
 
+def set_mtime(path, timestamp):
+    """Set a file's modification time to the given unix timestamp."""
+    try:
+        os.utime(path, (time.time(), timestamp))
+    except OSError as e:
+        log.warning("could not set mtime on %s: %s", path, e)
+
+
+def fetch_upload_timestamp(video_id):
+    """Return the video's YouTube upload time as a unix timestamp, or None.
+
+    The flat-playlist listing doesn't include upload times, so this does
+    one extra metadata query per downloaded video.
+    """
+    cmd = [
+        YT_DLP,
+        "--skip-download",
+        "--print", "%(timestamp)s\t%(upload_date)s",
+        f"https://www.youtube.com/watch?v={video_id}",
+    ]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+    except Exception as e:
+        log.warning("could not fetch upload time for %s: %s", video_id, e)
+        return None
+    if result.returncode != 0:
+        log.warning(
+            "could not fetch upload time for %s: %s",
+            video_id, result.stderr.strip()[:200],
+        )
+        return None
+    parts = result.stdout.strip().split("\t")
+    try:
+        return int(float(parts[0]))
+    except (ValueError, IndexError):
+        pass
+    if len(parts) > 1:
+        # Fall back to upload_date (YYYYMMDD) when no exact timestamp.
+        try:
+            return int(datetime.strptime(parts[1].strip(), "%Y%m%d").timestamp())
+        except ValueError:
+            pass
+    return None
+
+
 def download_video(sub, video, download_dir):
     out_dir = Path(download_dir) / sub["name"]
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -713,6 +775,12 @@ def process_subscription(sub, settings, seen, scan_only=False):
         try:
             status, downloaded = download_video(sub, video, settings["download_dir"])
             if status == "ok":
+                if downloaded:
+                    # File date/time should reflect the YouTube upload
+                    # time, not the download time.
+                    timestamp = video.get("timestamp") or fetch_upload_timestamp(video["id"])
+                    if timestamp:
+                        set_mtime(downloaded, timestamp)
                 size = downloaded.stat().st_size if downloaded else 0
                 completed.append({
                     "channel": name,
