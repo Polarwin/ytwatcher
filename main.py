@@ -121,14 +121,14 @@ def save_watched(watched):
 
 
 def fetch_recent_videos(channel_url, limit):
-    """Return a list of {id, title, availability, duration} for the
-    channel's N most recent videos. duration is seconds (int) or None."""
+    """Return a list of {id, title, availability, duration, live_status} for
+    the channel's N most recent videos. duration is seconds (int) or None."""
     videos_url = channel_url.rstrip("/") + "/videos"
     cmd = [
         YT_DLP,
         "--flat-playlist",
         "--playlist-end", str(limit),
-        "--print", "%(id)s\t%(title)s\t%(availability)s\t%(duration)s",
+        "--print", "%(id)s\t%(title)s\t%(availability)s\t%(duration)s\t%(live_status)s",
         videos_url,
     ]
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
@@ -155,6 +155,7 @@ def fetch_recent_videos(channel_url, limit):
             "title": parts[1].strip() if len(parts) > 1 else "",
             "availability": parts[2].strip() if len(parts) > 2 else "",
             "duration": duration,
+            "live_status": parts[4].strip() if len(parts) > 4 else "",
         })
     return videos
 
@@ -165,10 +166,23 @@ MEMBERS_ONLY_AVAILABILITY = {"subscriber_only", "premium_only", "needs_auth"}
 # stderr fragments yt-dlp prints when a video requires channel membership
 MEMBERS_ONLY_ERROR_HINTS = ("member", "subscriber", "join this channel")
 
+# yt-dlp live_status values that mean "stream hasn't ended yet" — wait and
+# retry in a later round instead of marking the video as seen.
+LIVE_PENDING_STATUSES = {"is_live", "is_upcoming"}
+
+# stderr fragments yt-dlp prints when a download fails because the stream
+# is still live (safety net for when flat-playlist lacks live_status)
+LIVE_ERROR_HINTS = ("live event", "is currently live", "this live stream", "premieres in")
+
 
 def is_members_only_error(stderr):
     text = stderr.lower()
     return any(hint in text for hint in MEMBERS_ONLY_ERROR_HINTS)
+
+
+def is_live_error(stderr):
+    text = stderr.lower()
+    return any(hint in text for hint in LIVE_ERROR_HINTS)
 
 
 def matches(sub, title):
@@ -632,6 +646,8 @@ def download_video(sub, video, download_dir):
     if result.returncode != 0:
         if is_members_only_error(result.stderr):
             return "members_only", None
+        if is_live_error(result.stderr):
+            return "live", None
         log.error(
             "[%s] download FAILED for %s: %s",
             sub["name"], video["id"], result.stderr.strip()[:300],
@@ -681,11 +697,16 @@ def process_subscription(sub, settings, seen, scan_only=False):
             if not scan_only:
                 seen.add(video["id"])
             continue
+        if video.get("live_status") in LIVE_PENDING_STATUSES:
+            # Stream hasn't ended yet. Don't mark as seen so the next
+            # round retries until the VOD becomes downloadable.
+            log.info("[%s] still live, will retry: %s", name, video["title"])
+            continue
         if scan_only:
             log.info("[%s] new, MATCHED (would download): %s", name, video["title"])
             continue
         # Mark as seen regardless of download outcome so we never
-        # re-evaluate this video.
+        # re-evaluate this video (except live streams, handled above).
         seen.add(video["id"])
         log.info("[%s] matched: %s", name, video["title"])
         log.info("[%s] downloading: %s", name, video["title"])
@@ -701,6 +722,10 @@ def process_subscription(sub, settings, seen, scan_only=False):
                 log.info("[%s] done: %s", name, video["title"])
             elif status == "members_only":
                 log.info("[%s] skipped (members only): %s", name, video["title"])
+            elif status == "live":
+                # Still live despite the listing; retry next round.
+                seen.discard(video["id"])
+                log.info("[%s] still live, will retry: %s", name, video["title"])
         except Exception as e:
             log.error("[%s] download error for %s: %s", name, video["id"], e)
     return completed
