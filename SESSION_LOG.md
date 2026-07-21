@@ -296,7 +296,57 @@ bottom of the list.
   nginx, so watched state lives in `localStorage`. It survives index
   rebuilds (keyed by video ID, not filename) but is per-browser and does
   not sync across devices.
-- **Original order preserved in JS**: the script snapshots each list's
-  DOM order at load and re-sorts as [unwatched…, watched…] on every
-  toggle, so un-marking an entry restores its original position without
-  a page reload.
+
+---
+
+## 5. Feature: delete watched videos on scan rounds (2026-07-21)
+
+### What was asked
+
+When checking for new videos, delete watched videos both from the index
+page and from the hard drive.
+
+### What was done
+
+- Added `watched.json` (gitignored, next to `state.json`) plus
+  `load_watched()` / `save_watched()` helpers mirroring the state ones.
+- Added a tiny HTTP endpoint (`WatchedHandler` on `ThreadingHTTPServer`,
+  daemon thread) started by the watcher loop: `POST /watched` with
+  `{"id": ..., "watched": true|false}` updates `watched.json`. Video IDs
+  are validated (`[A-Za-z0-9_-]{11}`) and bad requests get a 400.
+- The index page's toggle now also POSTs the mark to
+  `http://<page-host>:<api_port>/watched` (failures are ignored, so
+  `localStorage` still works standalone).
+- Added `delete_watched_videos()` and wired it into the start of every
+  non-scan round: files whose embedded video ID is in `watched.json` are
+  unlinked, then the index is rebuilt so they disappear from the page.
+- New settings: `api_host` (default `0.0.0.0`) and `api_port` (default
+  `8791`); the port is embedded in the generated page's `fetch()` URL.
+- Updated `README.md`, `.gitignore`, `subscriptions.yaml`.
+
+### Key design decisions
+
+- **Client-side marks, server-side file**: the page keeps `localStorage`
+  as before, but every toggle also POSTs the video ID to a tiny HTTP
+  endpoint (`BaseHTTPRequestHandler` + `ThreadingHTTPServer`, daemon
+  thread) embedded in the watcher loop. Marks land in `watched.json`
+  (gitignored, next to `state.json`).
+- **Deletion at round start**: `run_round()` (non-scan) calls
+  `delete_watched_videos()`, which unlinks every video file whose
+  embedded `[video id]` appears in `watched.json`, then rebuilds the
+  index. Deletion is deferred to the round, so un-marking before the next
+  round saves the file.
+- **CORS without preflight**: the page POSTs with
+  `Content-Type: text/plain` (a CORS-safelisted value); the handler also
+  answers `OPTIONS` and sends `Access-Control-Allow-Origin: *`. Endpoint
+  is unauthenticated by design — see README for the trust warning.
+- **Config**: `settings.api_host` (default `0.0.0.0`) and
+  `settings.api_port` (default `8791`) control binding; the port is
+  embedded in the generated page's `fetch()` URL.
+- Tested: unit-tested deletion (deletes only watched IDs, idempotent)
+  and a live API roundtrip on port 18791 (mark/unmark/bad-ID rejection).
+- Regenerated `/srv/files/index.html` (delete-then-regenerate again,
+  since the fingerprint doesn't cover template changes).
+- **Note**: the running `ytwatcher.service` still uses the old code until
+  restarted (`sudo systemctl restart ytwatcher`); the API endpoint only
+  runs in loop mode, not for `--once` / `--generate-index`.

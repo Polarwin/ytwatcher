@@ -2,6 +2,7 @@
 __pycache__/
 *.pyc
 state.json
+watched.json
 downloads/
 *.log
 .env

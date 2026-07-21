@@ -26,6 +26,8 @@ Edit `subscriptions.yaml`:
 - `settings.check_interval_minutes` — how often to scan in loop mode.
 - `settings.recent_videos_to_scan` — how many recent videos per channel to
   inspect each round.
+- `settings.api_host` / `settings.api_port` — where the watched-mark
+  endpoint listens (defaults `0.0.0.0` / `8791`).
 - Each subscription has:
   - `name` — used for logging and the download subdirectory.
   - `url` — channel URL (the `/videos` tab is appended automatically).
@@ -72,8 +74,22 @@ with no new downloads.
 Each entry has a **Mark watched** button. Watched videos are dimmed,
 struck through, and moved to the bottom of their list. The watched state
 is kept in the browser's `localStorage` (keyed by the YouTube video ID in
-the filename), so it survives index rebuilds but is per-browser — it does
-not sync across devices.
+the filename), so it survives index rebuilds.
+
+Every mark is also reported to a small HTTP endpoint embedded in the
+watcher (`POST /watched` on `settings.api_port`, default `8791`), which
+records the video ID in `watched.json`. At the start of each scan round,
+the watcher deletes every downloaded file whose video ID is in
+`watched.json`, and the index loses those entries on the next rebuild.
+Because deletion only happens when a round runs, a mark can be undone
+(un-watch the video) any time before the next round. If the watcher is
+down when a mark is made, the mark stays browser-local only and no
+deletion happens.
+
+The endpoint binds to `settings.api_host` (default `0.0.0.0`) so the
+browser can reach it; it has no authentication, so anyone who can reach
+the port can mark IDs for deletion. Keep it on a trusted network or set
+`api_host: 127.0.0.1` and proxy it through nginx.
 
 ## Telegram notifications
 

@@ -2,6 +2,7 @@ settings:
   download_dir: /srv/files/
   check_interval_minutes: 30
   recent_videos_to_scan: 10
+  api_port: 8791
 
 subscriptions:
   - name: 小左第一视角

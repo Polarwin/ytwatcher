@@ -15,9 +15,11 @@ import os
 import re
 import subprocess
 import sys
+import threading
 import time
 import urllib.parse
 from datetime import datetime
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import requests
@@ -26,6 +28,11 @@ from dotenv import load_dotenv
 
 CONFIG_FILE = Path(__file__).parent / "subscriptions.yaml"
 STATE_FILE = Path(__file__).parent / "state.json"
+WATCHED_FILE = Path(__file__).parent / "watched.json"
+
+# Port for the tiny HTTP endpoint that receives "watched" marks from the
+# browser. Overridable via settings.api_port in subscriptions.yaml.
+DEFAULT_API_PORT = 8791
 
 # Prefer the yt-dlp next to the running interpreter (the project venv);
 # systemd units have a minimal PATH where a bare "yt-dlp" won't resolve.
@@ -74,6 +81,27 @@ def save_state(seen):
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(sorted(seen), f, indent=1)
     tmp.replace(STATE_FILE)
+
+
+_watched_lock = threading.Lock()
+
+
+def load_watched():
+    """Return the set of video IDs the user marked as watched."""
+    if WATCHED_FILE.exists():
+        try:
+            with open(WATCHED_FILE, "r", encoding="utf-8") as f:
+                return set(json.load(f))
+        except (json.JSONDecodeError, OSError) as e:
+            log.warning("Could not read watched.json (%s); starting fresh", e)
+    return set()
+
+
+def save_watched(watched):
+    tmp = WATCHED_FILE.with_suffix(".json.tmp")
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(sorted(watched), f, indent=1)
+    tmp.replace(WATCHED_FILE)
 
 
 def fetch_recent_videos(channel_url, limit):
@@ -210,7 +238,7 @@ def read_existing_fingerprint(index_path):
     return match.group(1) if match else None
 
 
-def generate_index_html(groups, total, channels, now_str, fp, latest=None):
+def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_port=DEFAULT_API_PORT):
     """Build the index.html page."""
     latest = latest or []
     lines = [
@@ -332,6 +360,13 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None):
         "  }",
         "  function save(s) { localStorage.setItem(KEY, JSON.stringify(Array.from(s))); }",
         "  var watched = load();",
+        "  function report(id, isWatched) {",
+        '    fetch("http://" + location.hostname + ":' + str(api_port) + '/watched", {',
+        '      method: "POST",',
+        '      headers: { "Content-Type": "text/plain" },',
+        '      body: JSON.stringify({ id: id, watched: isWatched }),',
+        "    }).catch(function () {});",
+        "  }",
         '  document.querySelectorAll("ul").forEach(function (ul) {',
         '    var items = Array.prototype.slice.call(ul.querySelectorAll("li[data-id]"));',
         "    if (!items.length) return;",
@@ -349,8 +384,10 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None):
         "    items.forEach(function (li) {",
         '      li.querySelector(".watch-btn").addEventListener("click", function () {',
         "        var id = li.dataset.id;",
-        "        if (watched.has(id)) { watched.delete(id); } else { watched.add(id); }",
+        "        var isWatched = !watched.has(id);",
+        "        if (isWatched) { watched.add(id); } else { watched.delete(id); }",
         "        save(watched);",
+        "        report(id, isWatched);",
         "        apply();",
         "      });",
         "    });",
@@ -364,7 +401,7 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None):
     return "\n".join(lines)
 
 
-def update_index_html(download_dir):
+def update_index_html(download_dir, api_port=DEFAULT_API_PORT):
     """Regenerate download_dir/index.html if the file listing has changed.
 
     The page is always built from a full recursive scan of download_dir, so
@@ -384,12 +421,105 @@ def update_index_html(download_dir):
         reverse=True,
     )[:10]
     now_str = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
-    html_content = generate_index_html(groups, total, channels, now_str, fp, latest=latest)
+    html_content = generate_index_html(groups, total, channels, now_str, fp, latest=latest, api_port=api_port)
     tmp = index_path.with_suffix(".html.tmp")
     tmp.write_text(html_content, encoding="utf-8")
     tmp.replace(index_path)
     log.info("index.html updated (%d videos across %d channels)", total, channels)
     return True, total, channels
+
+
+# ---------------------------------------------------------------------------
+# Watched marks: HTTP endpoint + deletion
+# ---------------------------------------------------------------------------
+
+
+def delete_watched_videos(download_dir, watched_ids):
+    """Delete downloaded files whose video ID is in watched_ids.
+
+    Returns the number of files deleted. The index page is rebuilt from a
+    full scan, so deleted files disappear from it automatically.
+    """
+    if not watched_ids:
+        return 0
+    root = Path(download_dir)
+    if not root.is_dir():
+        return 0
+    deleted = 0
+    for path in root.rglob("*"):
+        if not is_video_file(path):
+            continue
+        id_match = VIDEO_ID_RE.search(path.name)
+        if id_match and id_match.group(1) in watched_ids:
+            try:
+                path.unlink()
+                deleted += 1
+                log.info("deleted watched video: %s", path.name)
+            except OSError as e:
+                log.error("failed to delete %s: %s", path, e)
+    return deleted
+
+
+class WatchedHandler(BaseHTTPRequestHandler):
+    """Receives watched/unwatched marks from the index page.
+
+    POST /watched with a JSON body {"id": "<video id>", "watched": true}
+    adds or removes the ID in watched.json. Nothing here deletes files;
+    deletion happens at the start of the next scan round, so an accidental
+    mark can be undone before the round runs.
+    """
+
+    def _cors(self):
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+
+    def do_OPTIONS(self):
+        self.send_response(204)
+        self._cors()
+        self.end_headers()
+
+    def do_POST(self):
+        if self.path != "/watched":
+            self.send_response(404)
+            self._cors()
+            self.end_headers()
+            return
+        try:
+            length = int(self.headers.get("Content-Length", 0))
+            data = json.loads(self.rfile.read(length) or b"{}")
+            video_id = data.get("id", "")
+            if not re.fullmatch(r"[A-Za-z0-9_-]{11}", video_id):
+                raise ValueError(f"bad video id: {video_id!r}")
+            with _watched_lock:
+                watched = load_watched()
+                if data.get("watched"):
+                    watched.add(video_id)
+                else:
+                    watched.discard(video_id)
+                save_watched(watched)
+            log.info(
+                "marked %s: %s",
+                "watched" if data.get("watched") else "unwatched", video_id,
+            )
+            self.send_response(200)
+        except (ValueError, json.JSONDecodeError) as e:
+            log.warning("bad /watched request: %s", e)
+            self.send_response(400)
+        self._cors()
+        self.end_headers()
+
+    def log_message(self, fmt, *args):
+        log.debug("watched-api: " + fmt, *args)
+
+
+def start_watched_api(host, port):
+    """Start the watched-mark endpoint in a daemon thread."""
+    server = ThreadingHTTPServer((host, port), WatchedHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    log.info("watched-mark API listening on %s:%d", host, port)
+    return server
 
 
 # ---------------------------------------------------------------------------
@@ -535,6 +665,19 @@ def run_round(config, seen, scan_only=False, telegram_token=None, telegram_chat_
     mode = "scan-only" if scan_only else "scan"
     log.info("=== %s round started: %d subscriptions ===", mode, len(subs))
     completed = []
+    if not scan_only:
+        # Delete files the user marked as watched since the last round.
+        download_dir = settings.get("download_dir", "/srv/files")
+        deleted = delete_watched_videos(download_dir, load_watched())
+        if deleted:
+            log.info("deleted %d watched video(s)", deleted)
+            try:
+                update_index_html(
+                    download_dir,
+                    api_port=settings.get("api_port", DEFAULT_API_PORT),
+                )
+            except Exception as e:
+                log.error("failed to update index.html: %s", e)
     for sub in subs:
         try:
             completed.extend(
@@ -546,7 +689,10 @@ def run_round(config, seen, scan_only=False, telegram_token=None, telegram_chat_
         save_state(seen)
         if completed:
             try:
-                update_index_html(settings.get("download_dir", "/srv/files"))
+                update_index_html(
+                    settings.get("download_dir", "/srv/files"),
+                    api_port=settings.get("api_port", DEFAULT_API_PORT),
+                )
             except Exception as e:
                 log.error("failed to update index.html: %s", e)
             try:
@@ -582,6 +728,8 @@ def main():
     settings = config.get("settings", {})
     interval = settings.get("check_interval_minutes", 30)
     download_dir = settings.get("download_dir", "/srv/files")
+    api_host = settings.get("api_host", "0.0.0.0")
+    api_port = settings.get("api_port", DEFAULT_API_PORT)
     telegram_token, telegram_chat_id = load_telegram_config()
 
     if args.scan:
@@ -589,7 +737,7 @@ def main():
         return 0
 
     if args.generate_index:
-        update_index_html(download_dir)
+        update_index_html(download_dir, api_port=api_port)
         return 0
 
     if args.test_notify:
@@ -606,10 +754,16 @@ def main():
         run_round(config, load_state(), telegram_token=telegram_token, telegram_chat_id=telegram_chat_id)
         return 0
 
+    # Start the endpoint that receives watched marks from the index page.
+    try:
+        start_watched_api(api_host, api_port)
+    except Exception as e:
+        log.error("watched-mark API failed to start: %s", e)
+
     # Generate the initial index once at startup so an existing library is
     # browseable before the first new download completes.
     try:
-        update_index_html(download_dir)
+        update_index_html(download_dir, api_port=api_port)
     except Exception as e:
         log.error("failed to generate initial index.html: %s", e)
 
