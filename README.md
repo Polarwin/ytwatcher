@@ -33,6 +33,9 @@ Edit `subscriptions.yaml`:
   - `url` — channel URL (the `/videos` tab is appended automatically).
   - `match` — `all` to download everything, or a list of keywords; a video
     matches if any keyword appears in its title (case-insensitive).
+  - `exclude` — optional list of keywords; a video is skipped if any
+    keyword appears in its title (case-insensitive). Takes precedence
+    over `match`.
   - `quality` — yt-dlp format string passed via `-f`.
 
 ## Usage

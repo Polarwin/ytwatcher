@@ -203,10 +203,12 @@ def is_live_error(stderr):
 
 
 def matches(sub, title):
+    title_lower = title.lower()
+    if any(kw.lower() in title_lower for kw in sub.get("exclude", [])):
+        return False
     match = sub.get("match", "all")
     if match == "all":
         return True
-    title_lower = title.lower()
     return any(kw.lower() in title_lower for kw in match)
 
 

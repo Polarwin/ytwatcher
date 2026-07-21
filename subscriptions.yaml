@@ -4,6 +4,13 @@ settings:
   recent_videos_to_scan: 10
   api_port: 8791
 
+# Per-subscription title filter:
+#   match: all                      download everything, or a list of
+#                                   keywords; video matches if any keyword
+#                                   appears in its title (case-insensitive)
+#   exclude: ["trailer", "预告"]    optional; skip videos whose title
+#                                   contains any of these (wins over match)
+#
 # Per-subscription Shorts filter (optional, per subscription):
 #   skip_shorts: true          skip videos that look like YouTube Shorts
 #   shorts_max_duration: 60    videos this many seconds or shorter count
