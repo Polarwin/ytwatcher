@@ -350,3 +350,13 @@ page and from the hard drive.
 - **Note**: the running `ytwatcher.service` still uses the old code until
   restarted (`sudo systemctl restart ytwatcher`); the API endpoint only
   runs in loop mode, not for `--once` / `--generate-index`.
+
+### Fix: sync toggles across sections
+
+A video appearing in both 🆕 Latest and its channel section only updated
+in the list that was clicked, because `apply()` ran per-`<ul>`. The
+script now collects each list's `apply()` into `applyFns` and every
+toggle calls `applyAll()`, so both copies of a video update together
+(style, button text, position). Verified with a node DOM-stub test:
+marking in Latest moves/dims the channel copy too, and un-marking from
+either section restores both.
