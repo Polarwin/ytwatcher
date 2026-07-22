@@ -3,6 +3,9 @@ settings:
   check_interval_minutes: 30
   recent_videos_to_scan: 10
   api_port: 8791
+  # Skip videos uploaded more than this many days ago. Videos with unknown
+  # upload times are not skipped. Comment out / remove to disable.
+  max_video_age_days: 2
 
 # Per-subscription title filter:
 #   match: all                      download everything, or a list of
@@ -17,9 +20,58 @@ settings:
 #                              as Shorts (default 60)
 
 subscriptions:
-  - name: 小左第一视角
-    url: https://www.youtube.com/@小左第一视角
-    match: all
+  - name: FoxNews
+    url: https://www.youtube.com/@FoxBusiness
+    match: ["Taiwan", "China", "Chinese"]
+    quality: "bestvideo[height<=720]+bestaudio/best[height<=720]"
+    skip_shorts: true
+    shorts_max_duration: 60
+
+  - name: FoxNews
+    url: https://www.youtube.com/@FoxNewsChannelClips
+    match: ["Taiwan", "China", "Chinese"]
+    quality: "bestvideo[height<=720]+bestaudio/best[height<=720]"
+    skip_shorts: true
+    shorts_max_duration: 60
+
+  - name: FoxNews
+    url: https://www.youtube.com/@FoxNews
+    match: ["Taiwan", "China", "Chinese"]
+    quality: "bestvideo[height<=720]+bestaudio/best[height<=720]"
+    skip_shorts: true
+    shorts_max_duration: 60
+
+  - name: CNN
+    url: https://www.youtube.com/@CNN
+    match: ["Taiwan", "China", "Chinese"]
+    quality: "bestvideo[height<=720]+bestaudio/best[height<=720]"
+    skip_shorts: true
+    shorts_max_duration: 60
+
+  - name: ARD
+    url: https://www.youtube.com/ARD
+    match: ["Taiwan", "China", "Chinese", "Chinesisch"]
+    quality: "bestvideo[height<=720]+bestaudio/best[height<=720]"
+    skip_shorts: true
+    shorts_max_duration: 60
+
+  - name: ZDF
+    url: https://www.youtube.com/ZDF
+    match: ["Taiwan", "China", "Chinese", "Chinesisch"]
+    quality: "bestvideo[height<=720]+bestaudio/best[height<=720]"
+    skip_shorts: true
+    shorts_max_duration: 60
+
+  - name: DWNews
+    url: https://www.youtube.com/@dwnews
+    match: ["Taiwan", "China", "Chinese", "Chinesisch"]
+    quality: "bestvideo[height<=720]+bestaudio/best[height<=720]"
+    skip_shorts: true
+    shorts_max_duration: 60
+
+  - name: DWNews
+    url: https://www.youtube.com/@dwdeutsch
+    match: ["Taiwan", "China", "Chinese", "Chinesisch"]
     quality: "bestvideo[height<=720]+bestaudio/best[height<=720]"
     skip_shorts: true
     shorts_max_duration: 60
@@ -45,9 +97,31 @@ subscriptions:
     skip_shorts: true
     shorts_max_duration: 60
 
+  - name: 美投君
+    url: https://www.youtube.com/@MeiTouNews
+    match: all
+    quality: "bestvideo[height<=720]+bestaudio/best[height<=720]"
+    skip_shorts: true
+    shorts_max_duration: 60
+
+  - name: 美投君
+    url: https://www.youtube.com/@MeiTouJun
+    match: all
+    quality: "bestvideo[height<=720]+bestaudio/best[height<=720]"
+    skip_shorts: true
+    shorts_max_duration: 60
+
+  - name: 小左第一视角
+    url: https://www.youtube.com/@小左第一视角
+    match: all
+    quality: "bestvideo[height<=720]+bestaudio/best[height<=720]"
+    skip_shorts: true
+    shorts_max_duration: 60
+
   - name: 阅文动画
     url: https://www.youtube.com/@yuewenanimation
     match: ["Battle Through the Heavens", "斗破苍穹"]
+    exclude: ["trailer", "预告", "PV"]
     quality: "bestvideo+bestaudio/best"
     skip_shorts: true
     shorts_max_duration: 60
@@ -55,6 +129,7 @@ subscriptions:
   - name: MadeByBilibili
     url: https://www.youtube.com/@MadeByBilibili
     match: ["A Mortal's Journey", "凡人修仙传", "A Record of a Mortal"]
+    exclude: ["trailer", "预告", "PV"]
     quality: "bestvideo+bestaudio/best"
     skip_shorts: true
     shorts_max_duration: 60
@@ -83,8 +158,7 @@ subscriptions:
   - name: KimsObservation
     url: https://www.youtube.com/@wongkim728
     match: all
+    exclude: ["每周新闻", "新闻8分钟"]
     quality: "bestvideo[height<=720]+bestaudio/best[height<=720]"
     skip_shorts: true
     shorts_max_duration: 1800
-
-

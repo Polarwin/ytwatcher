@@ -731,10 +731,26 @@ def download_video(sub, video, download_dir):
     return "ok", downloaded
 
 
+def is_too_old(video, settings, now):
+    """Return True if the video is older than settings.max_video_age_days.
+
+    Videos with unknown upload times are not treated as old, to avoid
+    skipping new videos on missing metadata.
+    """
+    max_age_days = settings.get("max_video_age_days")
+    if not max_age_days:
+        return False
+    timestamp = video.get("timestamp")
+    if timestamp is None:
+        return False
+    return now - timestamp > max_age_days * 86400
+
+
 def process_subscription(sub, settings, seen, scan_only=False):
     name = sub["name"]
     completed = []
     limit = settings.get("recent_videos_to_scan", 10)
+    now = time.time()
     try:
         videos = fetch_recent_videos(sub["url"], limit)
     except Exception as e:
@@ -745,6 +761,12 @@ def process_subscription(sub, settings, seen, scan_only=False):
     for video in videos:
         if video["id"] in seen:
             log.info("[%s] skipped (already seen): %s", name, video["title"])
+            continue
+        if is_too_old(video, settings, now):
+            log.info("[%s] skipped (older than %s days): %s",
+                     name, settings.get("max_video_age_days"), video["title"])
+            if not scan_only:
+                seen.add(video["id"])
             continue
         if video.get("availability") in MEMBERS_ONLY_AVAILABILITY:
             log.info("[%s] skipped (members only): %s", name, video["title"])
