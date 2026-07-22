@@ -762,6 +762,11 @@ def process_subscription(sub, settings, seen, scan_only=False):
         if video["id"] in seen:
             log.info("[%s] skipped (already seen): %s", name, video["title"])
             continue
+        # Flat-playlist entries carry no upload time (yt-dlp prints NA), so
+        # fetch it lazily for unseen videos; otherwise max_video_age_days
+        # would silently never apply.
+        if video["timestamp"] is None and settings.get("max_video_age_days"):
+            video["timestamp"] = fetch_upload_timestamp(video["id"])
         if is_too_old(video, settings, now):
             log.info("[%s] skipped (older than %s days): %s",
                      name, settings.get("max_video_age_days"), video["title"])

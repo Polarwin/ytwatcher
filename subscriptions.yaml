@@ -162,3 +162,10 @@ subscriptions:
     quality: "bestvideo[height<=720]+bestaudio/best[height<=720]"
     skip_shorts: true
     shorts_max_duration: 1800
+
+  - name: LT視界
+    url: https://www.youtube.com/@ltshijie
+    match: all
+    quality: "bestvideo[height<=720]+bestaudio/best[height<=720]"
+    skip_shorts: true
+    shorts_max_duration: 600
