@@ -161,7 +161,7 @@ subscriptions:
     exclude: ["每周新闻", "新闻8分钟"]
     quality: "bestvideo[height<=720]+bestaudio/best[height<=720]"
     skip_shorts: true
-    shorts_max_duration: 1800
+    shorts_max_duration: 60
 
   - name: LT視界
     url: https://www.youtube.com/@ltshijie
