@@ -30,7 +30,8 @@ Edit `subscriptions.yaml`:
   endpoint listens (defaults `0.0.0.0` / `8791`).
 - Each subscription has:
   - `name` — used for logging and the download subdirectory.
-  - `url` — channel URL (the `/videos` tab is appended automatically).
+  - `url` — channel URL (the `/videos` and `/streams` tabs are appended
+    automatically).
   - `match` — `all` to download everything, or a list of keywords; a video
     matches if any keyword appears in its title (case-insensitive).
   - `exclude` — optional list of keywords; a video is skipped if any
@@ -125,9 +126,12 @@ Test the notification setup without touching YouTube or `state.json`:
 ## How it works
 
 Each round, for every subscription, the watcher runs
-`yt-dlp --flat-playlist` on the channel's `/videos` tab to list the most
-recent videos. Video IDs already in `state.json` are skipped. New videos
-are marked as seen immediately (even if they don't match or the download
+`yt-dlp --flat-playlist` on the channel's `/videos` and `/streams` tabs
+(the latter covers channels that publish as live streams) and merges the
+listings. Video IDs already in `state.json` are skipped. Live streams and
+upcoming premieres are not marked as seen — they are retried each round
+and downloaded only once the stream has ended. Other new videos are
+marked as seen immediately (even if they don't match or the download
 fails) so they are never re-evaluated. Matching videos are downloaded with
 the subscription's quality format string. A failure in one channel is
 logged and does not abort the round.

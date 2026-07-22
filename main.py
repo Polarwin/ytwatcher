@@ -124,22 +124,48 @@ def fetch_recent_videos(channel_url, limit):
     """Return a list of {id, title, availability, duration, live_status,
     timestamp} for the channel's N most recent videos. duration is seconds
     (int) or None; timestamp is the upload time as a unix timestamp (int)
-    or None."""
-    videos_url = channel_url.rstrip("/") + "/videos"
-    cmd = [
-        YT_DLP,
-        "--flat-playlist",
-        "--playlist-end", str(limit),
-        "--print", "%(id)s\t%(title)s\t%(availability)s\t%(duration)s\t%(live_status)s\t%(timestamp)s\t%(upload_date)s",
-        videos_url,
-    ]
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
-    if result.returncode != 0:
-        raise RuntimeError(
-            f"yt-dlp exited {result.returncode}: {result.stderr.strip()[:300]}"
-        )
+    or None.
+
+    Both the channel's Videos tab and its Live tab are scanned and merged:
+    some channels publish their main content as live streams, which only
+    appear under /streams, never under /videos.
+    """
+    base = channel_url.rstrip("/")
     videos = []
-    for line in result.stdout.splitlines():
+    seen_ids = set()
+    errors = []
+    for tab in ("videos", "streams"):
+        cmd = [
+            YT_DLP,
+            "--flat-playlist",
+            "--playlist-end", str(limit),
+            "--print", "%(id)s\t%(title)s\t%(availability)s\t%(duration)s\t%(live_status)s\t%(timestamp)s\t%(upload_date)s",
+            f"{base}/{tab}",
+        ]
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+        except subprocess.TimeoutExpired as e:
+            errors.append(f"{tab}: {e}")
+            continue
+        if result.returncode != 0:
+            errors.append(f"{tab}: yt-dlp exited {result.returncode}: "
+                          f"{result.stderr.strip()[:300]}")
+            continue
+        for video in parse_flat_playlist(result.stdout):
+            if video["id"] not in seen_ids:
+                seen_ids.add(video["id"])
+                videos.append(video)
+    if not videos and errors:
+        raise RuntimeError("; ".join(errors))
+    if errors:
+        log.warning("partial channel listing for %s: %s", channel_url, "; ".join(errors))
+    return videos
+
+
+def parse_flat_playlist(stdout):
+    """Parse yt-dlp --flat-playlist output into video dicts."""
+    videos = []
+    for line in stdout.splitlines():
         if not line.strip():
             continue
         parts = line.split("\t")
@@ -762,6 +788,15 @@ def process_subscription(sub, settings, seen, scan_only=False):
         if video["id"] in seen:
             log.info("[%s] skipped (already seen): %s", name, video["title"])
             continue
+        if video.get("live_status") in LIVE_PENDING_STATUSES:
+            # Stream hasn't ended yet. Don't mark as seen so the next
+            # round retries until the VOD becomes downloadable. Checked
+            # before everything else: for live/upcoming streams the flat
+            # listing reports bogus metadata (e.g. tiny durations) that
+            # would otherwise trigger the shorts or age filters and skip
+            # the video permanently.
+            log.info("[%s] still live, will retry: %s", name, video["title"])
+            continue
         # Flat-playlist entries carry no upload time (yt-dlp prints NA), so
         # fetch it lazily for unseen videos; otherwise max_video_age_days
         # would silently never apply.
@@ -787,11 +822,6 @@ def process_subscription(sub, settings, seen, scan_only=False):
             log.info("[%s] new, no match: %s", name, video["title"])
             if not scan_only:
                 seen.add(video["id"])
-            continue
-        if video.get("live_status") in LIVE_PENDING_STATUSES:
-            # Stream hasn't ended yet. Don't mark as seen so the next
-            # round retries until the VOD becomes downloadable.
-            log.info("[%s] still live, will retry: %s", name, video["title"])
             continue
         if scan_only:
             log.info("[%s] new, MATCHED (would download): %s", name, video["title"])
