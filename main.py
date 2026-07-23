@@ -657,7 +657,10 @@ def send_telegram_message(token, chat_id, text):
         response.raise_for_status()
         return True
     except Exception as e:
-        log.error("failed to send Telegram message: %s", e)
+        # The exception message embeds the request URL, which contains the
+        # bot token; mask it before writing to the log/journal.
+        safe = str(e).replace(token, "***")
+        log.error("failed to send Telegram message: %s", safe)
         return False
 
 
