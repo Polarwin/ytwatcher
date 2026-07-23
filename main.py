@@ -347,7 +347,7 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "<head>",
         '  <meta charset="UTF-8">',
         '  <meta name="viewport" content="width=device-width, initial-scale=1.0">',
-        "  <title>Downloads</title>",
+        "  <title>Financial and More</title>",
         "  <style>",
         "    :root { color-scheme: dark; }",
         "    body {",

@@ -3,6 +3,7 @@ __pycache__/
 *.pyc
 state.json
 watched.json
+subscriptions.yaml
 downloads/
 *.log
 .env

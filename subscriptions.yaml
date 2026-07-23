@@ -121,7 +121,10 @@ subscriptions:
   - name: 阅文动画
     url: https://www.youtube.com/@yuewenanimation
     match: ["Battle Through the Heavens", "斗破苍穹"]
-    exclude: ["trailer", "预告", "PV"]
+    # "clip": yt-dlp's flat listing returns localized (English) titles, so
+    # Chinese-only keywords like 花絮 never match those; their English
+    # listings are titled "... EPnnn clip: ...".
+    exclude: ["trailer", "预告", "PV", "花絮", "clip"]
     quality: "bestvideo+bestaudio/best"
     skip_shorts: true
     shorts_max_duration: 60
@@ -129,7 +132,7 @@ subscriptions:
   - name: MadeByBilibili
     url: https://www.youtube.com/@MadeByBilibili
     match: ["A Mortal's Journey", "凡人修仙传", "A Record of a Mortal"]
-    exclude: ["trailer", "预告", "PV"]
+    exclude: ["trailer", "预告", "PV", "花絮", "clip"]
     quality: "bestvideo+bestaudio/best"
     skip_shorts: true
     shorts_max_duration: 60
@@ -151,21 +154,21 @@ subscriptions:
   - name: 记者易速利
     url: https://www.youtube.com/@yisuli2023
     match: all
-    quality: "bestvideo[height<=720]+bestaudio/best[height<=720]"
+    quality: "bestaudio"
     skip_shorts: true
     shorts_max_duration: 1200
 
   - name: KimsObservation
     url: https://www.youtube.com/@wongkim728
     match: all
-    exclude: ["每周新闻", "新闻8分钟"]
-    quality: "bestvideo[height<=720]+bestaudio/best[height<=720]"
+    exclude: ["每周新闻", "新闻8分钟", "8-minutes", "weekly"]
+    quality: "bestaudio"
     skip_shorts: true
-    shorts_max_duration: 60
+    shorts_max_duration: 1200
 
   - name: LT視界
     url: https://www.youtube.com/@ltshijie
     match: all
-    quality: "bestvideo[height<=720]+bestaudio/best[height<=720]"
+    quality: "bestaudio"
     skip_shorts: true
     shorts_max_duration: 600
