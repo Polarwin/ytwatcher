@@ -3,7 +3,8 @@
 
 Polls subscribed channels for new videos and downloads the ones that
 match each subscription's filter. Configuration lives in
-subscriptions.yaml; processed video IDs are tracked in state.json.
+subscriptions.yaml; processed video IDs are tracked in state.json and
+failed-download attempt counts in failed.json.
 """
 
 import argparse
@@ -29,6 +30,10 @@ from dotenv import load_dotenv
 CONFIG_FILE = Path(__file__).parent / "subscriptions.yaml"
 STATE_FILE = Path(__file__).parent / "state.json"
 WATCHED_FILE = Path(__file__).parent / "watched.json"
+FAILED_FILE = Path(__file__).parent / "failed.json"
+
+# Download attempts before a failing video is marked as seen for good.
+MAX_DOWNLOAD_ATTEMPTS = 5
 
 # Port for the tiny HTTP endpoint that receives "watched" marks from the
 # browser. Overridable via settings.api_port in subscriptions.yaml.
@@ -97,6 +102,44 @@ def save_state(seen):
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(sorted(seen), f, indent=1)
     tmp.replace(STATE_FILE)
+
+
+def load_failed():
+    """Return {video_id: failed download attempts}."""
+    if FAILED_FILE.exists():
+        try:
+            with open(FAILED_FILE, "r", encoding="utf-8") as f:
+                return {k: int(v) for k, v in json.load(f).items()}
+        except (json.JSONDecodeError, OSError, ValueError, TypeError) as e:
+            log.warning("Could not read failed.json (%s); starting fresh", e)
+    return {}
+
+
+def save_failed(failed):
+    tmp = FAILED_FILE.with_suffix(".json.tmp")
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(dict(sorted(failed.items())), f, indent=1)
+    tmp.replace(FAILED_FILE)
+
+
+def note_download_failure(name, video, failed, seen):
+    """Record a failed download attempt for a video.
+
+    Un-marks the video so the next round retries it. Once it has failed
+    MAX_DOWNLOAD_ATTEMPTS times it stays marked as seen, so videos that
+    will never download (region locks, takedowns, ...) stop being
+    retried every round.
+    """
+    attempts = failed.get(video["id"], 0) + 1
+    if attempts >= MAX_DOWNLOAD_ATTEMPTS:
+        failed.pop(video["id"], None)
+        log.warning("[%s] giving up on %s after %d failed attempts",
+                    name, video["title"], attempts)
+        return
+    failed[video["id"]] = attempts
+    seen.discard(video["id"])
+    log.info("[%s] download failed (attempt %d/%d), will retry: %s",
+             name, attempts, MAX_DOWNLOAD_ATTEMPTS, video["title"])
 
 
 _watched_lock = threading.Lock()
@@ -811,7 +854,7 @@ def is_too_old(video, settings, now):
     return now - timestamp > max_age_days * 86400
 
 
-def process_subscription(sub, settings, seen, scan_only=False):
+def process_subscription(sub, settings, seen, failed, scan_only=False):
     name = sub["name"]
     completed = []
     limit = settings.get("recent_videos_to_scan", 10)
@@ -877,13 +920,16 @@ def process_subscription(sub, settings, seen, scan_only=False):
             log.info("[%s] new, MATCHED (would download): %s", name, video["title"])
             continue
         # Mark as seen regardless of download outcome so we never
-        # re-evaluate this video (except live streams, handled above).
+        # re-evaluate this video. Failures are un-marked below so the
+        # next round retries them (up to MAX_DOWNLOAD_ATTEMPTS times;
+        # live streams retry without a cap).
         seen.add(video["id"])
         log.info("[%s] matched: %s", name, video["title"])
         log.info("[%s] downloading: %s", name, video["title"])
         try:
             status, downloaded = download_video(sub, video, settings["download_dir"])
             if status == "ok":
+                failed.pop(video["id"], None)
                 if downloaded:
                     # File date/time should reflect the YouTube upload
                     # time, not the download time.
@@ -901,9 +947,14 @@ def process_subscription(sub, settings, seen, scan_only=False):
                 log.info("[%s] skipped (members only): %s", name, video["title"])
             elif status == "live":
                 # Still live despite the listing; retry next round.
+                # Live retries are uncapped: a stream can legitimately
+                # run for hours before its VOD becomes downloadable.
                 seen.discard(video["id"])
                 log.info("[%s] still live, will retry: %s", name, video["title"])
+            elif status == "failed":
+                note_download_failure(name, video, failed, seen)
         except Exception as e:
+            note_download_failure(name, video, failed, seen)
             log.error("[%s] download error for %s: %s", name, video["id"], e)
     return completed
 
@@ -914,6 +965,7 @@ def run_round(config, seen, scan_only=False, telegram_token=None, telegram_chat_
     mode = "scan-only" if scan_only else "scan"
     log.info("=== %s round started: %d subscriptions ===", mode, len(subs))
     completed = []
+    failed = load_failed()
     if not scan_only:
         # Delete files the user marked as watched since the last round.
         download_dir = settings.get("download_dir", "/srv/files")
@@ -930,12 +982,13 @@ def run_round(config, seen, scan_only=False, telegram_token=None, telegram_chat_
     for sub in subs:
         try:
             completed.extend(
-                process_subscription(sub, settings, seen, scan_only=scan_only)
+                process_subscription(sub, settings, seen, failed, scan_only=scan_only)
             )
         except Exception as e:
             log.error("[%s] unexpected error: %s", sub.get("name", "?"), e)
     if not scan_only:
         save_state(seen)
+        save_failed(failed)
         if completed:
             try:
                 update_index_html(
