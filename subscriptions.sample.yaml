@@ -43,3 +43,11 @@ subscriptions:
     match_description: true
     quality: "bestvideo[height<=720]+bestaudio/best[height<=720]"
     skip_shorts: false
+
+  # url can also be a list: all channels are combined under one name.
+  - name: MultiChannel
+    url:
+      - https://www.youtube.com/@ChannelA
+      - https://www.youtube.com/@ChannelB
+    match: all
+    quality: "bestvideo[height<=720]+bestaudio/best[height<=720]"

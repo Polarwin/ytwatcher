@@ -86,9 +86,73 @@ def entry_id(entry):
     return "m" + digest[:10]
 
 
+def validate_config(config):
+    """Check the structure of subscriptions.yaml.
+
+    Returns a list of problems found; empty means the config is valid.
+    """
+    problems = []
+    if not isinstance(config, dict):
+        return ["top level must be a mapping with 'settings' and 'subscriptions'"]
+
+    settings = config.get("settings", {})
+    if not isinstance(settings, dict):
+        problems.append("settings: must be a mapping")
+    else:
+        for key in ("check_interval_minutes", "recent_videos_to_scan",
+                    "api_port", "max_video_age_days"):
+            if key in settings and not isinstance(settings[key], (int, float)):
+                problems.append(f"settings.{key}: must be a number")
+
+    subs = config.get("subscriptions", [])
+    if not isinstance(subs, list):
+        problems.append("subscriptions: must be a list")
+        return problems
+    for i, sub in enumerate(subs):
+        label = f"subscriptions[{i}]"
+        if not isinstance(sub, dict):
+            problems.append(f"{label}: must be a mapping")
+            continue
+        name = sub.get("name")
+        if isinstance(name, str) and name.strip():
+            label = f"subscription '{name}'"
+        else:
+            problems.append(f"{label}: missing or empty 'name'")
+        url = sub.get("url")
+        if isinstance(url, str):
+            if not url.strip():
+                problems.append(f"{label}: missing or empty 'url'")
+        elif not (
+            isinstance(url, list) and url
+            and all(isinstance(u, str) and u.strip() for u in url)
+        ):
+            problems.append(
+                f"{label}: 'url' must be a non-empty string or a list of URLs"
+            )
+        if not isinstance(sub.get("quality"), str) or not sub.get("quality", "").strip():
+            problems.append(f"{label}: missing or empty 'quality'")
+        match = sub.get("match", "all")
+        if match != "all" and not (
+            isinstance(match, list) and all(isinstance(kw, str) for kw in match)
+        ):
+            problems.append(f"{label}: 'match' must be 'all' or a list of keywords")
+        exclude = sub.get("exclude", [])
+        if not (isinstance(exclude, list)
+                and all(isinstance(kw, str) for kw in exclude)):
+            problems.append(f"{label}: 'exclude' must be a list of keywords")
+        if "shorts_max_duration" in sub and not isinstance(
+            sub["shorts_max_duration"], (int, float)
+        ):
+            problems.append(f"{label}: 'shorts_max_duration' must be a number")
+    return problems
+
+
 def load_config():
     with open(CONFIG_FILE, "r", encoding="utf-8") as f:
-        return yaml.safe_load(f)
+        config = yaml.safe_load(f)
+    for problem in validate_config(config):
+        log.error("%s: %s", CONFIG_FILE.name, problem)
+    return config
 
 
 def load_state():
@@ -864,11 +928,19 @@ def process_subscription(sub, settings, seen, failed, scan_only=False):
     completed = []
     limit = settings.get("recent_videos_to_scan", 10)
     now = time.time()
-    try:
-        videos = fetch_recent_videos(sub["url"], limit)
-    except Exception as e:
-        log.error("[%s] failed to list videos: %s", name, e)
-        return completed
+    urls = sub["url"]
+    if isinstance(urls, str):
+        urls = [urls]
+    videos = []
+    seen_ids = set()
+    for url in urls:
+        try:
+            for video in fetch_recent_videos(url, limit):
+                if video["id"] not in seen_ids:
+                    seen_ids.add(video["id"])
+                    videos.append(video)
+        except Exception as e:
+            log.error("[%s] failed to list videos from %s: %s", name, url, e)
 
     log.info("[%s] scanned %d recent videos", name, len(videos))
     for video in videos:
@@ -1031,7 +1103,26 @@ def main():
         "--test-notify", action="store_true",
         help="send a test Telegram message and exit",
     )
+    parser.add_argument(
+        "--check", action="store_true",
+        help="validate subscriptions.yaml and exit",
+    )
     args = parser.parse_args()
+
+    if args.check:
+        try:
+            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+                config = yaml.safe_load(f)
+        except (OSError, yaml.YAMLError) as e:
+            log.error("%s: %s", CONFIG_FILE.name, e)
+            return 1
+        problems = validate_config(config)
+        for problem in problems:
+            log.error("%s: %s", CONFIG_FILE.name, problem)
+        if problems:
+            return 1
+        log.info("%s: OK", CONFIG_FILE.name)
+        return 0
 
     config = load_config()
     settings = config.get("settings", {})
@@ -1080,6 +1171,10 @@ def main():
     log.info("starting watcher loop (every %d minutes)", interval)
     while True:
         try:
+            # Re-read subscriptions.yaml every round so edits take effect
+            # without restarting the service.
+            config = load_config()
+            interval = config.get("settings", {}).get("check_interval_minutes", 30)
             run_round(config, load_state(), telegram_token=telegram_token, telegram_chat_id=telegram_chat_id)
         except Exception as e:
             log.error("scan round failed: %s", e)

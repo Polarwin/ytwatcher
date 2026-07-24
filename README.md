@@ -34,7 +34,7 @@ the real file is gitignored):
 - Each subscription has:
   - `name` — used for logging and the download subdirectory.
   - `url` — channel URL (the `/videos` and `/streams` tabs are appended
-    automatically).
+    automatically), or a list of channel URLs to combine under one `name`.
   - `match` — `all` to download everything, or a list of keywords; a video
     matches if any keyword appears in its title (case-insensitive).
   - `exclude` — optional list of keywords; a video is skipped if any
@@ -67,6 +67,13 @@ Regenerate the download index from existing files without scanning YouTube:
 
 ```bash
 .venv/bin/python main.py --generate-index
+```
+
+Validate `subscriptions.yaml` (exits non-zero and lists the problems if
+invalid):
+
+```bash
+.venv/bin/python main.py --check
 ```
 
 ## Download index
