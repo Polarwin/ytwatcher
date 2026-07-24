@@ -13,6 +13,10 @@ settings:
 #                                   appears in its title (case-insensitive)
 #   exclude: ["trailer", "预告"]    optional; skip videos whose title
 #                                   contains any of these (wins over match)
+#   match_description: false        optional; for keyword-based subscriptions
+#                                   the video description is checked too when
+#                                   the title doesn't match (one extra metadata
+#                                   query per non-matching video); default true
 #
 # Per-subscription Shorts filter (optional, per subscription):
 #   skip_shorts: true          skip videos that look like YouTube Shorts

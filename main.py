@@ -228,14 +228,23 @@ def is_live_error(stderr):
     return any(hint in text for hint in LIVE_ERROR_HINTS)
 
 
+def matches_keywords(sub, text):
+    """Return True if text contains any of the subscription's match keywords.
+
+    A subscription with match: all (or no match list) matches everything.
+    """
+    match = sub.get("match", "all")
+    if match == "all":
+        return True
+    text_lower = text.lower()
+    return any(kw.lower() in text_lower for kw in match)
+
+
 def matches(sub, title):
     title_lower = title.lower()
     if any(kw.lower() in title_lower for kw in sub.get("exclude", [])):
         return False
-    match = sub.get("match", "all")
-    if match == "all":
-        return True
-    return any(kw.lower() in title_lower for kw in match)
+    return matches_keywords(sub, title)
 
 
 def is_short(video, sub):
@@ -760,6 +769,33 @@ def download_video(sub, video, download_dir):
     return "ok", downloaded
 
 
+def fetch_description(video_id):
+    """Return the video's description text, or None on failure.
+
+    The flat-playlist listing doesn't include descriptions, so this does
+    one extra metadata query. Used to give videos whose title doesn't
+    match a second chance via their description.
+    """
+    cmd = [
+        YT_DLP,
+        "--skip-download",
+        "--print", "%(description)s",
+        f"https://www.youtube.com/watch?v={video_id}",
+    ]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+    except Exception as e:
+        log.warning("could not fetch description for %s: %s", video_id, e)
+        return None
+    if result.returncode != 0:
+        log.warning(
+            "could not fetch description for %s: %s",
+            video_id, result.stderr.strip()[:200],
+        )
+        return None
+    return result.stdout
+
+
 def is_too_old(video, settings, now):
     """Return True if the video is older than settings.max_video_age_days.
 
@@ -822,10 +858,21 @@ def process_subscription(sub, settings, seen, scan_only=False):
                 seen.add(video["id"])
             continue
         if not matches(sub, video["title"]):
-            log.info("[%s] new, no match: %s", name, video["title"])
-            if not scan_only:
-                seen.add(video["id"])
-            continue
+            # Title didn't match. Keyword-based subscriptions get a second
+            # chance via the video description (one extra metadata query);
+            # disable per subscription with match_description: false.
+            description_matched = False
+            if (sub.get("match_description", True)
+                    and sub.get("match", "all") != "all"):
+                description = fetch_description(video["id"])
+                if description and matches_keywords(sub, description):
+                    description_matched = True
+                    log.info("[%s] matched in description: %s", name, video["title"])
+            if not description_matched:
+                log.info("[%s] new, no match: %s", name, video["title"])
+                if not scan_only:
+                    seen.add(video["id"])
+                continue
         if scan_only:
             log.info("[%s] new, MATCHED (would download): %s", name, video["title"])
             continue
