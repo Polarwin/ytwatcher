@@ -39,6 +39,10 @@ MAX_DOWNLOAD_ATTEMPTS = 5
 # browser. Overridable via settings.api_port in subscriptions.yaml.
 DEFAULT_API_PORT = 8791
 
+# Title shown on the generated index.html page (<title> and <h1>).
+# Overridable via settings.site_title in subscriptions.yaml.
+DEFAULT_SITE_TITLE = "Downloads"
+
 # Prefer the yt-dlp next to the running interpreter (the project venv);
 # systemd units have a minimal PATH where a bare "yt-dlp" won't resolve.
 YT_DLP = str(Path(sys.executable).parent / "yt-dlp")
@@ -363,8 +367,8 @@ def scan_downloads(download_dir):
     return dict(sorted(groups.items(), key=lambda kv: kv[0].casefold()))
 
 
-def fingerprint(groups):
-    """Return a stable hash of the current download listing."""
+def fingerprint(groups, site_title=""):
+    """Return a stable hash of the current download listing and page title."""
     data = []
     for channel, entries in groups.items():
         data.append({
@@ -375,7 +379,7 @@ def fingerprint(groups):
             ],
         })
     canonical = json.dumps(data, sort_keys=True, ensure_ascii=True, separators=(",", ":"))
-    return hashlib.sha1(canonical.encode("utf-8")).hexdigest()
+    return hashlib.sha1((site_title + "\n" + canonical).encode("utf-8")).hexdigest()
 
 
 def read_existing_fingerprint(index_path):
@@ -390,16 +394,17 @@ def read_existing_fingerprint(index_path):
     return match.group(1) if match else None
 
 
-def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_port=DEFAULT_API_PORT):
+def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_port=DEFAULT_API_PORT, site_title=DEFAULT_SITE_TITLE):
     """Build the index.html page."""
     latest = latest or []
+    escaped_title = html.escape(site_title)
     lines = [
         "<!DOCTYPE html>",
         '<html lang="en">',
         "<head>",
         '  <meta charset="UTF-8">',
         '  <meta name="viewport" content="width=device-width, initial-scale=1.0">',
-        "  <title>Financial and More</title>",
+        f"  <title>{escaped_title}</title>",
         "  <style>",
         "    :root { color-scheme: dark; }",
         "    body {",
@@ -453,7 +458,7 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "<body>",
         '  <div class="container">',
         "    <header>",
-        "      <h1>Downloads</h1>",
+        f"      <h1>{escaped_title}</h1>",
         f"      <p>Last updated: {html.escape(now_str)} &mdash; {total} video(s) across {channels} channel(s)</p>",
         "    </header>",
     ]
@@ -554,7 +559,7 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
     return "\n".join(lines)
 
 
-def update_index_html(download_dir, api_port=DEFAULT_API_PORT):
+def update_index_html(download_dir, api_port=DEFAULT_API_PORT, site_title=DEFAULT_SITE_TITLE):
     """Regenerate download_dir/index.html if the file listing has changed.
 
     The page is always built from a full recursive scan of download_dir, so
@@ -563,7 +568,7 @@ def update_index_html(download_dir, api_port=DEFAULT_API_PORT):
     groups = scan_downloads(download_dir)
     total = sum(len(entries) for entries in groups.values())
     channels = len(groups)
-    fp = fingerprint(groups)
+    fp = fingerprint(groups, site_title)
     index_path = Path(download_dir) / "index.html"
     if read_existing_fingerprint(index_path) == fp:
         return False, total, channels
@@ -574,7 +579,7 @@ def update_index_html(download_dir, api_port=DEFAULT_API_PORT):
         reverse=True,
     )[:10]
     now_str = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
-    html_content = generate_index_html(groups, total, channels, now_str, fp, latest=latest, api_port=api_port)
+    html_content = generate_index_html(groups, total, channels, now_str, fp, latest=latest, api_port=api_port, site_title=site_title)
     tmp = index_path.with_suffix(".html.tmp")
     tmp.write_text(html_content, encoding="utf-8")
     tmp.replace(index_path)
@@ -976,6 +981,7 @@ def run_round(config, seen, scan_only=False, telegram_token=None, telegram_chat_
                 update_index_html(
                     download_dir,
                     api_port=settings.get("api_port", DEFAULT_API_PORT),
+                    site_title=settings.get("site_title", DEFAULT_SITE_TITLE),
                 )
             except Exception as e:
                 log.error("failed to update index.html: %s", e)
@@ -994,6 +1000,7 @@ def run_round(config, seen, scan_only=False, telegram_token=None, telegram_chat_
                 update_index_html(
                     settings.get("download_dir", "/srv/files"),
                     api_port=settings.get("api_port", DEFAULT_API_PORT),
+                    site_title=settings.get("site_title", DEFAULT_SITE_TITLE),
                 )
             except Exception as e:
                 log.error("failed to update index.html: %s", e)
@@ -1032,6 +1039,7 @@ def main():
     download_dir = settings.get("download_dir", "/srv/files")
     api_host = settings.get("api_host", "0.0.0.0")
     api_port = settings.get("api_port", DEFAULT_API_PORT)
+    site_title = settings.get("site_title", DEFAULT_SITE_TITLE)
     telegram_token, telegram_chat_id = load_telegram_config()
 
     if args.scan:
@@ -1039,7 +1047,7 @@ def main():
         return 0
 
     if args.generate_index:
-        update_index_html(download_dir, api_port=api_port)
+        update_index_html(download_dir, api_port=api_port, site_title=site_title)
         return 0
 
     if args.test_notify:
@@ -1065,7 +1073,7 @@ def main():
     # Generate the initial index once at startup so an existing library is
     # browseable before the first new download completes.
     try:
-        update_index_html(download_dir, api_port=api_port)
+        update_index_html(download_dir, api_port=api_port, site_title=site_title)
     except Exception as e:
         log.error("failed to generate initial index.html: %s", e)
 

@@ -1,0 +1,45 @@
+# Sample configuration. Copy to subscriptions.yaml and edit.
+# subscriptions.yaml is gitignored; this sample is tracked in git.
+
+settings:
+  download_dir: /srv/files/
+  check_interval_minutes: 30
+  recent_videos_to_scan: 10
+  api_port: 8791
+  # Title of the generated index.html page (used for <title> and <h1>).
+  site_title: Downloads
+  # Skip videos uploaded more than this many days ago. Videos with unknown
+  # upload times are not skipped. Comment out / remove to disable.
+  max_video_age_days: 2
+
+# Per-subscription title filter:
+#   match: all                      download everything, or a list of
+#                                   keywords; video matches if any keyword
+#                                   appears in its title (case-insensitive)
+#   exclude: ["trailer", "预告"]    optional; skip videos whose title
+#                                   contains any of these (wins over match)
+#   match_description: false        optional; for keyword-based subscriptions
+#                                   the video description is checked too when
+#                                   the title doesn't match (one extra metadata
+#                                   query per non-matching video); default true
+#
+# Per-subscription Shorts filter (optional, per subscription):
+#   skip_shorts: true          skip videos that look like YouTube Shorts
+#   shorts_max_duration: 60    videos this many seconds or shorter count
+#                              as Shorts (default 60)
+
+subscriptions:
+  - name: Veritasium
+    url: https://www.youtube.com/@veritasium
+    match: all
+    quality: "bestvideo[height<=720]+bestaudio/best[height<=720]"
+    skip_shorts: true
+    shorts_max_duration: 600
+
+  - name: ExampleNews
+    url: https://www.youtube.com/@ExampleNews
+    match: ["keyword1", "keyword2"]
+    exclude: ["trailer"]
+    match_description: true
+    quality: "bestvideo[height<=720]+bestaudio/best[height<=720]"
+    skip_shorts: false

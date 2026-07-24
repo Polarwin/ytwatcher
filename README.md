@@ -19,7 +19,8 @@ python -m venv .venv
 
 ## Configuration
 
-Edit `subscriptions.yaml`:
+Edit `subscriptions.yaml` (copy `subscriptions.sample.yaml` to get started;
+the real file is gitignored):
 
 - `settings.download_dir` — root directory for downloads; each channel gets
   its own subdirectory (`download_dir/<channel name>/`).
@@ -28,6 +29,8 @@ Edit `subscriptions.yaml`:
   inspect each round.
 - `settings.api_host` / `settings.api_port` — where the watched-mark
   endpoint listens (defaults `0.0.0.0` / `8791`).
+- `settings.site_title` — title of the generated `index.html` page, used for
+  both `<title>` and `<h1>` (default `Downloads`).
 - Each subscription has:
   - `name` — used for logging and the download subdirectory.
   - `url` — channel URL (the `/videos` and `/streams` tabs are appended
