@@ -172,3 +172,10 @@ subscriptions:
     quality: "bestaudio"
     skip_shorts: true
     shorts_max_duration: 600
+
+  - name: Veritasium
+    url: https://www.youtube.com/@veritasium
+    match: all
+    quality: "bestaudio"
+    skip_shorts: true
+    shorts_max_duration: 600
