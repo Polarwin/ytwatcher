@@ -1005,11 +1005,11 @@ def process_subscription(sub, settings, seen, failed, scan_only=False):
                 seen.add(video["id"])
             continue
         if not matches(sub, video["title"]):
-            # Title didn't match. Keyword-based subscriptions get a second
-            # chance via the video description (one extra metadata query);
-            # disable per subscription with match_description: false.
+            # Title didn't match. Keyword-based subscriptions can get a
+            # second chance via the video description (one extra metadata
+            # query); enable per subscription with match_description: true.
             description_matched = False
-            if (sub.get("match_description", True)
+            if (sub.get("match_description", False)
                     and sub.get("match", "all") != "all"):
                 description = fetch_description(video["id"])
                 if description and matches_keywords(sub, description):
