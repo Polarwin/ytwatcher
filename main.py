@@ -59,6 +59,8 @@ log = logging.getLogger("ytwatcher")
 VIDEO_EXTENSIONS = {
     ".mp4", ".webm", ".mkv", ".mov", ".avi", ".flv", ".wmv",
     ".m4v", ".mpg", ".mpeg", ".3gp",
+    # Audio-only downloads (subscriptions with an audio format string).
+    ".m4a", ".mp3", ".opus", ".ogg", ".aac", ".wav", ".flac",
 }
 SKIP_SUFFIXES = {
     ".part", ".ytdl", ".tmp", ".temp", ".download", ".crdownload", ".aria2",
@@ -144,6 +146,8 @@ def validate_config(config):
             sub["shorts_max_duration"], (int, float)
         ):
             problems.append(f"{label}: 'shorts_max_duration' must be a number")
+        if "keep_watched" in sub and not isinstance(sub["keep_watched"], bool):
+            problems.append(f"{label}: 'keep_watched' must be true or false")
     return problems
 
 
@@ -375,7 +379,7 @@ def is_short(video, sub):
 
 
 def is_video_file(path):
-    """Return True for completed video files under download_dir."""
+    """Return True for completed video/audio files under download_dir."""
     if not path.is_file():
         return False
     if path.name.startswith("."):
@@ -402,9 +406,11 @@ def format_size(size):
 def scan_downloads(download_dir):
     """Scan download_dir recursively and group video files by top-level subfolder.
 
-    Returns an ordered dict mapping channel/subfolder name to a list of
-    entries sorted newest-first by file mtime. Each entry is a dict with
-    keys: rel, name, size, mtime, channel.
+    Files under 'watched' subdirectories (archived by subscriptions with
+    keep_watched: true) are not listed. Returns an ordered dict mapping
+    channel/subfolder name to a list of entries sorted newest-first by
+    file mtime. Each entry is a dict with keys: rel, name, size, mtime,
+    channel.
     """
     root = Path(download_dir)
     if not root.is_dir():
@@ -414,6 +420,8 @@ def scan_downloads(download_dir):
         if not is_video_file(path):
             continue
         rel = path.relative_to(root)
+        if "watched" in rel.parts[:-1]:
+            continue
         if len(rel.parts) > 1:
             channel = rel.parts[0]
         else:
@@ -656,30 +664,46 @@ def update_index_html(download_dir, api_port=DEFAULT_API_PORT, site_title=DEFAUL
 # ---------------------------------------------------------------------------
 
 
-def delete_watched_videos(download_dir, watched_ids):
+def delete_watched_videos(download_dir, watched_ids, keep_channels=()):
     """Delete downloaded files whose video ID is in watched_ids.
 
-    Returns the number of files deleted. The index page is rebuilt from a
-    full scan, so deleted files disappear from it automatically.
+    Files under a channel named in keep_channels are moved into a
+    'watched' subdirectory of the channel folder instead of being
+    deleted. Returns the number of files removed from the listing. The
+    index page is rebuilt from a full scan, so they disappear from it
+    automatically.
     """
     if not watched_ids:
         return 0
     root = Path(download_dir)
     if not root.is_dir():
         return 0
-    deleted = 0
+    removed = 0
     for path in root.rglob("*"):
         if not is_video_file(path):
             continue
+        rel = path.relative_to(root)
+        if "watched" in rel.parts[:-1]:
+            # Already archived in a 'watched' subdirectory.
+            continue
         id_match = VIDEO_ID_RE.search(path.name)
-        if id_match and id_match.group(1) in watched_ids:
-            try:
+        if not (id_match and id_match.group(1) in watched_ids):
+            continue
+        channel = rel.parts[0] if len(rel.parts) > 1 else None
+        try:
+            if channel in keep_channels:
+                dest_dir = root / channel / "watched"
+                dest_dir.mkdir(exist_ok=True)
+                path.replace(dest_dir / path.name)
+                removed += 1
+                log.info("moved watched video to %s: %s", dest_dir.name, path.name)
+            else:
                 path.unlink()
-                deleted += 1
+                removed += 1
                 log.info("deleted watched video: %s", path.name)
-            except OSError as e:
-                log.error("failed to delete %s: %s", path, e)
-    return deleted
+        except OSError as e:
+            log.error("failed to remove %s: %s", path, e)
+    return removed
 
 
 class WatchedHandler(BaseHTTPRequestHandler):
@@ -874,10 +898,13 @@ def download_video(sub, video, download_dir):
             downloaded = f
             break
     if downloaded is None:
+        # yt-dlp exited 0 but the file isn't there — treat as a failed
+        # download so the next round retries it.
         log.warning(
-            "[%s] could not locate downloaded file for %s",
+            "[%s] could not locate downloaded file for %s, will retry",
             sub["name"], video["id"],
         )
+        return "failed", None
     return "ok", downloaded
 
 
@@ -1044,11 +1071,14 @@ def run_round(config, seen, scan_only=False, telegram_token=None, telegram_chat_
     completed = []
     failed = load_failed()
     if not scan_only:
-        # Delete files the user marked as watched since the last round.
+        # Delete (or archive, for keep_watched subscriptions) files the
+        # user marked as watched since the last round.
         download_dir = settings.get("download_dir", "/srv/files")
-        deleted = delete_watched_videos(download_dir, load_watched())
-        if deleted:
-            log.info("deleted %d watched video(s)", deleted)
+        keep_channels = {s["name"] for s in subs
+                         if s.get("keep_watched") and "name" in s}
+        removed = delete_watched_videos(download_dir, load_watched(), keep_channels)
+        if removed:
+            log.info("removed %d watched video(s)", removed)
             try:
                 update_index_html(
                     download_dir,

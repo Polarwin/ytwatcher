@@ -28,6 +28,7 @@ Type=simple
 User=$USER
 WorkingDirectory=$PROJECT_DIR
 Environment=PYTHONUNBUFFERED=1
+Environment=PATH=$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin
 ExecStart=$VENV_PYTHON main.py
 Restart=always
 RestartSec=10
@@ -56,7 +57,7 @@ cat <<EOF
 
 === $SERVICE_NAME cheat sheet ===
   sudo systemctl status $SERVICE_NAME     # service status
-  sudo systemctl restart $SERVICE_NAME    # restart (needed after config edits)
+  sudo systemctl restart $SERVICE_NAME    # restart (needed after code updates)
   sudo systemctl stop $SERVICE_NAME       # stop
   sudo systemctl start $SERVICE_NAME      # start
   journalctl -u $SERVICE_NAME -f          # follow logs

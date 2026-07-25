@@ -27,6 +27,11 @@ settings:
 #   skip_shorts: true          skip videos that look like YouTube Shorts
 #   shorts_max_duration: 60    videos this many seconds or shorter count
 #                              as Shorts (default 60)
+#
+#   keep_watched: true         optional; instead of deleting files you mark
+#                              as watched, move them into a 'watched'
+#                              subdirectory of the channel folder (default
+#                              false)
 
 subscriptions:
   - name: Veritasium

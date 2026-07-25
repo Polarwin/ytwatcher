@@ -9,6 +9,15 @@ videos and downloads the ones that match each subscription's filter using
 - Python 3.10+
 - `yt-dlp`, `PyYAML`, `requests`, and `python-dotenv` (all installed in the project `.venv`)
 - `ffmpeg` on PATH (for merging video+audio formats)
+- `deno` on PATH (JavaScript runtime; recent yt-dlp needs it to extract
+  some videos). Install to `~/.local/bin` — the service unit adds it to
+  PATH:
+
+  ```bash
+  mkdir -p ~/.local/bin
+  curl -fsSL https://github.com/denoland/deno/releases/latest/download/deno-x86_64-unknown-linux-gnu.zip -o /tmp/deno.zip
+  unzip -o /tmp/deno.zip -d ~/.local/bin && rm /tmp/deno.zip
+  ```
 
 ## Setup
 
@@ -41,6 +50,9 @@ the real file is gitignored):
     keyword appears in its title (case-insensitive). Takes precedence
     over `match`.
   - `quality` — yt-dlp format string passed via `-f`.
+  - `keep_watched` — optional (default `false`); when `true`, files you
+    mark as watched are moved into a `watched` subdirectory of the
+    channel folder instead of being deleted.
 
 ## Usage
 
@@ -103,10 +115,12 @@ watcher (`POST /watched` on `settings.api_port`, default `8791`), which
 records the video ID in `watched.json`. At the start of each scan round,
 the watcher deletes every downloaded file whose video ID is in
 `watched.json`, and the index loses those entries on the next rebuild.
-Because deletion only happens when a round runs, a mark can be undone
-(un-watch the video) any time before the next round. If the watcher is
-down when a mark is made, the mark stays browser-local only and no
-deletion happens.
+For subscriptions with `keep_watched: true`, the file is moved into a
+`watched` subdirectory of the channel folder instead of being deleted;
+archived files no longer appear in the index. Because removal only
+happens when a round runs, a mark can be undone (un-watch the video)
+any time before the next round. If the watcher is down when a mark is
+made, the mark stays browser-local only and no removal happens.
 
 The endpoint binds to `settings.api_host` (default `0.0.0.0`) so the
 browser can reach it; it has no authentication, so anyone who can reach
