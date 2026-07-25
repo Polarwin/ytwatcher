@@ -35,6 +35,10 @@ FAILED_FILE = Path(__file__).parent / "failed.json"
 # Netscape-format cookie export used as a retry when a yt-dlp download
 # fails without cookies. Managed via the API (never committed to git).
 COOKIES_FILE = Path(__file__).parent / "cookies.txt"
+# Duration cache for the index page, keyed by file's relative path and
+# validated by size+mtime. Populated at download time from yt-dlp's
+# after_move printout; deleting it just loses the durations.
+DURATIONS_FILE = Path(__file__).parent / "durations.json"
 
 # Download attempts before a failing video is marked as seen for good.
 MAX_DOWNLOAD_ATTEMPTS = 5
@@ -429,6 +433,65 @@ def format_size(size):
         value /= 1024
 
 
+def format_duration(seconds):
+    """Return seconds as m:ss or h:mm:ss."""
+    hours, rem = divmod(int(seconds), 3600)
+    minutes, secs = divmod(rem, 60)
+    if hours:
+        return f"{hours}:{minutes:02d}:{secs:02d}"
+    return f"{minutes}:{secs:02d}"
+
+
+def load_durations():
+    """Return the ffprobe duration cache: {rel path: {duration, size, mtime}}."""
+    if DURATIONS_FILE.exists():
+        try:
+            with open(DURATIONS_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                return data
+        except (json.JSONDecodeError, OSError) as e:
+            log.warning("Could not read durations.json (%s); starting fresh", e)
+    return {}
+
+
+def save_durations(durations):
+    tmp = DURATIONS_FILE.with_suffix(".json.tmp")
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(dict(sorted(durations.items())), f, indent=1)
+    tmp.replace(DURATIONS_FILE)
+
+
+def record_duration(download_dir, path, duration):
+    """Cache a downloaded file's duration (known from yt-dlp) for the index."""
+    if duration is None:
+        return
+    path = Path(path)
+    try:
+        rel = path.relative_to(download_dir).as_posix()
+        stat = path.stat()
+    except (ValueError, OSError):
+        return
+    durations = load_durations()
+    durations[rel] = {
+        "duration": duration, "size": stat.st_size, "mtime": stat.st_mtime,
+    }
+    save_durations(durations)
+
+
+def parse_duration_print(stdout):
+    """Extract the duration from yt-dlp's after_move "filepath<TAB>duration"
+    printout (seconds, int), or None if not found."""
+    duration = None
+    for line in stdout.splitlines():
+        _, _, value = line.rpartition("\t")
+        try:
+            duration = int(float(value.strip()))
+        except ValueError:
+            pass
+    return duration
+
+
 def scan_downloads(download_dir):
     """Scan download_dir recursively and group video files by top-level subfolder.
 
@@ -436,11 +499,16 @@ def scan_downloads(download_dir):
     keep_watched: true) are not listed. Returns an ordered dict mapping
     channel/subfolder name to a list of entries sorted newest-first by
     file mtime. Each entry is a dict with keys: rel, name, size, mtime,
-    channel.
+    channel, duration (seconds, or None if not in the cache).
+
+    Durations come from durations.json (recorded at download time from
+    yt-dlp's after_move printout), validated by size+mtime; files without
+    a matching cache entry simply show no duration.
     """
     root = Path(download_dir)
     if not root.is_dir():
         return {}
+    durations = load_durations()
     groups = {}
     for path in root.rglob("*"):
         if not is_video_file(path):
@@ -453,13 +521,25 @@ def scan_downloads(download_dir):
         else:
             channel = "(root)"
         stat = path.stat()
+        rel_posix = rel.as_posix()
+        cached = durations.get(rel_posix)
+        duration = None
+        if (cached and cached.get("size") == stat.st_size
+                and cached.get("mtime") == stat.st_mtime):
+            duration = cached.get("duration")
         groups.setdefault(channel, []).append({
-            "rel": rel.as_posix(),
+            "rel": rel_posix,
             "name": path.name,
             "size": stat.st_size,
             "mtime": stat.st_mtime,
             "channel": channel,
+            "duration": duration,
         })
+    # Drop cache entries for files that no longer exist.
+    seen_rels = {e["rel"] for entries in groups.values() for e in entries}
+    pruned = {k: v for k, v in durations.items() if k in seen_rels}
+    if pruned != durations:
+        save_durations(pruned)
     for entries in groups.values():
         entries.sort(key=lambda e: e["mtime"], reverse=True)
     return dict(sorted(groups.items(), key=lambda kv: kv[0].casefold()))
@@ -468,7 +548,7 @@ def scan_downloads(download_dir):
 # Bump when the index.html template changes: the fingerprint below only
 # covers the file listing, so without this an existing index.html would
 # keep the old template until some video is added or removed.
-INDEX_TEMPLATE_VERSION = 4
+INDEX_TEMPLATE_VERSION = 7
 
 
 def fingerprint(groups, site_title=""):
@@ -572,6 +652,24 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "    }",
         "    #cookies-text { height: 8rem; }",
         "    #cookies-file { display: block; margin-top: .5rem; color: #999; }",
+        "    .playlist { margin-bottom: 2rem; }",
+        "    .playlist button {",
+        "      padding: .4rem .8rem; background: #2a2a2a; border: 1px solid #444;",
+        "      border-radius: 4px; color: #e0e0e0; cursor: pointer;",
+        "    }",
+        "    .playlist button:hover { background: #3a3a3a; color: #fff; }",
+        "    .pl-controls { display: flex; gap: .75rem; align-items: center; margin-top: .5rem; }",
+        "    .pl-controls label { color: #bbb; font-size: .9rem; }",
+        "    #pl-empty { color: #999; font-size: .9rem; }",
+        "    #pl-video { width: 100%; max-height: 70vh; margin-top: .75rem; background: #000; }",
+        "    #pl-now { color: #8ab4f8; margin-top: .5rem; font-size: .95rem; }",
+        "    li.pl-current a { color: #7bd88a; }",
+        "    .pl-remove { flex-shrink: 0; }",
+        # Queued-state cues: text/shape changes carry the meaning (color-
+        # blind safe); the green tint is only a secondary hint.
+        "    .watch-btn.pl-added { color: #7bd88a; border-color: #7bd88a; }",
+        "    li.pl-queued > a { font-weight: bold; }",
+        "    li.pl-queued > a::before { content: \"\\2261  \"; color: #7bd88a; }",
         "    li.watched { opacity: .45; }",
         "    li.watched a { text-decoration: line-through; }",
         "    li.watched .watch-btn { color: #7bd88a; border-color: #7bd88a; }",
@@ -624,16 +722,38 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         '    </section>',
     ])
 
+    lines.extend([
+        '    <section class="playlist">',
+        '      <h2>Playlist</h2>',
+        '      <p id="pl-empty">Empty &mdash; add videos with the + Playlist buttons below.</p>',
+        '      <ul id="pl-items"></ul>',
+        '      <div class="pl-controls">',
+        '        <button type="button" id="pl-play">Play</button>',
+        '        <label><input type="checkbox" id="pl-repeat"> Repeat</label>',
+        '        <button type="button" id="pl-clear">Clear</button>',
+        '      </div>',
+        '      <div id="pl-player" hidden>',
+        '        <video id="pl-video" controls playsinline></video>',
+        '        <div id="pl-now"></div>',
+        '      </div>',
+        '    </section>',
+    ])
+
     def entry_lines(entry, show_channel=False):
         href = urllib.parse.quote(entry["rel"], safe="/")
         size = format_size(entry["size"])
         mtime_str = datetime.fromtimestamp(entry["mtime"]).strftime("%Y-%m-%d %H:%M")
         meta_parts = [mtime_str, size]
+        if entry.get("duration"):
+            meta_parts.insert(0, format_duration(entry["duration"]))
         if show_channel:
             meta_parts.insert(0, html.escape(entry.get("channel", "")))
         data_attr = f' data-id="{entry_id(entry)}"'
         watch_btn = (
             '          <button class="watch-btn" type="button">Mark watched</button>'
+        )
+        pl_add_btn = (
+            '          <button class="watch-btn pl-add" type="button">+ Playlist</button>'
         )
         return [line for line in [
             f"        <li{data_attr}>",
@@ -642,6 +762,7 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
                 f"{html.escape(entry['name'])}</a>"
             ),
             watch_btn,
+            pl_add_btn,
             f'          <span class="meta">{" &middot; ".join(meta_parts)}</span>',
             "        </li>",
         ] if line]
@@ -786,6 +907,104 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "      });",
         "    }).catch(function () { cookiesStatus.textContent = \"save failed (API unreachable)\"; });",
         "  });",
+        "  var PL_KEY = \"ytwatcher:playlist\";",
+        "  var PL_REPEAT_KEY = \"ytwatcher:playlist-repeat\";",
+        "  function plLoad() {",
+        "    try { return JSON.parse(localStorage.getItem(PL_KEY) || \"[]\"); }",
+        "    catch (e) { return []; }",
+        "  }",
+        "  var pl = plLoad();",
+        "  function plSave() { localStorage.setItem(PL_KEY, JSON.stringify(pl)); }",
+        "  var plItems = document.getElementById(\"pl-items\");",
+        "  var plEmpty = document.getElementById(\"pl-empty\");",
+        "  var plPlayer = document.getElementById(\"pl-player\");",
+        "  var plVideo = document.getElementById(\"pl-video\");",
+        "  var plNow = document.getElementById(\"pl-now\");",
+        "  var plRepeat = document.getElementById(\"pl-repeat\");",
+        "  var plIndex = -1;",
+        "  function plRemoveAt(i) {",
+        "    pl.splice(i, 1);",
+        "    if (plIndex === i) { plIndex = -1; plVideo.pause(); plPlayer.hidden = true; }",
+        "    else if (plIndex > i) { plIndex--; }",
+        "    plSave();",
+        "    plRender();",
+        "  }",
+        "  function plRender() {",
+        "    plItems.innerHTML = \"\";",
+        "    plEmpty.style.display = pl.length ? \"none\" : \"\";",
+        "    pl.forEach(function (item, i) {",
+        "      var li = document.createElement(\"li\");",
+        "      if (i === plIndex) li.className = \"pl-current\";",
+        "      var a = document.createElement(\"a\");",
+        "      a.href = item.href;",
+        "      a.textContent = item.name;",
+        "      a.title = item.name;",
+        "      a.addEventListener(\"click\", function (ev) { ev.preventDefault(); plPlayAt(i); });",
+        "      var rm = document.createElement(\"button\");",
+        "      rm.className = \"pl-remove\";",
+        "      rm.type = \"button\";",
+        "      rm.textContent = \"\\u2715\";",
+        "      rm.addEventListener(\"click\", function () { plRemoveAt(i); });",
+        "      li.appendChild(a);",
+        "      li.appendChild(rm);",
+        "      plItems.appendChild(li);",
+        "    });",
+        "    plUpdateButtons();",
+        "  }",
+        "  function plPlayAt(i) {",
+        "    if (i < 0 || i >= pl.length) return;",
+        "    plIndex = i;",
+        "    plPlayer.hidden = false;",
+        "    plNow.textContent = (i + 1) + \"/\" + pl.length + \" \\u2014 \" + pl[i].name;",
+        "    plVideo.src = pl[i].href;",
+        "    plVideo.play().catch(function () {});",
+        "    plRender();",
+        "  }",
+        "  plVideo.addEventListener(\"ended\", function () {",
+        "    var next = plIndex + 1;",
+        "    if (next >= pl.length) {",
+        "      if (!plRepeat.checked) { plIndex = -1; plRender(); return; }",
+        "      next = 0;",
+        "    }",
+        "    plPlayAt(next);",
+        "  });",
+        "  plRepeat.checked = localStorage.getItem(PL_REPEAT_KEY) === \"1\";",
+        "  plRepeat.addEventListener(\"change\", function () {",
+        "    localStorage.setItem(PL_REPEAT_KEY, plRepeat.checked ? \"1\" : \"0\");",
+        "  });",
+        "  document.getElementById(\"pl-play\").addEventListener(\"click\", function () {",
+        "    plPlayAt(plIndex >= 0 ? plIndex : 0);",
+        "  });",
+        "  document.getElementById(\"pl-clear\").addEventListener(\"click\", function () {",
+        "    pl = [];",
+        "    plIndex = -1;",
+        "    plVideo.pause();",
+        "    plPlayer.hidden = true;",
+        "    plSave();",
+        "    plRender();",
+        "  });",
+        "  function plUpdateButtons() {",
+        "    document.querySelectorAll(\".pl-add\").forEach(function (btn) {",
+        "      var li = btn.closest(\"li\");",
+        "      var href = li.querySelector(\"a\").getAttribute(\"href\");",
+        "      var queued = pl.some(function (item) { return item.href === href; });",
+        "      li.classList.toggle(\"pl-queued\", queued);",
+        "      btn.classList.toggle(\"pl-added\", queued);",
+        "      btn.textContent = queued ? \"\\u2713 In playlist\" : \"+ Playlist\";",
+        "    });",
+        "  }",
+        "  document.querySelectorAll(\".pl-add\").forEach(function (btn) {",
+        "    btn.addEventListener(\"click\", function () {",
+        "      var a = btn.closest(\"li\").querySelector(\"a\");",
+        "      var href = a.getAttribute(\"href\");",
+        "      var idx = pl.findIndex(function (item) { return item.href === href; });",
+        "      if (idx >= 0) { plRemoveAt(idx); return; }",
+        "      pl.push({ href: href, name: a.textContent });",
+        "      plSave();",
+        "      plRender();",
+        "    });",
+        "  });",
+        "  plRender();",
         "  var applyFns = [];",
         "  function applyAll() { applyFns.forEach(function (fn) { fn(); }); }",
         '  document.querySelectorAll("ul").forEach(function (ul) {',
@@ -1221,6 +1440,11 @@ def run_yt_dlp(cmd):
 
 
 def download_video(sub, video, download_dir):
+    """Download a subscription video.
+
+    Returns (status, file path, duration). status is "ok", "failed",
+    "members_only", or "live"; path and duration are None unless "ok".
+    """
     out_dir = Path(download_dir) / sub["name"]
     out_dir.mkdir(parents=True, exist_ok=True)
     cmd = [
@@ -1228,19 +1452,20 @@ def download_video(sub, video, download_dir):
         "-f", sub["quality"],
         "-o", str(out_dir / "%(title)s [%(id)s].%(ext)s"),
         "--no-playlist",
+        "--print", "after_move:%(filepath)s\t%(duration)s",
         f"https://www.youtube.com/watch?v={video['id']}",
     ]
     result = run_yt_dlp(cmd)
     if result.returncode != 0:
         if is_members_only_error(result.stderr):
-            return "members_only", None
+            return "members_only", None, None
         if is_live_error(result.stderr):
-            return "live", None
+            return "live", None, None
         log.error(
             "[%s] download FAILED for %s: %s",
             sub["name"], video["id"], result.stderr.strip()[:300],
         )
-        return "failed", None
+        return "failed", None, None
     # Locate the finished file by the video id embedded in its name.
     downloaded = None
     for f in out_dir.iterdir():
@@ -1254,8 +1479,8 @@ def download_video(sub, video, download_dir):
             "[%s] could not locate downloaded file for %s, will retry",
             sub["name"], video["id"],
         )
-        return "failed", None
-    return "ok", downloaded
+        return "failed", None, None
+    return "ok", downloaded, parse_duration_print(result.stdout)
 
 
 def download_manually(url, out_dir, fmt=None, sort=None):
@@ -1270,7 +1495,7 @@ def download_manually(url, out_dir, fmt=None, sort=None):
     cmd = [
         YT_DLP,
         "--no-playlist",
-        "--print", "after_move:filepath",
+        "--print", "after_move:%(filepath)s\t%(duration)s",
         "-o", str(out_dir / "%(title)s [%(id)s].%(ext)s"),
     ]
     if fmt:
@@ -1289,7 +1514,8 @@ def download_manually(url, out_dir, fmt=None, sort=None):
         return None
     downloaded = None
     for line in result.stdout.splitlines():
-        path = Path(line.strip())
+        path_str, _, _ = line.rpartition("\t")
+        path = Path(path_str.strip())
         if path.is_file() and path.parent == out_dir and is_video_file(path):
             downloaded = path
     if downloaded is None:
@@ -1304,6 +1530,9 @@ def download_manually(url, out_dir, fmt=None, sort=None):
     timestamp = fetch_upload_timestamp(match.group(1))
     if timestamp:
         set_mtime(downloaded, timestamp)
+    # out_dir is download_dir/manually, so its parent is the index root.
+    record_duration(out_dir.parent, downloaded,
+                    parse_duration_print(result.stdout))
     return match.group(1), downloaded
 
 
@@ -1491,7 +1720,8 @@ def process_subscription(sub, settings, seen, failed, scan_only=False):
         log.info("[%s] matched: %s", name, video["title"])
         log.info("[%s] downloading: %s", name, video["title"])
         try:
-            status, downloaded = download_video(sub, video, settings["download_dir"])
+            status, downloaded, duration = download_video(
+                sub, video, settings["download_dir"])
             if status == "ok":
                 failed.pop(video["id"], None)
                 if downloaded:
@@ -1500,6 +1730,7 @@ def process_subscription(sub, settings, seen, failed, scan_only=False):
                     timestamp = video.get("timestamp") or fetch_upload_timestamp(video["id"])
                     if timestamp:
                         set_mtime(downloaded, timestamp)
+                    record_duration(settings["download_dir"], downloaded, duration)
                 size = downloaded.stat().st_size if downloaded else 0
                 completed.append({
                     "channel": name,

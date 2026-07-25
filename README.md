@@ -137,12 +137,26 @@ After any round that completes a download, `main.py` rebuilds
 videos by channel subfolder, newest first within each group, and links to each
 file with a relative path so it works behind nginx. It only rewrites the file
 when the listing actually changes, so `index.html` is not touched on rounds
-with no new downloads.
+with no new downloads. Each entry shows its duration (reported by yt-dlp
+at download time and cached in `durations.json`, keyed by path and
+validated by size+mtime; files that didn't go through the downloader
+simply show no duration), upload date, and size.
 
 Each entry has a **Mark watched** button. Watched videos are dimmed,
 struck through, and moved to the bottom of their list. The watched state
 is kept in the browser's `localStorage` (keyed by the YouTube video ID in
 the filename), so it survives index rebuilds.
+
+Each entry also has a **+ Playlist** button. Queued entries are marked
+without relying on color: the button reads **✓ In playlist** (click it
+again to remove the video) and the link gets a "≡" marker and bold text.
+The playlist lives in the browser's `localStorage` and is shown in the
+**Playlist** section at the top of the page: **Play** starts an embedded
+player that plays the queued videos one after another, **Repeat** loops
+the playlist indefinitely, and **Clear** empties it. Clicking a queued
+item jumps to it; the ✕ button removes it. The queue and the repeat
+setting survive page reloads, but are per-browser, like the watched
+marks.
 
 Manually downloaded videos work too: drop the file anywhere under
 `download_dir` and it appears in the index after the next rebuild. Since

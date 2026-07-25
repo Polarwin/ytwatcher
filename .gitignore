@@ -4,6 +4,7 @@ __pycache__/
 state.json
 watched.json
 failed.json
+durations.json
 subscriptions.yaml
 cookies.txt
 downloads/
