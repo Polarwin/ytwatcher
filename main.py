@@ -19,6 +19,7 @@ import sys
 import threading
 import time
 import urllib.parse
+import uuid
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -31,12 +32,16 @@ CONFIG_FILE = Path(__file__).parent / "subscriptions.yaml"
 STATE_FILE = Path(__file__).parent / "state.json"
 WATCHED_FILE = Path(__file__).parent / "watched.json"
 FAILED_FILE = Path(__file__).parent / "failed.json"
+# Netscape-format cookie export used as a retry when a yt-dlp download
+# fails without cookies. Managed via the API (never committed to git).
+COOKIES_FILE = Path(__file__).parent / "cookies.txt"
 
 # Download attempts before a failing video is marked as seen for good.
 MAX_DOWNLOAD_ATTEMPTS = 5
 
-# Port for the tiny HTTP endpoint that receives "watched" marks from the
-# browser. Overridable via settings.api_port in subscriptions.yaml.
+# Port for the embedded HTTP API used by the index page (watched marks,
+# config editing, manual downloads). Overridable via settings.api_port in
+# subscriptions.yaml.
 DEFAULT_API_PORT = 8791
 
 # Title shown on the generated index.html page (<title> and <h1>).
@@ -215,6 +220,27 @@ def note_download_failure(name, video, failed, seen):
 
 
 _watched_lock = threading.Lock()
+
+# Guards load_state/save_state: besides the watcher loop, manual download
+# jobs (CLI or API) also record their video IDs in state.json.
+_state_lock = threading.Lock()
+
+# Quality presets for the manual-download API endpoint. Raw format strings
+# are not accepted over the network — the endpoint is unauthenticated, so
+# keep the surface to these fixed choices.
+MANUAL_QUALITY_PRESETS = {
+    "720": "bestvideo[height<=720]+bestaudio/best[height<=720]",
+    "best": "bestvideo+bestaudio/best",
+    "audio": "bestaudio",
+}
+
+# Default format for manual_download.py when neither -f nor -S is given.
+MANUAL_DEFAULT_FORMAT = MANUAL_QUALITY_PRESETS["720"]
+
+# In-memory status of recent manual download jobs started via the API.
+MAX_DOWNLOAD_JOBS = 20
+_download_jobs = {}
+_download_jobs_lock = threading.Lock()
 
 
 def load_watched():
@@ -439,6 +465,12 @@ def scan_downloads(download_dir):
     return dict(sorted(groups.items(), key=lambda kv: kv[0].casefold()))
 
 
+# Bump when the index.html template changes: the fingerprint below only
+# covers the file listing, so without this an existing index.html would
+# keep the old template until some video is added or removed.
+INDEX_TEMPLATE_VERSION = 4
+
+
 def fingerprint(groups, site_title=""):
     """Return a stable hash of the current download listing and page title."""
     data = []
@@ -451,7 +483,9 @@ def fingerprint(groups, site_title=""):
             ],
         })
     canonical = json.dumps(data, sort_keys=True, ensure_ascii=True, separators=(",", ":"))
-    return hashlib.sha1((site_title + "\n" + canonical).encode("utf-8")).hexdigest()
+    return hashlib.sha1(
+        (f"{INDEX_TEMPLATE_VERSION}\n" + site_title + "\n" + canonical).encode("utf-8")
+    ).hexdigest()
 
 
 def read_existing_fingerprint(index_path):
@@ -517,6 +551,27 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "      cursor: pointer;",
         "    }",
         "    .watch-btn:hover { background: #3a3a3a; color: #fff; }",
+        "    .tools { margin-bottom: 2rem; }",
+        "    .tools form { display: flex; gap: .5rem; flex-wrap: wrap; align-items: center; }",
+        "    .tools input[type=url] {",
+        "      flex: 1; min-width: 200px; padding: .4rem .6rem;",
+        "      background: #1e1e1e; border: 1px solid #444; border-radius: 4px; color: #e0e0e0;",
+        "    }",
+        "    .tools select, .tools button {",
+        "      padding: .4rem .8rem; background: #2a2a2a; border: 1px solid #444;",
+        "      border-radius: 4px; color: #e0e0e0; cursor: pointer;",
+        "    }",
+        "    .tools button:hover { background: #3a3a3a; color: #fff; }",
+        "    .tool-status { color: #999; font-size: .85rem; }",
+        "    .tools details { margin-top: 1rem; }",
+        "    .tools summary { cursor: pointer; color: #8ab4f8; }",
+        "    #config-text, #cookies-text {",
+        "      width: 100%; box-sizing: border-box; height: 20rem; margin: .5rem 0;",
+        "      background: #1e1e1e; border: 1px solid #444; border-radius: 4px;",
+        "      color: #e0e0e0; font-family: monospace; padding: .5rem;",
+        "    }",
+        "    #cookies-text { height: 8rem; }",
+        "    #cookies-file { display: block; margin-top: .5rem; color: #999; }",
         "    li.watched { opacity: .45; }",
         "    li.watched a { text-decoration: line-through; }",
         "    li.watched .watch-btn { color: #7bd88a; border-color: #7bd88a; }",
@@ -534,6 +589,40 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         f"      <p>Last updated: {html.escape(now_str)} &mdash; {total} video(s) across {channels} channel(s)</p>",
         "    </header>",
     ]
+
+    lines.extend([
+        '    <section class="tools">',
+        '      <form id="dl-form">',
+        '        <input type="url" id="dl-url" '
+        'placeholder="https://www.youtube.com/watch?v=&hellip;" required>',
+        '        <select id="dl-quality">',
+        '          <option value="720" selected>720p</option>',
+        '          <option value="best">Best</option>',
+        '          <option value="audio">Audio only</option>',
+        '        </select>',
+        '        <button type="submit">Download</button>',
+        '        <span class="tool-status" id="dl-status"></span>',
+        '      </form>',
+        '      <details id="config-editor">',
+        '        <summary>Edit subscriptions</summary>',
+        '        <textarea id="config-text" spellcheck="false"></textarea>',
+        '        <button type="button" id="config-save">Save</button>',
+        '        <span class="tool-status" id="config-status"></span>',
+        '      </details>',
+        '      <details id="cookies-editor">',
+        '        <summary>Cookies for yt-dlp</summary>',
+        '        <p class="tool-status">Used automatically as a retry when a download '
+        'fails without cookies. Paste a Netscape cookies.txt export (e.g. from a '
+        'browser extension); saving replaces the current cookies, saving an empty '
+        'box removes them. Saved cookies are never displayed here.</p>',
+        '        <input type="file" id="cookies-file" accept=".txt,text/plain">',
+        '        <textarea id="cookies-text" spellcheck="false" '
+        'placeholder="# Netscape HTTP Cookie File"></textarea>',
+        '        <button type="button" id="cookies-save">Save cookies</button>',
+        '        <span class="tool-status" id="cookies-status"></span>',
+        '      </details>',
+        '    </section>',
+    ])
 
     def entry_lines(entry, show_channel=False):
         href = urllib.parse.quote(entry["rel"], safe="/")
@@ -580,6 +669,7 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         f"<!-- index-fingerprint: {fp} -->",
         "<script>",
         "(function () {",
+        '  var API = "http://" + location.hostname + ":' + str(api_port) + '";',
         '  var KEY = "ytwatcher:watched";',
         "  function load() {",
         "    try { return new Set(JSON.parse(localStorage.getItem(KEY) || '[]')); }",
@@ -588,12 +678,114 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "  function save(s) { localStorage.setItem(KEY, JSON.stringify(Array.from(s))); }",
         "  var watched = load();",
         "  function report(id, isWatched) {",
-        '    fetch("http://" + location.hostname + ":' + str(api_port) + '/watched", {',
+        '    fetch(API + "/watched", {',
         '      method: "POST",',
         '      headers: { "Content-Type": "text/plain" },',
         '      body: JSON.stringify({ id: id, watched: isWatched }),',
         "    }).catch(function () {});",
         "  }",
+        "  var dlForm = document.getElementById(\"dl-form\");",
+        "  var dlStatus = document.getElementById(\"dl-status\");",
+        "  function pollDownloads(jobId) {",
+        "    fetch(API + \"/downloads\").then(function (r) { return r.json(); }).then(function (data) {",
+        "      var job = null;",
+        "      (data.jobs || []).forEach(function (j) { if (j.id === jobId) job = j; });",
+        "      if (!job) { dlStatus.textContent = \"\"; return; }",
+        "      if (job.status === \"running\") {",
+        "        dlStatus.textContent = \"downloading\\u2026\";",
+        "        setTimeout(function () { pollDownloads(jobId); }, 3000);",
+        "      } else if (job.status === \"done\") {",
+        "        dlStatus.textContent = \"done \\u2014 reloading\\u2026\";",
+        "        setTimeout(function () { location.reload(); }, 1500);",
+        "      } else {",
+        "        dlStatus.textContent = \"failed: \" + (job.error || \"unknown error\");",
+        "      }",
+        "    }).catch(function () {",
+        "      setTimeout(function () { pollDownloads(jobId); }, 5000);",
+        "    });",
+        "  }",
+        "  dlForm.addEventListener(\"submit\", function (ev) {",
+        "    ev.preventDefault();",
+        "    var url = document.getElementById(\"dl-url\").value.trim();",
+        "    var quality = document.getElementById(\"dl-quality\").value;",
+        "    if (!url) return;",
+        "    dlStatus.textContent = \"starting\\u2026\";",
+        "    fetch(API + \"/download\", {",
+        "      method: \"POST\",",
+        "      headers: { \"Content-Type\": \"application/json\" },",
+        "      body: JSON.stringify({ url: url, quality: quality }),",
+        "    }).then(function (r) {",
+        "      if (!r.ok) return r.json().then(function (d) { throw new Error(d.error || (\"HTTP \" + r.status)); });",
+        "      return r.json();",
+        "    }).then(function (d) {",
+        "      dlStatus.textContent = \"downloading\\u2026\";",
+        "      pollDownloads(d.job_id);",
+        "    }).catch(function (e) {",
+        "      dlStatus.textContent = \"failed: \" + e.message;",
+        "    });",
+        "  });",
+        "  var configEditor = document.getElementById(\"config-editor\");",
+        "  var configText = document.getElementById(\"config-text\");",
+        "  var configStatus = document.getElementById(\"config-status\");",
+        "  var configLoaded = false;",
+        "  configEditor.addEventListener(\"toggle\", function () {",
+        "    if (!configEditor.open || configLoaded) return;",
+        "    configStatus.textContent = \"loading\\u2026\";",
+        "    fetch(API + \"/config\").then(function (r) { return r.text(); }).then(function (text) {",
+        "      configText.value = text;",
+        "      configLoaded = true;",
+        "      configStatus.textContent = \"\";",
+        "    }).catch(function () { configStatus.textContent = \"could not load config\"; });",
+        "  });",
+        "  document.getElementById(\"config-save\").addEventListener(\"click\", function () {",
+        "    configStatus.textContent = \"saving\\u2026\";",
+        "    fetch(API + \"/config\", {",
+        "      method: \"POST\",",
+        "      headers: { \"Content-Type\": \"text/plain\" },",
+        "      body: configText.value,",
+        "    }).then(function (r) {",
+        "      if (r.ok) { configStatus.textContent = \"saved \\u2014 applies from the next scan round\"; return; }",
+        "      return r.json().then(function (d) {",
+        "        configStatus.textContent = \"not saved: \" + (d.problems || [d.error || (\"HTTP \" + r.status)]).join(\"; \");",
+        "      });",
+        "    }).catch(function () { configStatus.textContent = \"save failed (API unreachable)\"; });",
+        "  });",
+        "  document.getElementById(\"cookies-file\").addEventListener(\"change\", function () {",
+        "    var f = this.files[0];",
+        "    if (!f) return;",
+        "    f.text().then(function (text) {",
+        "      document.getElementById(\"cookies-text\").value = text;",
+        "      cookiesStatus.textContent = \"loaded \" + f.name + \" \\u2014 click Save cookies\";",
+        "    });",
+        "  });",
+        "  var cookiesEditor = document.getElementById(\"cookies-editor\");",
+        "  var cookiesText = document.getElementById(\"cookies-text\");",
+        "  var cookiesStatus = document.getElementById(\"cookies-status\");",
+        "  var cookiesLoaded = false;",
+        "  function showCookiesState(d) {",
+        "    cookiesStatus.textContent = d.set ? (\"cookies set (\" + d.lines + \" cookies)\") : \"no cookies set\";",
+        "  }",
+        "  cookiesEditor.addEventListener(\"toggle\", function () {",
+        "    if (!cookiesEditor.open || cookiesLoaded) return;",
+        "    fetch(API + \"/cookies\").then(function (r) { return r.json(); }).then(function (d) {",
+        "      cookiesLoaded = true;",
+        "      showCookiesState(d);",
+        "    }).catch(function () { cookiesStatus.textContent = \"could not query cookies state\"; });",
+        "  });",
+        "  document.getElementById(\"cookies-save\").addEventListener(\"click\", function () {",
+        "    cookiesStatus.textContent = \"saving\\u2026\";",
+        "    fetch(API + \"/cookies\", {",
+        "      method: \"POST\",",
+        "      headers: { \"Content-Type\": \"text/plain\" },",
+        "      body: cookiesText.value,",
+        "    }).then(function (r) {",
+        "      return r.json().then(function (d) {",
+        "        if (!r.ok) { cookiesStatus.textContent = \"not saved: \" + (d.error || (\"HTTP \" + r.status)); return; }",
+        "        cookiesText.value = \"\";",
+        "        showCookiesState(d);",
+        "      });",
+        "    }).catch(function () { cookiesStatus.textContent = \"save failed (API unreachable)\"; });",
+        "  });",
         "  var applyFns = [];",
         "  function applyAll() { applyFns.forEach(function (fn) { fn(); }); }",
         '  document.querySelectorAll("ul").forEach(function (ul) {',
@@ -660,7 +852,7 @@ def update_index_html(download_dir, api_port=DEFAULT_API_PORT, site_title=DEFAUL
 
 
 # ---------------------------------------------------------------------------
-# Watched marks: HTTP endpoint + deletion
+# HTTP API: watched marks, config editing, manual downloads (+ deletion)
 # ---------------------------------------------------------------------------
 
 
@@ -706,34 +898,97 @@ def delete_watched_videos(download_dir, watched_ids, keep_channels=()):
     return removed
 
 
-class WatchedHandler(BaseHTTPRequestHandler):
-    """Receives watched/unwatched marks from the index page.
+class ApiHandler(BaseHTTPRequestHandler):
+    """HTTP API backing the index page.
 
-    POST /watched with a JSON body {"id": "<video id>", "watched": true}
-    adds or removes the ID in watched.json. Nothing here deletes files;
-    deletion happens at the start of the next scan round, so an accidental
-    mark can be undone before the round runs.
+    POST /watched   {"id": "<video id>", "watched": true} adds or removes
+                    the ID in watched.json. Nothing here deletes files;
+                    deletion happens at the start of the next scan round,
+                    so an accidental mark can be undone before it runs.
+    GET  /config    returns the raw subscriptions.yaml text.
+    POST /config    replaces subscriptions.yaml (raw YAML body) after
+                    validation; 400 with {"problems": [...]} if invalid.
+    POST /download  {"url": "...", "quality": "720"|"best"|"audio"} starts
+                    a manual download job; 202 with {"job_id": "..."}.
+    GET  /downloads returns the status of recent manual download jobs.
+    GET  /cookies   returns whether cookies.txt is set (never its content).
+    POST /cookies   replaces cookies.txt (raw Netscape export body); an
+                    empty body removes it.
     """
 
     def _cors(self):
         self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type")
+
+    def _json(self, status, data):
+        body = json.dumps(data).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self._cors()
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _read_body(self):
+        length = int(self.headers.get("Content-Length", 0))
+        return self.rfile.read(length)
 
     def do_OPTIONS(self):
         self.send_response(204)
         self._cors()
         self.end_headers()
 
-    def do_POST(self):
-        if self.path != "/watched":
-            self.send_response(404)
+    def do_GET(self):
+        if self.path == "/config":
+            try:
+                body = CONFIG_FILE.read_bytes()
+            except OSError as e:
+                self._json(500, {"error": str(e)})
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
             self._cors()
             self.end_headers()
-            return
+            self.wfile.write(body)
+        elif self.path == "/cookies":
+            # Report only whether cookies are set — never the content:
+            # this API is unauthenticated, and cookies are a session secret.
+            lines = 0
+            if COOKIES_FILE.exists():
+                try:
+                    lines = sum(
+                        1 for line in
+                        COOKIES_FILE.read_text(encoding="utf-8").splitlines()
+                        if line.strip() and not line.startswith("#")
+                    )
+                except OSError:
+                    pass
+            self._json(200, {"set": COOKIES_FILE.exists(), "lines": lines})
+        elif self.path == "/downloads":
+            with _download_jobs_lock:
+                jobs = sorted(_download_jobs.values(),
+                              key=lambda j: j["created"], reverse=True)
+            self._json(200, {"jobs": jobs})
+        else:
+            self._json(404, {"error": "not found"})
+
+    def do_POST(self):
+        if self.path == "/watched":
+            self._post_watched()
+        elif self.path == "/config":
+            self._post_config()
+        elif self.path == "/download":
+            self._post_download()
+        elif self.path == "/cookies":
+            self._post_cookies()
+        else:
+            self._json(404, {"error": "not found"})
+
+    def _post_watched(self):
         try:
-            length = int(self.headers.get("Content-Length", 0))
-            data = json.loads(self.rfile.read(length) or b"{}")
+            data = json.loads(self._read_body() or b"{}")
             video_id = data.get("id", "")
             if not re.fullmatch(r"[A-Za-z0-9_-]{11}", video_id):
                 raise ValueError(f"bad video id: {video_id!r}")
@@ -748,23 +1003,101 @@ class WatchedHandler(BaseHTTPRequestHandler):
                 "marked %s: %s",
                 "watched" if data.get("watched") else "unwatched", video_id,
             )
-            self.send_response(200)
+            self._json(200, {"ok": True})
         except (ValueError, json.JSONDecodeError) as e:
             log.warning("bad /watched request: %s", e)
-            self.send_response(400)
-        self._cors()
-        self.end_headers()
+            self._json(400, {"error": str(e)})
+
+    def _post_config(self):
+        text = self._read_body().decode("utf-8", errors="replace")
+        problems = save_config_text(text)
+        if problems:
+            for problem in problems:
+                log.warning("rejected config edit: %s", problem)
+            self._json(400, {"problems": problems})
+            return
+        log.info("subscriptions.yaml updated via API")
+        self._json(200, {"ok": True})
+
+    def _post_cookies(self):
+        text = self._read_body().decode("utf-8", errors="replace")
+        if not text.strip():
+            try:
+                COOKIES_FILE.unlink(missing_ok=True)
+            except OSError as e:
+                self._json(500, {"error": str(e)})
+                return
+            log.info("cookies.txt removed via API")
+            self._json(200, {"ok": True, "set": False})
+            return
+        # Netscape cookies.txt format: 7 tab-separated fields per line.
+        cookie_lines = [
+            line for line in text.splitlines()
+            if line.strip() and not line.startswith("#")
+        ]
+        if not cookie_lines or any(line.count("\t") < 6 for line in cookie_lines):
+            self._json(400, {
+                "error": "not a Netscape cookies.txt export "
+                         "(each cookie line needs 7 tab-separated fields)",
+            })
+            return
+        try:
+            COOKIES_FILE.write_text(text, encoding="utf-8")
+            COOKIES_FILE.chmod(0o600)
+        except OSError as e:
+            self._json(500, {"error": str(e)})
+            return
+        log.info("cookies.txt updated via API (%d cookie lines)", len(cookie_lines))
+        self._json(200, {"ok": True, "set": True, "lines": len(cookie_lines)})
+
+    def _post_download(self):
+        try:
+            data = json.loads(self._read_body() or b"{}")
+        except json.JSONDecodeError as e:
+            self._json(400, {"error": str(e)})
+            return
+        url = str(data.get("url", "")).strip()
+        quality = data.get("quality", "")
+        if not url.startswith(("http://", "https://")):
+            self._json(400, {"error": "url must start with http:// or https://"})
+            return
+        if quality not in MANUAL_QUALITY_PRESETS:
+            self._json(400, {
+                "error": "quality must be one of " + ", ".join(sorted(MANUAL_QUALITY_PRESETS)),
+            })
+            return
+        job_id = uuid.uuid4().hex[:8]
+        with _download_jobs_lock:
+            _download_jobs[job_id] = {
+                "id": job_id, "url": url, "quality": quality,
+                "status": "running", "error": None, "created": time.time(),
+            }
+            # Cap the job history; never evict a still-running job.
+            while len(_download_jobs) > MAX_DOWNLOAD_JOBS:
+                oldest = min(_download_jobs,
+                             key=lambda k: _download_jobs[k]["created"])
+                if _download_jobs[oldest]["status"] == "running":
+                    break
+                del _download_jobs[oldest]
+        settings = load_config().get("settings", {})
+        thread = threading.Thread(
+            target=run_download_job, args=(job_id, url, quality, settings),
+            daemon=True,
+        )
+        thread.start()
+        log.info("manual download job %s started: %s (%s)", job_id, url, quality)
+        self._json(202, {"job_id": job_id})
 
     def log_message(self, fmt, *args):
-        log.debug("watched-api: " + fmt, *args)
+        log.debug("api: " + fmt, *args)
 
 
-def start_watched_api(host, port):
-    """Start the watched-mark endpoint in a daemon thread."""
-    server = ThreadingHTTPServer((host, port), WatchedHandler)
+def start_api(host, port):
+    """Start the HTTP API in a daemon thread."""
+    server = ThreadingHTTPServer((host, port), ApiHandler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
-    log.info("watched-mark API listening on %s:%d", host, port)
+    log.info("API listening on %s:%d", host, port)
     return server
 
 
@@ -870,6 +1203,23 @@ def fetch_upload_timestamp(video_id):
     return None
 
 
+def run_yt_dlp(cmd):
+    """Run a yt-dlp download command; retry once with cookies.txt on failure.
+
+    Some videos (members-only, age-restricted, bot-checked) only download
+    with a logged-in session. Returns the CompletedProcess of the last
+    attempt. Raises subprocess.TimeoutExpired like subprocess.run.
+    """
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=3600)
+    if result.returncode != 0 and COOKIES_FILE.exists():
+        log.info("download failed; retrying with cookies from %s", COOKIES_FILE.name)
+        result = subprocess.run(
+            cmd + ["--cookies", str(COOKIES_FILE)],
+            capture_output=True, text=True, timeout=3600,
+        )
+    return result
+
+
 def download_video(sub, video, download_dir):
     out_dir = Path(download_dir) / sub["name"]
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -880,7 +1230,7 @@ def download_video(sub, video, download_dir):
         "--no-playlist",
         f"https://www.youtube.com/watch?v={video['id']}",
     ]
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=3600)
+    result = run_yt_dlp(cmd)
     if result.returncode != 0:
         if is_members_only_error(result.stderr):
             return "members_only", None
@@ -906,6 +1256,116 @@ def download_video(sub, video, download_dir):
         )
         return "failed", None
     return "ok", downloaded
+
+
+def download_manually(url, out_dir, fmt=None, sort=None):
+    """Download url into out_dir via yt-dlp.
+
+    Returns (video_id, file path) on success, else None. The finished
+    file's path is taken from yt-dlp's after_move printout — a plain
+    "--print id" can't be used here because it implies --skip-download.
+    """
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    cmd = [
+        YT_DLP,
+        "--no-playlist",
+        "--print", "after_move:filepath",
+        "-o", str(out_dir / "%(title)s [%(id)s].%(ext)s"),
+    ]
+    if fmt:
+        cmd += ["-f", fmt]
+    if sort:
+        cmd += ["-S", sort]
+    cmd.append(url)
+    log.info("running: %s", " ".join(cmd))
+    try:
+        result = run_yt_dlp(cmd)
+    except subprocess.TimeoutExpired:
+        log.error("download timed out for %s", url)
+        return None
+    if result.returncode != 0:
+        log.error("download failed for %s:\n%s", url, result.stderr.strip()[:500])
+        return None
+    downloaded = None
+    for line in result.stdout.splitlines():
+        path = Path(line.strip())
+        if path.is_file() and path.parent == out_dir and is_video_file(path):
+            downloaded = path
+    if downloaded is None:
+        log.error("yt-dlp exited 0 for %s but the file was not found", url)
+        return None
+    match = VIDEO_ID_RE.search(downloaded.name)
+    if not match:
+        log.warning("downloaded %s but the filename has no video ID", url)
+        return None
+    # Like watcher downloads, the file's date should reflect the YouTube
+    # upload time, not the download time.
+    timestamp = fetch_upload_timestamp(match.group(1))
+    if timestamp:
+        set_mtime(downloaded, timestamp)
+    return match.group(1), downloaded
+
+
+def record_manual_download(video_id, settings):
+    """Record a manually downloaded video: mark it seen and rebuild the index.
+
+    The ID goes into state.json so the watcher never re-downloads the
+    video, even after the file is deleted via a watched mark.
+    """
+    with _state_lock:
+        seen = load_state()
+        seen.add(video_id)
+        save_state(seen)
+    update_index_html(
+        settings.get("download_dir", "/srv/files"),
+        api_port=settings.get("api_port", DEFAULT_API_PORT),
+        site_title=settings.get("site_title", DEFAULT_SITE_TITLE),
+    )
+
+
+def run_download_job(job_id, url, quality, settings):
+    """Run a manual download job from the API in a background thread."""
+    fmt = MANUAL_QUALITY_PRESETS[quality]
+    out_dir = Path(settings.get("download_dir", "/srv/files")) / "manually"
+    error = None
+    try:
+        result = download_manually(url, out_dir, fmt=fmt)
+    except Exception as e:
+        result = None
+        error = str(e)
+        log.error("manual download job %s errored: %s", job_id, e)
+    with _download_jobs_lock:
+        job = _download_jobs.get(job_id)
+        if job is not None:
+            if result is None:
+                job["status"] = "failed"
+                job["error"] = error or "download failed (see service log)"
+            else:
+                job["status"] = "done"
+                job["video_id"] = result[0]
+    if result is not None:
+        record_manual_download(result[0], settings)
+        log.info("manual download job %s done: %s", job_id, result[0])
+
+
+def save_config_text(text):
+    """Validate raw YAML text and atomically replace subscriptions.yaml.
+
+    Returns a list of problems found; empty means the config was saved.
+    """
+    try:
+        config = yaml.safe_load(text)
+    except yaml.YAMLError as e:
+        return [f"invalid YAML: {e}"]
+    problems = validate_config(config)
+    if problems:
+        return problems
+    tmp = CONFIG_FILE.with_suffix(".yaml.tmp")
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write(text)
+    tmp.replace(CONFIG_FILE)
+    return []
 
 
 def fetch_description(video_id):
@@ -1095,7 +1555,11 @@ def run_round(config, seen, scan_only=False, telegram_token=None, telegram_chat_
         except Exception as e:
             log.error("[%s] unexpected error: %s", sub.get("name", "?"), e)
     if not scan_only:
-        save_state(seen)
+        with _state_lock:
+            # Merge in IDs recorded by manual downloads that finished while
+            # this round was running, so they aren't lost from state.json.
+            seen |= load_state()
+            save_state(seen)
         save_failed(failed)
         if completed:
             try:
@@ -1185,11 +1649,12 @@ def main():
         run_round(config, load_state(), telegram_token=telegram_token, telegram_chat_id=telegram_chat_id)
         return 0
 
-    # Start the endpoint that receives watched marks from the index page.
+    # Start the HTTP API backing the index page (watched marks, config
+    # editing, manual downloads).
     try:
-        start_watched_api(api_host, api_port)
+        start_api(api_host, api_port)
     except Exception as e:
-        log.error("watched-mark API failed to start: %s", e)
+        log.error("API failed to start: %s", e)
 
     # Generate the initial index once at startup so an existing library is
     # browseable before the first new download completes.

@@ -90,8 +90,13 @@ invalid):
 
 ## Manual downloads
 
-`manual_download.py` downloads a single video by URL into
-`download_dir/manually/`, using the best quality up to 720p by default
+The index page has a download form at the top: paste a video URL, pick a
+quality (720p / Best / Audio only), and click **Download**. The page polls
+the API for the job status and reloads once the file appears.
+
+The same thing from the command line: `manual_download.py` downloads a
+single video by URL into `download_dir/manually/`, using the best quality
+up to 720p by default
 (`bestvideo[height<=720]+bestaudio/best[height<=720]`). Override the
 quality with `-f` or `-S`, passed through to yt-dlp exactly as-is:
 
@@ -106,6 +111,24 @@ can be marked watched and the file is deleted at the next scan round like
 any other download. The video ID is also added to `state.json` so the
 watcher never re-downloads it afterwards, and `index.html` is rebuilt
 right away.
+
+## Cookies
+
+Some videos (members-only, age-restricted, bot-checked) only download
+with a logged-in session. If a download — manual or from a subscription —
+fails, yt-dlp automatically retries it once with `cookies.txt` from the
+project directory, when that file exists.
+
+The easiest way to set it up is the **Cookies for yt-dlp** section on the
+index page: export your YouTube cookies in Netscape format (e.g. with a
+"Get cookies.txt" browser extension) and upload the file there — or paste
+the text into the box. Saving replaces the current cookies; saving an
+empty box removes them. The file
+is stored with mode `0600`, is gitignored, and its content is never shown
+in the UI or returned by the API (`GET /cookies` only reports whether
+cookies are set) — paste it only over a connection you trust, since the
+API itself has no encryption or authentication. You can also create
+`cookies.txt` by hand; no restart is needed either way.
 
 ## Download index
 
@@ -129,10 +152,10 @@ pseudo-ID changes if you rename or move the file. Unlike watcher
 downloads, manual files are **never auto-deleted** when marked watched —
 deletion only applies to files whose filename carries a real YouTube ID.
 
-Every mark is also reported to a small HTTP endpoint embedded in the
-watcher (`POST /watched` on `settings.api_port`, default `8791`), which
-records the video ID in `watched.json`. At the start of each scan round,
-the watcher deletes every downloaded file whose video ID is in
+Every mark is also reported to a small HTTP API embedded in the watcher
+(`POST /watched` on `settings.api_port`, default `8791`), which records
+the video ID in `watched.json`. At the start of each scan round, the
+watcher deletes every downloaded file whose video ID is in
 `watched.json`, and the index loses those entries on the next rebuild.
 For subscriptions with `keep_watched: true`, the file is moved into a
 `watched` subdirectory of the channel folder instead of being deleted;
@@ -141,10 +164,25 @@ happens when a round runs, a mark can be undone (un-watch the video)
 any time before the next round. If the watcher is down when a mark is
 made, the mark stays browser-local only and no removal happens.
 
-The endpoint binds to `settings.api_host` (default `0.0.0.0`) so the
-browser can reach it; it has no authentication, so anyone who can reach
-the port can mark IDs for deletion. Keep it on a trusted network or set
-`api_host: 127.0.0.1` and proxy it through nginx.
+The same API also backs the two tools at the top of the index page:
+
+- `POST /download` with `{"url": "...", "quality": "720"|"best"|"audio"}`
+  starts a background manual download (same behavior as
+  `manual_download.py`); `GET /downloads` reports job status.
+- `GET /config` returns the raw `subscriptions.yaml`; `POST /config` with
+  the raw YAML in the body validates it (400 with a problem list on
+  failure) and atomically replaces the file. The watcher re-reads the
+  config every round, so saved edits apply from the next round on — no
+  restart needed.
+- `GET /cookies` reports whether `cookies.txt` is set (never its
+  content); `POST /cookies` with a Netscape cookie export in the body
+  replaces it, or removes it when the body is empty.
+
+The API binds to `settings.api_host` (default `0.0.0.0`) so the browser
+can reach it; it has no authentication, so anyone who can reach the port
+can mark IDs for deletion, rewrite `subscriptions.yaml`, and start
+arbitrary downloads. Keep it on a trusted network or set
+`api_host: 127.0.0.1` and proxy it through nginx with authentication.
 
 ## Telegram notifications
 

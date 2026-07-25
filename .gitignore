@@ -5,6 +5,7 @@ state.json
 watched.json
 failed.json
 subscriptions.yaml
+cookies.txt
 downloads/
 *.log
 .env
