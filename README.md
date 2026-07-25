@@ -88,6 +88,25 @@ invalid):
 .venv/bin/python main.py --check
 ```
 
+## Manual downloads
+
+`manual_download.py` downloads a single video by URL into
+`download_dir/manually/`, using the best quality up to 720p by default
+(`bestvideo[height<=720]+bestaudio/best[height<=720]`). Override the
+quality with `-f` or `-S`, passed through to yt-dlp exactly as-is:
+
+```bash
+.venv/bin/python manual_download.py "https://www.youtube.com/watch?v=..."
+.venv/bin/python manual_download.py -f "bestvideo+bestaudio/best" URL
+.venv/bin/python manual_download.py -S "res:1080" URL
+```
+
+The filename carries the YouTube `[id]`, so the entry on the index page
+can be marked watched and the file is deleted at the next scan round like
+any other download. The video ID is also added to `state.json` so the
+watcher never re-downloads it afterwards, and `index.html` is rebuilt
+right away.
+
 ## Download index
 
 After any round that completes a download, `main.py` rebuilds
