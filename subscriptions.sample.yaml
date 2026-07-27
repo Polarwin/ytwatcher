@@ -2,7 +2,7 @@
 # subscriptions.yaml is gitignored; this sample is tracked in git.
 
 settings:
-  download_dir: /srv/files/
+  download_dir: /srv/files/ytwatcher/
   check_interval_minutes: 30
   recent_videos_to_scan: 10
   api_port: 8791

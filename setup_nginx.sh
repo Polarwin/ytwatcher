@@ -10,7 +10,7 @@ SITE_NAME="homeserver"
 SITE_AVAILABLE="/etc/nginx/sites-available/$SITE_NAME"
 SITE_ENABLED="/etc/nginx/sites-enabled/$SITE_NAME"
 LANDING_ROOT="/srv/www"
-DOWNLOAD_DIR="/srv/files"
+DOWNLOAD_DIR="/srv/files/ytwatcher"
 STOCKTICKER_PORT=8010
 
 # Apps shown on the landing page: "Name|/path/|description"
