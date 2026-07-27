@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Set up the nginx "homeserver" site:
 #   /            -> landing page listing the enabled applications
-#   /ytwatcher/  -> downloaded videos (/srv/files, index.html built by main.py)
+#   /ytwatcher/  -> downloaded videos (download_dir from subscriptions.yaml)
 #   /stockticker/ -> proxy to the stockticker app on 127.0.0.1:8010
 # Idempotent: safe to re-run. Re-run after adding a new app to the APPS list.
 set -euo pipefail
@@ -10,8 +10,14 @@ SITE_NAME="homeserver"
 SITE_AVAILABLE="/etc/nginx/sites-available/$SITE_NAME"
 SITE_ENABLED="/etc/nginx/sites-enabled/$SITE_NAME"
 LANDING_ROOT="/srv/www"
-DOWNLOAD_DIR="/srv/files/ytwatcher"
 STOCKTICKER_PORT=8010
+
+# Videos root comes from subscriptions.yaml (settings.download_dir), falling
+# back to /srv/files/ytwatcher if the key is missing.
+PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DOWNLOAD_DIR=$(grep -E '^[[:space:]]*download_dir:' "$PROJECT_DIR/subscriptions.yaml" \
+    | head -1 | sed -E 's/.*download_dir:[[:space:]]*//; s/[[:space:]]*$//; s|/$||')
+DOWNLOAD_DIR="${DOWNLOAD_DIR:-/srv/files/ytwatcher}"
 
 # Apps shown on the landing page: "Name|/path/|description"
 APPS=(

@@ -23,21 +23,23 @@ from main import (
     set_mtime,
 )
 
-OUT_DIR = Path("/srv/files/ytwatcher/Espanol/Spain/Slow")
 FORMAT = "bestvideo[height<=480]+bestaudio/best[height<=480]"
 VIDEO_IDS = ["4wrt0-tlpiE", "h3YNbFPh0Js"]
+# Output goes under download_dir (from subscriptions.yaml).
+OUT_SUBDIR = Path("Espanol") / "Spain" / "Slow"
 
 
 def main():
     config = load_config()
     settings = config.get("settings", {})
     download_root = Path(settings.get("download_dir", "/srv/files"))
+    out_dir = download_root / OUT_SUBDIR
     failed = []
     for vid in VIDEO_IDS:
         cmd = [
             YT_DLP,
             "-f", FORMAT,
-            "-o", str(OUT_DIR / "%(title)s [%(id)s].%(ext)s"),
+            "-o", str(out_dir / "%(title)s [%(id)s].%(ext)s"),
             "--no-playlist",
             "--print", "after_move:%(filepath)s\t%(duration)s",
             f"https://www.youtube.com/watch?v={vid}",
@@ -51,7 +53,7 @@ def main():
         downloaded = None
         for line in result.stdout.splitlines():
             path = Path(line.rpartition("\t")[0].strip())
-            if path.is_file() and path.parent == OUT_DIR and is_video_file(path):
+            if path.is_file() and path.parent == out_dir and is_video_file(path):
                 downloaded = path
         if downloaded is None:
             log.error("yt-dlp exited 0 for %s but the file was not found", vid)

@@ -21,24 +21,21 @@ from main import (
     set_mtime,
 )
 
-JOBS = [
-    # (video_id, out_dir, format)
-    # HTHeGCyNSZc already downloaded OK in the first run (only the index
-    # rebuild crashed on a tmp-file race, now fixed in main.py).
-    ("DLhRPyGqZwo", "/srv/files/ytwatcher/FoxNews",
-     "bestvideo[height<=720]+bestaudio/best[height<=720]"),
-    ("PHEAIUbGrrQ", "/srv/files/others/TVShows/Drops.of.God.2023",
-     "bestvideo+bestaudio/best"),
-]
-
-
 def main():
     config = load_config()
     settings = config.get("settings", {})
     download_root = Path(settings.get("download_dir", "/srv/files"))
+    jobs = [
+        # (video_id, out_dir, format)
+        # HTHeGCyNSZc already downloaded OK in the first run (only the index
+        # rebuild crashed on a tmp-file race, now fixed in main.py).
+        ("DLhRPyGqZwo", download_root / "FoxNews",
+         "bestvideo[height<=720]+bestaudio/best[height<=720]"),
+        ("PHEAIUbGrrQ", download_root.parent / "others" / "TVShows/Drops.of.God.2023",
+         "bestvideo+bestaudio/best"),
+    ]
     failed = []
-    for vid, out_dir_str, fmt in JOBS:
-        out_dir = Path(out_dir_str)
+    for vid, out_dir, fmt in jobs:
         cmd = [
             YT_DLP,
             "-f", fmt,
