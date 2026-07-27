@@ -548,7 +548,7 @@ def scan_downloads(download_dir):
 # Bump when the index.html template changes: the fingerprint below only
 # covers the file listing, so without this an existing index.html would
 # keep the old template until some video is added or removed.
-INDEX_TEMPLATE_VERSION = 7
+INDEX_TEMPLATE_VERSION = 8
 
 
 def fingerprint(groups, site_title=""):
@@ -611,13 +611,22 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "    li {",
         "      display: flex;",
         "      justify-content: space-between;",
-        "      align-items: flex-start;",
+        "      align-items: center;",
         "      gap: 1rem;",
         "      padding: .75rem;",
         "      border-bottom: 1px solid #2a2a2a;",
         "    }",
         "    li:last-child { border-bottom: none; }",
         "    a { color: #8ab4f8; text-decoration: none; word-break: break-word; flex: 1; }",
+        # Long titles are clamped to two lines on desktop; the full name
+        # stays available as the link's hover tooltip (title attribute).
+        "    li > a {",
+        "      display: -webkit-box;",
+        "      -webkit-box-orient: vertical;",
+        "      -webkit-line-clamp: 2;",
+        "      line-clamp: 2;",
+        "      overflow: hidden;",
+        "    }",
         "    a:hover { text-decoration: underline; }",
         "    .meta { white-space: nowrap; color: #999; font-size: .85rem; flex-shrink: 0; text-align: right; }",
         "    .watch-btn {",
@@ -675,7 +684,8 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "    li.watched .watch-btn { color: #7bd88a; border-color: #7bd88a; }",
         "    footer { margin-top: 2rem; padding-top: 1rem; border-top: 1px solid #333; color: #888; font-size: .85rem; text-align: center; }",
         "    @media (max-width: 600px) {",
-        "      li { flex-direction: column; gap: .25rem; }",
+        "      li { flex-direction: column; gap: .25rem; align-items: flex-start; }",
+        "      li > a { display: block; overflow: visible; }",
         "      .meta { text-align: left; white-space: normal; }",
         "    }",
         "  </style>",
@@ -1063,7 +1073,9 @@ def update_index_html(download_dir, api_port=DEFAULT_API_PORT, site_title=DEFAUL
     )[:10]
     now_str = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
     html_content = generate_index_html(groups, total, channels, now_str, fp, latest=latest, api_port=api_port, site_title=site_title)
-    tmp = index_path.with_suffix(".html.tmp")
+    # Unique tmp name per process: a fixed "index.html.tmp" races when the
+    # watcher and a manual download rebuild the index concurrently.
+    tmp = index_path.with_name(f"{index_path.name}.{os.getpid()}.tmp")
     tmp.write_text(html_content, encoding="utf-8")
     tmp.replace(index_path)
     log.info("index.html updated (%d videos across %d channels)", total, channels)
