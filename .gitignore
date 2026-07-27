@@ -10,3 +10,4 @@ cookies.txt
 downloads/
 *.log
 .env
+*.swp
