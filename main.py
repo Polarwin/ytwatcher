@@ -548,7 +548,7 @@ def scan_downloads(download_dir):
 # Bump when the index.html template changes: the fingerprint below only
 # covers the file listing, so without this an existing index.html would
 # keep the old template until some video is added or removed.
-INDEX_TEMPLATE_VERSION = 10
+INDEX_TEMPLATE_VERSION = 11
 
 
 def fingerprint(groups, site_title=""):
@@ -959,12 +959,25 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "  var plNow = document.getElementById(\"pl-now\");",
         "  var plRepeat = document.getElementById(\"pl-repeat\");",
         "  var plIndex = -1;",
-        "  function plRemoveAt(i) {",
+        "  function plRemoveAt(i, markWatched) {",
+        "    var removed = pl[i];",
         "    pl.splice(i, 1);",
         "    if (plIndex === i) { plIndex = -1; plVideo.pause(); plPlayer.hidden = true; }",
         "    else if (plIndex > i) { plIndex--; }",
         "    plSave();",
         "    plRender();",
+        "    // Removing via the ✕ button means \"done with it\": mark the video",
+        "    // watched (it will be deleted at the next scan round). Clearing",
+        "    // the whole playlist or untoggling + Playlist does not mark.",
+        "    if (markWatched && removed) {",
+        "      var m = removed.name.match(/\\[([A-Za-z0-9_-]{11})\\]/);",
+        "      if (m && !watched.has(m[1])) {",
+        "        watched.add(m[1]);",
+        "        save(watched);",
+        "        report(m[1], true);",
+        "        applyAll();",
+        "      }",
+        "    }",
         "  }",
         "  function plRender() {",
         "    plItems.innerHTML = \"\";",
@@ -981,7 +994,8 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "      rm.className = \"pl-remove\";",
         "      rm.type = \"button\";",
         "      rm.textContent = \"\\u2715\";",
-        "      rm.addEventListener(\"click\", function () { plRemoveAt(i); });",
+        '      rm.title = "Remove and mark watched";',
+        "      rm.addEventListener(\"click\", function () { plRemoveAt(i, true); });",
         "      li.appendChild(a);",
         "      li.appendChild(rm);",
         "      plItems.appendChild(li);",
@@ -1035,7 +1049,7 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "      var a = btn.closest(\"li\").querySelector(\"a\");",
         "      var href = a.getAttribute(\"href\");",
         "      var idx = pl.findIndex(function (item) { return item.href === href; });",
-        "      if (idx >= 0) { plRemoveAt(idx); return; }",
+        "      if (idx >= 0) { plRemoveAt(idx, false); return; }",
         "      pl.push({ href: href, name: a.textContent });",
         "      plSave();",
         "      plRender();",
