@@ -11,6 +11,11 @@ settings:
   # Skip videos uploaded more than this many days ago. Videos with unknown
   # upload times are not skipped. Comment out / remove to disable.
   max_video_age_days: 2
+  # Only list files whose timestamp is at most this many days old on the
+  # index page; older files stay on disk but drop off the listing. Watched
+  # files are never listed anyway (deleted or archived into 'watched/'
+  # subfolders). Comment out / remove to list everything.
+  watchlist_max_age_days: 5
 
 # Per-subscription title filter:
 #   match: all                      download everything, or a list of

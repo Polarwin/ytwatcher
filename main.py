@@ -111,7 +111,7 @@ def validate_config(config):
         problems.append("settings: must be a mapping")
     else:
         for key in ("check_interval_minutes", "recent_videos_to_scan",
-                    "api_port", "max_video_age_days"):
+                    "api_port", "max_video_age_days", "watchlist_max_age_days"):
             if key in settings and not isinstance(settings[key], (int, float)):
                 problems.append(f"settings.{key}: must be a number")
 
@@ -548,7 +548,7 @@ def scan_downloads(download_dir):
 # Bump when the index.html template changes: the fingerprint below only
 # covers the file listing, so without this an existing index.html would
 # keep the old template until some video is added or removed.
-INDEX_TEMPLATE_VERSION = 8
+INDEX_TEMPLATE_VERSION = 10
 
 
 def fingerprint(groups, site_title=""):
@@ -695,6 +695,7 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "    <header>",
         f"      <h1>{escaped_title}</h1>",
         f"      <p>Last updated: {html.escape(now_str)} &mdash; {total} video(s) across {channels} channel(s)</p>",
+        '      <p class="tool-status" id="watch-status"></p>',
         "    </header>",
     ]
 
@@ -759,8 +760,11 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         if show_channel:
             meta_parts.insert(0, html.escape(entry.get("channel", "")))
         data_attr = f' data-id="{entry_id(entry)}"'
+        # "watch-toggle" is the unambiguous hook for the watched-mark JS:
+        # both buttons carry "watch-btn" for styling, so a plain
+        # querySelector(".watch-btn") would grab whichever comes first.
         watch_btn = (
-            '          <button class="watch-btn" type="button">Mark watched</button>'
+            '          <button class="watch-btn watch-toggle" type="button">Mark watched</button>'
         )
         pl_add_btn = (
             '          <button class="watch-btn pl-add" type="button">+ Playlist</button>'
@@ -771,8 +775,8 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
                 f'          <a href="{href}" title="{html.escape(entry["name"])}">'
                 f"{html.escape(entry['name'])}</a>"
             ),
-            watch_btn,
             pl_add_btn,
+            watch_btn,
             f'          <span class="meta">{" &middot; ".join(meta_parts)}</span>',
             "        </li>",
         ] if line]
@@ -808,12 +812,35 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "  }",
         "  function save(s) { localStorage.setItem(KEY, JSON.stringify(Array.from(s))); }",
         "  var watched = load();",
+        '  var watchStatus = document.getElementById("watch-status");',
+        "  // The server (watched.json) is the source of truth: merge its IDs",
+        "  // into the local set so marks sync across browsers and stale",
+        "  // localStorage heals. On failure keep the local state.",
+        '  fetch(API + "/watched").then(function (r) {',
+        '    if (!r.ok) throw new Error("HTTP " + r.status);',
+        "    return r.json();",
+        "  }).then(function (d) {",
+        "    (d.ids || []).forEach(function (id) { watched.add(id); });",
+        "    save(watched);",
+        "    applyAll();",
+        "  }).catch(function () {});",
         "  function report(id, isWatched) {",
         '    fetch(API + "/watched", {',
         '      method: "POST",',
         '      headers: { "Content-Type": "text/plain" },',
         '      body: JSON.stringify({ id: id, watched: isWatched }),',
-        "    }).catch(function () {});",
+        "    }).then(function (r) {",
+        '      if (!r.ok) throw new Error("HTTP " + r.status);',
+        '      watchStatus.textContent = "";',
+        "    }).catch(function () {",
+        "      // The server did not record the mark: undo the optimistic",
+        "      // local change. Without the server record the file would",
+        "      // never be deleted, so don't pretend it is marked.",
+        "      if (isWatched) { watched.delete(id); } else { watched.add(id); }",
+        "      save(watched);",
+        "      applyAll();",
+        '      watchStatus.textContent = "watched mark NOT saved (API unreachable) \\u2014 try again";',
+        "    });",
         "  }",
         "  var dlForm = document.getElementById(\"dl-form\");",
         "  var dlStatus = document.getElementById(\"dl-status\");",
@@ -1025,7 +1052,7 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "      original.forEach(function (li) {",
         "        var isWatched = watched.has(li.dataset.id);",
         '        li.classList.toggle("watched", isWatched);',
-        '        li.querySelector(".watch-btn").textContent = isWatched ? "\\u2713 Watched" : "Mark watched";',
+        '        li.querySelector(".watch-toggle").textContent = isWatched ? "\\u2713 Watched" : "Mark watched";',
         "      });",
         "      original.filter(function (li) { return !watched.has(li.dataset.id); })",
         "        .concat(original.filter(function (li) { return watched.has(li.dataset.id); }))",
@@ -1033,7 +1060,7 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "    }",
         "    applyFns.push(apply);",
         "    items.forEach(function (li) {",
-        '      li.querySelector(".watch-btn").addEventListener("click", function () {',
+        '      li.querySelector(".watch-toggle").addEventListener("click", function () {',
         "        var id = li.dataset.id;",
         "        var isWatched = !watched.has(id);",
         "        if (isWatched) { watched.add(id); } else { watched.delete(id); }",
@@ -1052,13 +1079,24 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
     return "\n".join(lines)
 
 
-def update_index_html(download_dir, api_port=DEFAULT_API_PORT, site_title=DEFAULT_SITE_TITLE):
+def update_index_html(download_dir, api_port=DEFAULT_API_PORT,
+                      site_title=DEFAULT_SITE_TITLE, max_age_days=None):
     """Regenerate download_dir/index.html if the file listing has changed.
 
     The page is always built from a full recursive scan of download_dir, so
-    deleted files disappear automatically.
+    deleted files disappear automatically. When max_age_days is set, files
+    whose mtime is older than that many days are left out of the listing
+    (they stay on disk). Watched files are never listed regardless: they
+    are deleted or archived into 'watched' subfolders.
     """
     groups = scan_downloads(download_dir)
+    if max_age_days:
+        cutoff = time.time() - max_age_days * 86400
+        groups = {
+            channel: [e for e in entries if e["mtime"] >= cutoff]
+            for channel, entries in groups.items()
+        }
+        groups = {c: es for c, es in groups.items() if es}
     total = sum(len(entries) for entries in groups.values())
     channels = len(groups)
     fp = fingerprint(groups, site_title)
@@ -1132,6 +1170,7 @@ def delete_watched_videos(download_dir, watched_ids, keep_channels=()):
 class ApiHandler(BaseHTTPRequestHandler):
     """HTTP API backing the index page.
 
+    GET  /watched   returns {"ids": [...]} — the server's watched set.
     POST /watched   {"id": "<video id>", "watched": true} adds or removes
                     the ID in watched.json. Nothing here deletes files;
                     deletion happens at the start of the next scan round,
@@ -1171,7 +1210,13 @@ class ApiHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_GET(self):
-        if self.path == "/config":
+        if self.path == "/watched":
+            # The page merges this into its localStorage watched set, so
+            # marks sync across browsers and the server stays the source
+            # of truth.
+            with _watched_lock:
+                self._json(200, {"ids": sorted(load_watched())})
+        elif self.path == "/config":
             try:
                 body = CONFIG_FILE.read_bytes()
             except OSError as e:
@@ -1562,6 +1607,7 @@ def record_manual_download(video_id, settings):
         settings.get("download_dir", "/srv/files"),
         api_port=settings.get("api_port", DEFAULT_API_PORT),
         site_title=settings.get("site_title", DEFAULT_SITE_TITLE),
+        max_age_days=settings.get("watchlist_max_age_days"),
     )
 
 
@@ -1787,6 +1833,7 @@ def run_round(config, seen, scan_only=False, telegram_token=None, telegram_chat_
                     download_dir,
                     api_port=settings.get("api_port", DEFAULT_API_PORT),
                     site_title=settings.get("site_title", DEFAULT_SITE_TITLE),
+                    max_age_days=settings.get("watchlist_max_age_days"),
                 )
             except Exception as e:
                 log.error("failed to update index.html: %s", e)
@@ -1810,6 +1857,7 @@ def run_round(config, seen, scan_only=False, telegram_token=None, telegram_chat_
                     settings.get("download_dir", "/srv/files"),
                     api_port=settings.get("api_port", DEFAULT_API_PORT),
                     site_title=settings.get("site_title", DEFAULT_SITE_TITLE),
+                    max_age_days=settings.get("watchlist_max_age_days"),
                 )
             except Exception as e:
                 log.error("failed to update index.html: %s", e)
@@ -1875,7 +1923,8 @@ def main():
         return 0
 
     if args.generate_index:
-        update_index_html(download_dir, api_port=api_port, site_title=site_title)
+        update_index_html(download_dir, api_port=api_port, site_title=site_title,
+                          max_age_days=settings.get("watchlist_max_age_days"))
         return 0
 
     if args.test_notify:
@@ -1902,7 +1951,8 @@ def main():
     # Generate the initial index once at startup so an existing library is
     # browseable before the first new download completes.
     try:
-        update_index_html(download_dir, api_port=api_port, site_title=site_title)
+        update_index_html(download_dir, api_port=api_port, site_title=site_title,
+                          max_age_days=settings.get("watchlist_max_age_days"))
     except Exception as e:
         log.error("failed to generate initial index.html: %s", e)
 
