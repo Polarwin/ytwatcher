@@ -147,6 +147,15 @@ def validate_config(config):
             isinstance(match, list) and all(isinstance(kw, str) for kw in match)
         ):
             problems.append(f"{label}: 'match' must be 'all' or a list of keywords")
+        watchlist = sub.get("match_watchlist")
+        if watchlist is not None and not (
+            isinstance(watchlist, str)
+            or (isinstance(watchlist, list)
+                and all(isinstance(p, str) for p in watchlist))
+        ):
+            problems.append(
+                f"{label}: 'match_watchlist' must be a file path or a list of paths"
+            )
         exclude = sub.get("exclude", [])
         if not (isinstance(exclude, list)
                 and all(isinstance(kw, str) for kw in exclude)):
@@ -373,16 +382,67 @@ def is_live_error(stderr):
     return any(hint in text for hint in LIVE_ERROR_HINTS)
 
 
+_watchlist_cache = {}  # path -> (mtime, [(ticker, compiled regex)])
+
+
+def load_watchlist_tickers(path):
+    """Load match keywords from a watchlist file (one per line, '#'
+    comments), each matched as a whole word — meant for stock tickers,
+    where substring matching would false-positive (TER in "Wetter",
+    MU in "music", ...). Cached by file mtime: the dynamic watchlist
+    is re-read only when it changes.
+    """
+    try:
+        mtime = os.path.getmtime(path)
+    except OSError as e:
+        log.warning("match_watchlist file not readable: %s (%s)", path, e)
+        return []
+    cached = _watchlist_cache.get(path)
+    if cached and cached[0] == mtime:
+        return cached[1]
+    tickers = []
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                ticker = line.strip()
+                if not ticker or ticker.startswith("#"):
+                    continue
+                tickers.append(ticker.lstrip("^"))
+    except OSError as e:
+        log.warning("could not read match_watchlist %s: %s", path, e)
+        return []
+    compiled = [
+        (t, re.compile(r"(?<![A-Za-z0-9])" + re.escape(t) + r"(?![A-Za-z0-9])",
+                       re.IGNORECASE))
+        for t in tickers
+    ]
+    _watchlist_cache[path] = (mtime, compiled)
+    log.info("loaded %d watchlist keyword(s) from %s", len(compiled), path)
+    return compiled
+
+
 def matches_keywords(sub, text):
     """Return True if text contains any of the subscription's match keywords.
 
     A subscription with match: all (or no match list) matches everything.
+    Keywords from match_watchlist files match as whole words.
     """
     match = sub.get("match", "all")
     if match == "all":
         return True
     text_lower = text.lower()
-    return any(kw.lower() in text_lower for kw in match)
+    if any(kw.lower() in text_lower for kw in match):
+        return True
+    watchlist = sub.get("match_watchlist")
+    if isinstance(watchlist, str):
+        watchlist = [watchlist]
+    if watchlist:
+        return any(
+            rx.search(text)
+            for path in watchlist
+            for _, rx in load_watchlist_tickers(path)
+        )
+    return False
 
 
 def matches(sub, title):

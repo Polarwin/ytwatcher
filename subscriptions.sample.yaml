@@ -27,6 +27,13 @@ settings:
 #                                   the video description is checked too when
 #                                   the title doesn't match (one extra metadata
 #                                   query per non-matching video); default false
+#   match_watchlist: /path/file     optional; extra match keywords read from
+#                                   a text file or a list of files (one
+#                                   keyword per line, '#' comments); files
+#                                   are re-read whenever they change. Entries
+#                                   match as whole words — meant for stock
+#                                   tickers, where substring matching would
+#                                   false-positive (TER in "Wetter").
 #
 # Per-subscription Shorts filter (optional, per subscription):
 #   skip_shorts: true          skip videos that look like YouTube Shorts
