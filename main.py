@@ -1265,7 +1265,16 @@ def delete_watched_videos(download_dir, watched_ids, keep_channels=()):
             # Already archived in a 'watched' subdirectory.
             continue
         id_match = VIDEO_ID_RE.search(path.name)
-        if not (id_match and id_match.group(1) in watched_ids):
+        if id_match:
+            video_id = id_match.group(1)
+        else:
+            # Files without a YouTube ID in the name are marked on the
+            # index page with a path-derived pseudo-ID (see entry_id);
+            # compute the same ID here so those marks can be acted on.
+            video_id = (
+                "m" + hashlib.sha1(rel.as_posix().encode("utf-8")).hexdigest()[:10]
+            )
+        if video_id not in watched_ids:
             continue
         channel = rel.parts[0] if len(rel.parts) > 1 else None
         try:
