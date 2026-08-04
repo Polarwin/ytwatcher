@@ -421,11 +421,14 @@ def load_watchlist_tickers(path):
     return compiled
 
 
-def matches_keywords(sub, text):
+def matches_keywords(sub, text, include_watchlist=True):
     """Return True if text contains any of the subscription's match keywords.
 
     A subscription with match: all (or no match list) matches everything.
-    Keywords from match_watchlist files match as whole words.
+    Keywords from match_watchlist files match as whole words; they are
+    skipped when include_watchlist is False (description matching —
+    descriptions carry social-media boilerplate that would match company
+    aliases like "Facebook").
     """
     match = sub.get("match", "all")
     if match == "all":
@@ -433,6 +436,8 @@ def matches_keywords(sub, text):
     text_lower = text.lower()
     if any(kw.lower() in text_lower for kw in match):
         return True
+    if not include_watchlist:
+        return False
     watchlist = sub.get("match_watchlist")
     if isinstance(watchlist, str):
         watchlist = [watchlist]
@@ -1905,11 +1910,14 @@ def process_subscription(sub, settings, seen, failed, scan_only=False):
             # Title didn't match. Keyword-based subscriptions can get a
             # second chance via the video description (one extra metadata
             # query); enable per subscription with match_description: true.
+            # Only the fixed match keywords count here — watchlist
+            # tickers/company names are title-only (see matches_keywords).
             description_matched = False
             if (sub.get("match_description", False)
                     and sub.get("match", "all") != "all"):
                 description = fetch_description(video["id"])
-                if description and matches_keywords(sub, description):
+                if description and matches_keywords(sub, description,
+                                                    include_watchlist=False):
                     description_matched = True
                     log.info("[%s] matched in description: %s", name, video["title"])
             if not description_matched:

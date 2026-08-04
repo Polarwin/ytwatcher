@@ -31,9 +31,11 @@ settings:
 #                                   a text file or a list of files (one
 #                                   keyword per line, '#' comments); files
 #                                   are re-read whenever they change. Entries
-#                                   match as whole words — meant for stock
-#                                   tickers, where substring matching would
-#                                   false-positive (TER in "Wetter").
+#                                   match as whole words, TITLE ONLY
+#                                   (match_description ignores them) — meant
+#                                   for stock tickers, where substring
+#                                   matching would false-positive
+#                                   (TER in "Wetter").
 #
 # Per-subscription Shorts filter (optional, per subscription):
 #   skip_shorts: true          skip videos that look like YouTube Shorts
