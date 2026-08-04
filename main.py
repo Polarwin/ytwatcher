@@ -1955,7 +1955,13 @@ def process_subscription(sub, settings, seen, failed, scan_only=False):
                 })
                 log.info("[%s] done: %s", name, video["title"])
             elif status == "members_only":
-                log.info("[%s] skipped (members only): %s", name, video["title"])
+                # Channel membership often only means early access — the
+                # video may become public later (e.g. bilibili donghua).
+                # Keep retrying; in practice bounded by the recent-videos
+                # scan window, which the video eventually ages out of.
+                seen.discard(video["id"])
+                log.info("[%s] members only (for now), will retry: %s",
+                         name, video["title"])
             elif status == "live":
                 # Still live despite the listing; retry next round.
                 # Live retries are uncapped: a stream can legitimately
