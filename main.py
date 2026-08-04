@@ -608,7 +608,7 @@ def scan_downloads(download_dir):
 # Bump when the index.html template changes: the fingerprint below only
 # covers the file listing, so without this an existing index.html would
 # keep the old template until some video is added or removed.
-INDEX_TEMPLATE_VERSION = 12
+INDEX_TEMPLATE_VERSION = 13
 
 
 def fingerprint(groups, site_title=""):
@@ -802,6 +802,8 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         '      <ul id="pl-items"></ul>',
         '      <div class="pl-controls">',
         '        <button type="button" id="pl-play">Play</button>',
+        '        <button type="button" id="pl-add-all" '
+        'title="Queue every listed video in random order">Add all shuffled</button>',
         '        <label><input type="checkbox" id="pl-repeat"> Repeat</label>',
         '        <button type="button" id="pl-clear">Clear</button>',
         '      </div>',
@@ -1128,6 +1130,28 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "  });",
         "  document.getElementById(\"pl-play\").addEventListener(\"click\", function () {",
         "    plPlayAt(plIndex >= 0 ? plIndex : 0);",
+        "  });",
+        "  document.getElementById(\"pl-add-all\").addEventListener(\"click\", function () {",
+        "    // Queue every listed video that isn't queued yet, in random order.",
+        "    var have = {};",
+        "    pl.forEach(function (item) { have[item.href] = true; });",
+        "    var fresh = [];",
+        "    document.querySelectorAll(\"li[data-id]\").forEach(function (li) {",
+        "      var a = li.querySelector(\"a\");",
+        "      var href = a.getAttribute(\"href\");",
+        "      if (!have[href]) {",
+        "        have[href] = true;",
+        "        fresh.push({ href: href, name: a.textContent });",
+        "      }",
+        "    });",
+        "    // Fisher-Yates shuffle.",
+        "    for (var i = fresh.length - 1; i > 0; i--) {",
+        "      var j = Math.floor(Math.random() * (i + 1));",
+        "      var t = fresh[i]; fresh[i] = fresh[j]; fresh[j] = t;",
+        "    }",
+        "    pl = pl.concat(fresh);",
+        "    plSave();",
+        "    plRender();",
         "  });",
         "  document.getElementById(\"pl-clear\").addEventListener(\"click\", function () {",
         "    pl = [];",
