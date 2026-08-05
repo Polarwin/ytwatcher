@@ -613,7 +613,7 @@ def scan_downloads(download_dir):
 # Bump when the index.html template changes: the fingerprint below only
 # covers the file listing, so without this an existing index.html would
 # keep the old template until some video is added or removed.
-INDEX_TEMPLATE_VERSION = 13
+INDEX_TEMPLATE_VERSION = 14
 
 
 def fingerprint(groups, site_title=""):
@@ -891,6 +891,21 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "  }).then(function (d) {",
         "    (d.ids || []).forEach(function (id) { watched.add(id); });",
         "    save(watched);",
+        "    // Drop playlist entries whose files are gone: watched-marked",
+        "    // files are deleted or moved to watched/ at the next scan",
+        "    // round, leaving dead links in the stored playlist.",
+        "    var serverWatched = new Set(d.ids || []);",
+        "    var playing = plIndex >= 0 ? pl[plIndex] : null;",
+        "    pl = pl.filter(function (item) {",
+        "      var m = item.name.match(/\\[([A-Za-z0-9_-]{11})\\]/);",
+        "      return !m || !serverWatched.has(m[1]);",
+        "    });",
+        "    if (playing) {",
+        "      plIndex = pl.indexOf(playing);",
+        "      if (plIndex < 0) { plVideo.pause(); plPlayer.hidden = true; }",
+        "    }",
+        "    plSave();",
+        "    plRender();",
         "    applyAll();",
         "  }).catch(function () {});",
         "  function report(id, isWatched) {",
