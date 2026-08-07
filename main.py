@@ -363,6 +363,10 @@ MEMBERS_ONLY_AVAILABILITY = {"subscriber_only", "premium_only", "needs_auth"}
 # stderr fragments yt-dlp prints when a video requires channel membership
 MEMBERS_ONLY_ERROR_HINTS = ("member", "subscriber", "join this channel")
 
+# stderr fragments that mean a download failed for auth reasons — the
+# sign that cookies.txt is missing, empty, or expired.
+AUTH_ERROR_HINTS = ("sign in", "not a bot", "netscape format cookies")
+
 # yt-dlp live_status values that mean "stream hasn't ended yet" — wait and
 # retry in a later round instead of marking the video as seen.
 LIVE_PENDING_STATUSES = {"is_live", "is_upcoming"}
@@ -1568,6 +1572,37 @@ def load_telegram_config():
     return token, chat_id
 
 
+_cookie_alert_lock = threading.Lock()
+_cookie_alert_last = 0.0
+# At most one cookie-problem alert per this many seconds.
+COOKIE_ALERT_INTERVAL = 12 * 3600
+
+
+def notify_cookie_problem(stderr, context):
+    """Telegram alert when a download fails for auth-type reasons.
+
+    context says whether the failure happened with or without usable
+    cookies. Throttled: repeated failures every scan round must not spam.
+    """
+    if not any(hint in stderr.lower() for hint in AUTH_ERROR_HINTS):
+        return
+    global _cookie_alert_last
+    with _cookie_alert_lock:
+        now = time.time()
+        if now - _cookie_alert_last < COOKIE_ALERT_INTERVAL:
+            return
+        _cookie_alert_last = now
+    token, chat_id = load_telegram_config()
+    if not token or not chat_id:
+        return
+    send_telegram_message(
+        token, chat_id,
+        "⚠️ ytwatcher: download failed (" + context + "):\n"
+        + stderr.strip()[:200]
+        + "\nRefresh cookies.txt if it is missing or expired.",
+    )
+
+
 def send_telegram_message(token, chat_id, text):
     """Send a message; failures are logged but never raised."""
     url = TELEGRAM_API_URL.format(token=token)
@@ -1657,12 +1692,25 @@ def run_yt_dlp(cmd):
     attempt. Raises subprocess.TimeoutExpired like subprocess.run.
     """
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=3600)
-    if result.returncode != 0 and COOKIES_FILE.exists():
-        log.info("download failed; retrying with cookies from %s", COOKIES_FILE.name)
+    if result.returncode == 0:
+        return result
+    # Log the real error before any retry: the retry's stderr replaces it
+    # in the returned result and would otherwise hide it.
+    log.info("download failed (first attempt): %s", result.stderr.strip()[:300])
+    # Skip the retry when cookies.txt is empty: yt-dlp rejects it ("does
+    # not look like a Netscape format cookies file"), masking the
+    # original failure.
+    if COOKIES_FILE.exists() and COOKIES_FILE.stat().st_size > 0:
+        log.info("retrying with cookies from %s", COOKIES_FILE.name)
         result = subprocess.run(
             cmd + ["--cookies", str(COOKIES_FILE)],
             capture_output=True, text=True, timeout=3600,
         )
+        if result.returncode != 0:
+            notify_cookie_problem(result.stderr, "even with cookies.txt")
+    else:
+        notify_cookie_problem(result.stderr,
+                              "cookies.txt is missing or empty")
     return result
 
 
