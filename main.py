@@ -617,7 +617,7 @@ def scan_downloads(download_dir):
 # Bump when the index.html template changes: the fingerprint below only
 # covers the file listing, so without this an existing index.html would
 # keep the old template until some video is added or removed.
-INDEX_TEMPLATE_VERSION = 15
+INDEX_TEMPLATE_VERSION = 16
 
 
 def fingerprint(groups, site_title=""):
@@ -1139,7 +1139,30 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "    plNow.textContent = (i + 1) + \"/\" + pl.length + \" \\u2014 \" + pl[i].name;",
         "    plVideo.src = pl[i].href;",
         "    plVideo.play().catch(function () {});",
+        "    plUpdateMediaSession();",
         "    plRender();",
+        "  }",
+        "  // Media Session: lockscreen/notification controls on phones, and",
+        "  // lets Chrome on Android keep the audio playing when the page",
+        "  // goes to background. (iOS Safari pauses web video in background",
+        "  // regardless — platform restriction.)",
+        "  function plUpdateMediaSession() {",
+        "    if (!(\"mediaSession\" in navigator)) return;",
+        "    if (plIndex < 0 || !pl[plIndex]) return;",
+        "    navigator.mediaSession.metadata = new MediaMetadata({",
+        "      title: pl[plIndex].name,",
+        "      artist: \"ytwatcher\",",
+        "    });",
+        "  }",
+        "  if (\"mediaSession\" in navigator) {",
+        "    navigator.mediaSession.setActionHandler(\"play\", function () { plVideo.play(); });",
+        "    navigator.mediaSession.setActionHandler(\"pause\", function () { plVideo.pause(); });",
+        "    navigator.mediaSession.setActionHandler(\"previoustrack\", function () {",
+        "      if (plIndex > 0) plPlayAt(plIndex - 1);",
+        "    });",
+        "    navigator.mediaSession.setActionHandler(\"nexttrack\", function () {",
+        "      if (plIndex >= 0 && plIndex + 1 < pl.length) plPlayAt(plIndex + 1);",
+        "    });",
         "  }",
         "  plVideo.addEventListener(\"ended\", function () {",
         "    var next = plIndex + 1;",
@@ -1190,6 +1213,7 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "      });",
         "    }",
         "    plVideo.play().catch(function () {});",
+        "    plUpdateMediaSession();",
         "    plRender();",
         "  }",
         "  plRepeat.checked = localStorage.getItem(PL_REPEAT_KEY) === \"1\";",
