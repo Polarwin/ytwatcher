@@ -12,7 +12,8 @@ settings:
   # upload times are not skipped. Comment out / remove to disable.
   max_video_age_days: 2
   # Only list files whose timestamp is at most this many days old on the
-  # index page; older files stay on disk but drop off the listing. Watched
+  # index page; older files stay on disk but drop off the listing. The
+  # manually/ folder is exempt (deliberate one-off downloads). Watched
   # files are never listed anyway (deleted or archived into 'watched/'
   # subfolders). Comment out / remove to list everything.
   watchlist_max_age_days: 5

@@ -617,7 +617,7 @@ def scan_downloads(download_dir):
 # Bump when the index.html template changes: the fingerprint below only
 # covers the file listing, so without this an existing index.html would
 # keep the old template until some video is added or removed.
-INDEX_TEMPLATE_VERSION = 14
+INDEX_TEMPLATE_VERSION = 15
 
 
 def fingerprint(groups, site_title=""):
@@ -1054,6 +1054,7 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "    if (plIndex === i) { plIndex = -1; plVideo.pause(); plPlayer.hidden = true; }",
         "    else if (plIndex > i) { plIndex--; }",
         "    plSave();",
+        "    plSavePos();",
         "    plRender();",
         "    // Removing via the ✕ button means \"done with it\": mark the video",
         "    // watched (it will be deleted at the next scan round). Clearing",
@@ -1143,11 +1144,54 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "  plVideo.addEventListener(\"ended\", function () {",
         "    var next = plIndex + 1;",
         "    if (next >= pl.length) {",
-        "      if (!plRepeat.checked) { plIndex = -1; plRender(); return; }",
+        "      if (!plRepeat.checked) { plIndex = -1; plSavePos(); plRender(); return; }",
         "      next = 0;",
         "    }",
         "    plPlayAt(next);",
         "  });",
+        "  // Persist the play position so a page refresh can resume.",
+        "  var PL_POS_KEY = \"ytwatcher:playlist-pos\";",
+        "  function plSavePos() {",
+        "    if (plIndex < 0 || !pl[plIndex]) {",
+        "      localStorage.removeItem(PL_POS_KEY);",
+        "      return;",
+        "    }",
+        "    localStorage.setItem(PL_POS_KEY, JSON.stringify({",
+        "      href: pl[plIndex].href, time: plVideo.currentTime,",
+        "    }));",
+        "  }",
+        "  var plPosSavedAt = 0;",
+        "  plVideo.addEventListener(\"timeupdate\", function () {",
+        "    var now = Date.now();",
+        "    if (now - plPosSavedAt < 5000) return;",
+        "    plPosSavedAt = now;",
+        "    plSavePos();",
+        "  });",
+        "  plVideo.addEventListener(\"pause\", plSavePos);",
+        "  window.addEventListener(\"beforeunload\", plSavePos);",
+        "  // Resume after a refresh: restore the item (by href, robust",
+        "  // against reordering) and position. If autoplay is blocked the",
+        "  // video simply stays paused at the saved position.",
+        "  function plTryResume() {",
+        "    var saved;",
+        "    try { saved = JSON.parse(localStorage.getItem(PL_POS_KEY) || \"null\"); }",
+        "    catch (e) { saved = null; }",
+        "    if (!saved || !saved.href) return;",
+        "    var idx = pl.findIndex(function (item) { return item.href === saved.href; });",
+        "    if (idx < 0) { localStorage.removeItem(PL_POS_KEY); return; }",
+        "    plIndex = idx;",
+        "    plPlayer.hidden = false;",
+        "    plNow.textContent = (idx + 1) + \"/\" + pl.length + \" \\u2014 \" + pl[idx].name;",
+        "    plVideo.src = pl[idx].href;",
+        "    if (saved.time > 0) {",
+        "      plVideo.addEventListener(\"loadedmetadata\", function seek() {",
+        "        plVideo.removeEventListener(\"loadedmetadata\", seek);",
+        "        plVideo.currentTime = saved.time;",
+        "      });",
+        "    }",
+        "    plVideo.play().catch(function () {});",
+        "    plRender();",
+        "  }",
         "  plRepeat.checked = localStorage.getItem(PL_REPEAT_KEY) === \"1\";",
         "  plRepeat.addEventListener(\"change\", function () {",
         "    localStorage.setItem(PL_REPEAT_KEY, plRepeat.checked ? \"1\" : \"0\");",
@@ -1180,6 +1224,7 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "  document.getElementById(\"pl-clear\").addEventListener(\"click\", function () {",
         "    pl = [];",
         "    plIndex = -1;",
+        "    plSavePos();",
         "    plVideo.pause();",
         "    plPlayer.hidden = true;",
         "    plSave();",
@@ -1207,6 +1252,7 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "    });",
         "  });",
         "  plRender();",
+        "  plTryResume();",
         "  var applyFns = [];",
         "  function applyAll() { applyFns.forEach(function (fn) { fn(); }); }",
         '  document.querySelectorAll("ul").forEach(function (ul) {',
@@ -1251,14 +1297,19 @@ def update_index_html(download_dir, api_port=DEFAULT_API_PORT,
     The page is always built from a full recursive scan of download_dir, so
     deleted files disappear automatically. When max_age_days is set, files
     whose mtime is older than that many days are left out of the listing
-    (they stay on disk). Watched files are never listed regardless: they
-    are deleted or archived into 'watched' subfolders.
+    (they stay on disk); the "manually" folder is exempt. Watched files
+    are never listed regardless: they are deleted or archived into
+    'watched' subfolders.
     """
     groups = scan_downloads(download_dir)
     if max_age_days:
         cutoff = time.time() - max_age_days * 86400
         groups = {
-            channel: [e for e in entries if e["mtime"] >= cutoff]
+            # "manually" is exempt: those downloads are deliberate one-offs,
+            # and an old upload would otherwise vanish from the page the
+            # moment it is downloaded.
+            channel: ([e for e in entries if e["mtime"] >= cutoff]
+                      if channel != "manually" else entries)
             for channel, entries in groups.items()
         }
         groups = {c: es for c, es in groups.items() if es}
@@ -1725,7 +1776,9 @@ def download_video(sub, video, download_dir):
     cmd = [
         YT_DLP,
         "-f", sub["quality"],
-        "-o", str(out_dir / "%(title)s [%(id)s].%(ext)s"),
+        # Truncate the title to 200 BYTES: CJK titles are 3 bytes/char and
+        # would otherwise exceed the 255-byte filename limit (Errno 36).
+        "-o", str(out_dir / "%(title).200B [%(id)s].%(ext)s"),
         "--no-playlist",
         "--print", "after_move:%(filepath)s\t%(duration)s",
         f"https://www.youtube.com/watch?v={video['id']}",
@@ -1771,7 +1824,7 @@ def download_manually(url, out_dir, fmt=None, sort=None):
         YT_DLP,
         "--no-playlist",
         "--print", "after_move:%(filepath)s\t%(duration)s",
-        "-o", str(out_dir / "%(title)s [%(id)s].%(ext)s"),
+        "-o", str(out_dir / "%(title).200B [%(id)s].%(ext)s"),
     ]
     if fmt:
         cmd += ["-f", fmt]
