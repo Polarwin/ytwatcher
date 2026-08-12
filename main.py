@@ -617,7 +617,7 @@ def scan_downloads(download_dir):
 # Bump when the index.html template changes: the fingerprint below only
 # covers the file listing, so without this an existing index.html would
 # keep the old template until some video is added or removed.
-INDEX_TEMPLATE_VERSION = 19
+INDEX_TEMPLATE_VERSION = 20
 
 
 def fingerprint(groups, site_title=""):
@@ -1230,6 +1230,11 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "    }",
         "    pl = pl.concat(fresh);",
         "    plSave();",
+        "    // Queue was empty: start playing right away.",
+        "    if (plIndex < 0 && pl.length === fresh.length && pl.length) {",
+        "      plPlayAt(0);",
+        "      return;",
+        "    }",
         "    plRender();",
         "  });",
         "  document.getElementById(\"pl-clear\").addEventListener(\"click\", function () {",
@@ -1259,6 +1264,8 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "      if (idx >= 0) { plRemoveAt(idx, false); return; }",
         "      pl.push({ href: href, name: a.textContent });",
         "      plSave();",
+        "      // First item added to an empty playlist: start playing it.",
+        "      if (pl.length === 1) { plPlayAt(0); return; }",
         "      plRender();",
         "    });",
         "  });",
