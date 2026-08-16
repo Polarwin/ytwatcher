@@ -617,7 +617,7 @@ def scan_downloads(download_dir):
 # Bump when the index.html template changes: the fingerprint below only
 # covers the file listing, so without this an existing index.html would
 # keep the old template until some video is added or removed.
-INDEX_TEMPLATE_VERSION = 20
+INDEX_TEMPLATE_VERSION = 22
 
 
 def fingerprint(groups, site_title=""):
@@ -1050,12 +1050,21 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "  var plDragIndex = -1;",
         "  function plRemoveAt(i, markWatched) {",
         "    var removed = pl[i];",
+        "    var removedCurrent = plIndex === i;",
+        "    var nextIndex = -1;",
         "    pl.splice(i, 1);",
-        "    if (plIndex === i) { plIndex = -1; plVideo.pause(); plPlayer.hidden = true; }",
+        "    if (removedCurrent) {",
+        "      // The old next item shifts into the removed item's index.",
+        "      if (i < pl.length) nextIndex = i;",
+        "      else if (pl.length && plRepeat.checked) nextIndex = 0;",
+        "      plIndex = -1;",
+        "      plVideo.pause();",
+        "      if (nextIndex < 0) plPlayer.hidden = true;",
+        "    }",
         "    else if (plIndex > i) { plIndex--; }",
         "    plSave();",
-        "    plSavePos();",
-        "    plRender();",
+        "    if (nextIndex >= 0) plPlayAt(nextIndex);",
+        "    else { plSavePos(); plRender(); }",
         "    // Removing via the ✕ button means \"done with it\": mark the video",
         "    // watched (it will be deleted at the next scan round). Clearing",
         "    // the whole playlist or untoggling + Playlist does not mark.",
@@ -1085,6 +1094,9 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "  function plRender() {",
         "    plItems.innerHTML = \"\";",
         "    plEmpty.style.display = pl.length ? \"none\" : \"\";",
+        "    if (plIndex >= 0 && pl[plIndex]) {",
+        "      plNow.textContent = (plIndex + 1) + \"/\" + pl.length + \" \\u2014 \" + pl[plIndex].name;",
+        "    }",
         "    pl.forEach(function (item, i) {",
         "      var li = document.createElement(\"li\");",
         "      if (i === plIndex) li.className = \"pl-current\";",
