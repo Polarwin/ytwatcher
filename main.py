@@ -617,7 +617,7 @@ def scan_downloads(download_dir):
 # Bump when the index.html template changes: the fingerprint below only
 # covers the file listing, so without this an existing index.html would
 # keep the old template until some video is added or removed.
-INDEX_TEMPLATE_VERSION = 23
+INDEX_TEMPLATE_VERSION = 24
 
 
 def fingerprint(groups, site_title=""):
@@ -742,6 +742,7 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "    #pl-video { width: 100%; max-height: 70vh; margin-top: .75rem; background: #000; }",
         "    #pl-now { color: #8ab4f8; margin-top: .5rem; font-size: .95rem; }",
         "    li.pl-current a { color: #7bd88a; }",
+        "    li.pl-current-video > a { color: #7bd88a; }",
         "    .pl-remove { flex-shrink: 0; }",
         "    #pl-items li { cursor: grab; }",
         "    #pl-items li.pl-drop-target { border-top: 2px solid #8ab4f8; }",
@@ -1261,10 +1262,12 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "    plRender();",
         "  });",
         "  function plUpdateButtons() {",
+        "    var playingHref = plIndex >= 0 && pl[plIndex] ? pl[plIndex].href : null;",
         "    document.querySelectorAll(\".pl-add\").forEach(function (btn) {",
         "      var li = btn.closest(\"li\");",
         "      var href = li.querySelector(\"a\").getAttribute(\"href\");",
         "      var queued = pl.some(function (item) { return item.href === href; });",
+        '      li.classList.toggle("pl-current-video", href === playingHref);',
         "      li.classList.toggle(\"pl-queued\", queued);",
         "      btn.classList.toggle(\"pl-added\", queued);",
         "      btn.textContent = queued ? \"\\u2713 In playlist\" : \"+ Playlist\";",
