@@ -617,7 +617,7 @@ def scan_downloads(download_dir):
 # Bump when the index.html template changes: the fingerprint below only
 # covers the file listing, so without this an existing index.html would
 # keep the old template until some video is added or removed.
-INDEX_TEMPLATE_VERSION = 24
+INDEX_TEMPLATE_VERSION = 25
 
 
 def fingerprint(groups, site_title=""):
@@ -814,6 +814,8 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         '        <button type="button" id="pl-play">Play</button>',
         '        <button type="button" id="pl-add-all" '
         'title="Queue every listed video in random order">Add all shuffled</button>',
+        '        <button type="button" id="pl-add-latest" '
+        'title="Queue the Latest section in listed order">Add all latest</button>',
         '        <label><input type="checkbox" id="pl-repeat"> Repeat</label>',
         '        <button type="button" id="pl-clear">Clear</button>',
         '      </div>',
@@ -1225,12 +1227,12 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "  document.getElementById(\"pl-play\").addEventListener(\"click\", function () {",
         "    plPlayAt(plIndex >= 0 ? plIndex : 0);",
         "  });",
-        "  document.getElementById(\"pl-add-all\").addEventListener(\"click\", function () {",
-        "    // Queue every listed video that isn't queued yet, in random order.",
+        "  function plQueueFrom(selector, shuffle) {",
+        "    // Queue every matching listed video that isn't queued yet.",
         "    var have = {};",
         "    pl.forEach(function (item) { have[item.href] = true; });",
         "    var fresh = [];",
-        "    document.querySelectorAll(\"li[data-id]\").forEach(function (li) {",
+        "    document.querySelectorAll(selector).forEach(function (li) {",
         "      var a = li.querySelector(\"a\");",
         "      var href = a.getAttribute(\"href\");",
         "      if (!have[href]) {",
@@ -1238,10 +1240,12 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "        fresh.push({ href: href, name: a.textContent });",
         "      }",
         "    });",
-        "    // Fisher-Yates shuffle.",
-        "    for (var i = fresh.length - 1; i > 0; i--) {",
-        "      var j = Math.floor(Math.random() * (i + 1));",
-        "      var t = fresh[i]; fresh[i] = fresh[j]; fresh[j] = t;",
+        "    if (shuffle) {",
+        "      // Fisher-Yates shuffle.",
+        "      for (var i = fresh.length - 1; i > 0; i--) {",
+        "        var j = Math.floor(Math.random() * (i + 1));",
+        "        var t = fresh[i]; fresh[i] = fresh[j]; fresh[j] = t;",
+        "      }",
         "    }",
         "    pl = pl.concat(fresh);",
         "    plSave();",
@@ -1251,6 +1255,12 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "      return;",
         "    }",
         "    plRender();",
+        "  }",
+        "  document.getElementById(\"pl-add-all\").addEventListener(\"click\", function () {",
+        "    plQueueFrom(\"li[data-id]\", true);",
+        "  });",
+        "  document.getElementById(\"pl-add-latest\").addEventListener(\"click\", function () {",
+        "    plQueueFrom(\"section.latest li[data-id]\", false);",
         "  });",
         "  document.getElementById(\"pl-clear\").addEventListener(\"click\", function () {",
         "    pl = [];",
