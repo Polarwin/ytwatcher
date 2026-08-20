@@ -617,7 +617,7 @@ def scan_downloads(download_dir):
 # Bump when the index.html template changes: the fingerprint below only
 # covers the file listing, so without this an existing index.html would
 # keep the old template until some video is added or removed.
-INDEX_TEMPLATE_VERSION = 25
+INDEX_TEMPLATE_VERSION = 28
 
 
 def fingerprint(groups, site_title=""):
@@ -816,6 +816,8 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         'title="Queue every listed video in random order">Add all shuffled</button>',
         '        <button type="button" id="pl-add-latest" '
         'title="Queue the Latest section in listed order">Add all latest</button>',
+        '        <button type="button" id="pl-add-espanol" '
+        'title="Queue every Spanish video in listed order">Add all Spanish</button>',
         '        <label><input type="checkbox" id="pl-repeat"> Repeat</label>',
         '        <button type="button" id="pl-clear">Clear</button>',
         '      </div>',
@@ -868,7 +870,7 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         lines.append('    </section>')
 
     for channel, entries in groups.items():
-        lines.append('    <section class="channel">')
+        lines.append(f'    <section class="channel" data-channel="{html.escape(channel)}">')
         lines.append(f"      <h2>{html.escape(channel)}</h2>")
         lines.append("      <ul>")
         for entry in entries:
@@ -1155,9 +1157,27 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "    plPlayer.hidden = false;",
         "    plNow.textContent = (i + 1) + \"/\" + pl.length + \" \\u2014 \" + pl[i].name;",
         "    plVideo.src = pl[i].href;",
-        "    plRestoreRate();",
+        "    // Do not carry the previous item's speed into a new video.",
+        "    plVideo.playbackRate = 1;",
         "    plVideo.play().catch(function () {});",
+        "    // Tell the OS what is playing: Android keeps background audio",
+        "    // (and screen-off track changes) alive only for an element with",
+        "    // an active media session; without it the 'ended' -> play()",
+        "    // transition is blocked once the screen sleeps.",
+        "    if (\"mediaSession\" in navigator) {",
+        "      navigator.mediaSession.metadata = new MediaMetadata({",
+        "        title: pl[i].name, artist: \"ytwatcher\",",
+        "      });",
+        "    }",
         "    plRender();",
+        "  }",
+        "  if (\"mediaSession\" in navigator) {",
+        "    navigator.mediaSession.setActionHandler(\"nexttrack\", function () {",
+        "      if (plIndex + 1 < pl.length) plPlayAt(plIndex + 1);",
+        "    });",
+        "    navigator.mediaSession.setActionHandler(\"previoustrack\", function () {",
+        "      if (plIndex > 0) plPlayAt(plIndex - 1);",
+        "    });",
         "  }",
         "  plVideo.addEventListener(\"ended\", function () {",
         "    var next = plIndex + 1;",
@@ -1187,15 +1207,14 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "  });",
         "  plVideo.addEventListener(\"pause\", plSavePos);",
         "  window.addEventListener(\"beforeunload\", plSavePos);",
-        "  // Remember the playback speed across videos and refreshes.",
-        "  var PL_RATE_KEY = \"ytwatcher:playlist-rate\";",
-        "  plVideo.addEventListener(\"ratechange\", function () {",
-        "    localStorage.setItem(PL_RATE_KEY, String(plVideo.playbackRate));",
+        "  // Audio-only downloads may use a video container such as .webm,",
+        "  // so inspect the loaded stream as well as known audio extensions.",
+        "  plVideo.addEventListener(\"loadedmetadata\", function () {",
+        "    if (plIndex < 0 || !pl[plIndex]) return;",
+        "    var href = pl[plIndex].href.split(/[?#]/)[0];",
+        "    var audioExtension = /\\.(m4a|mp3|opus|ogg|aac|wav|flac)$/i.test(href);",
+        "    plVideo.playbackRate = audioExtension || plVideo.videoWidth === 0 ? 2 : 1;",
         "  });",
-        "  function plRestoreRate() {",
-        "    var r = parseFloat(localStorage.getItem(PL_RATE_KEY));",
-        "    if (r > 0) plVideo.playbackRate = r;",
-        "  }",
         "  // Resume after a refresh: restore the item (by href, robust",
         "  // against reordering) and position. If autoplay is blocked the",
         "  // video simply stays paused at the saved position.",
@@ -1210,7 +1229,7 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "    plPlayer.hidden = false;",
         "    plNow.textContent = (idx + 1) + \"/\" + pl.length + \" \\u2014 \" + pl[idx].name;",
         "    plVideo.src = pl[idx].href;",
-        "    plRestoreRate();",
+        "    plVideo.playbackRate = 1;",
         "    if (saved.time > 0) {",
         "      plVideo.addEventListener(\"loadedmetadata\", function seek() {",
         "        plVideo.removeEventListener(\"loadedmetadata\", seek);",
@@ -1261,6 +1280,9 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "  });",
         "  document.getElementById(\"pl-add-latest\").addEventListener(\"click\", function () {",
         "    plQueueFrom(\"section.latest li[data-id]\", false);",
+        "  });",
+        "  document.getElementById(\"pl-add-espanol\").addEventListener(\"click\", function () {",
+        "    plQueueFrom(\"section[data-channel='Espanol'] li[data-id]\", false);",
         "  });",
         "  document.getElementById(\"pl-clear\").addEventListener(\"click\", function () {",
         "    pl = [];",
