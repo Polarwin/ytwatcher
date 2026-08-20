@@ -8,6 +8,8 @@ failed-download attempt counts in failed.json.
 """
 
 import argparse
+import contextlib
+import fcntl
 import hashlib
 import html
 import json
@@ -39,6 +41,24 @@ COOKIES_FILE = Path(__file__).parent / "cookies.txt"
 # validated by size+mtime. Populated at download time from yt-dlp's
 # after_move printout; deleting it just loses the durations.
 DURATIONS_FILE = Path(__file__).parent / "durations.json"
+# Advisory lock file serializing load-modify-write cycles on state.json
+# across processes (the watcher and manual_download.py both write it).
+STATE_LOCK_FILE = STATE_FILE.with_suffix(".json.lock")
+
+# Root that settings.download_dir must stay under: subscriptions.yaml is
+# editable via the unauthenticated API, so its paths can't be trusted.
+DOWNLOAD_DIR_ROOT = "/srv/files"
+
+# Request body limit for the API; nothing posted to it (config YAML,
+# cookies.txt, small JSON) comes anywhere near this size.
+MAX_REQUEST_BODY = 1024 * 1024
+
+# Socket read timeout while reading an API request body.
+REQUEST_BODY_TIMEOUT = 30
+
+# Manual download jobs (API) allowed to run at the same time; further
+# POST /download requests are refused with 429.
+MAX_CONCURRENT_DOWNLOADS = 3
 
 # Download attempts before a failing video is marked as seen for good.
 MAX_DOWNLOAD_ATTEMPTS = 5
@@ -114,6 +134,17 @@ def validate_config(config):
                     "api_port", "max_video_age_days", "watchlist_max_age_days"):
             if key in settings and not isinstance(settings[key], (int, float)):
                 problems.append(f"settings.{key}: must be a number")
+        download_dir = settings.get("download_dir")
+        if download_dir is not None:
+            normalized = os.path.normpath(str(download_dir))
+            if not (isinstance(download_dir, str)
+                    and os.path.isabs(normalized)
+                    and (normalized == DOWNLOAD_DIR_ROOT
+                         or normalized.startswith(DOWNLOAD_DIR_ROOT + os.sep))):
+                problems.append(
+                    "settings.download_dir: must be an absolute path "
+                    f"under {DOWNLOAD_DIR_ROOT}"
+                )
 
     subs = config.get("subscriptions", [])
     if not isinstance(subs, list):
@@ -127,6 +158,13 @@ def validate_config(config):
         name = sub.get("name")
         if isinstance(name, str) and name.strip():
             label = f"subscription '{name}'"
+            # The name becomes a subdirectory of download_dir; reject
+            # anything that could escape or confuse the filesystem.
+            if name.strip() in (".", "..") or "/" in name or "\\" in name:
+                problems.append(
+                    f"{label}: 'name' must not be '.' or '..' "
+                    "or contain '/' or '\\'"
+                )
         else:
             problems.append(f"{label}: missing or empty 'name'")
         url = sub.get("url")
@@ -177,6 +215,32 @@ def load_config():
     return config
 
 
+def _tmp_path(path):
+    """Process- and thread-unique tmp path for atomic file replacement.
+
+    Writers are threads in this process (watcher loop, API handlers) and
+    separate processes (manual_download.py); a fixed "<name>.tmp" races.
+    """
+    return path.with_name(
+        f"{path.name}.{os.getpid()}.{threading.get_ident()}.tmp"
+    )
+
+
+@contextlib.contextmanager
+def state_file_lock():
+    """Cross-process lock for load-modify-write cycles on state.json.
+
+    _state_lock only covers threads in this process; manual_download.py
+    runs as a separate process and also records IDs in state.json.
+    """
+    with open(STATE_LOCK_FILE, "a", encoding="utf-8") as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(f, fcntl.LOCK_UN)
+
+
 def load_state():
     if STATE_FILE.exists():
         try:
@@ -188,7 +252,7 @@ def load_state():
 
 
 def save_state(seen):
-    tmp = STATE_FILE.with_suffix(".json.tmp")
+    tmp = _tmp_path(STATE_FILE)
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(sorted(seen), f, indent=1)
     tmp.replace(STATE_FILE)
@@ -206,7 +270,7 @@ def load_failed():
 
 
 def save_failed(failed):
-    tmp = FAILED_FILE.with_suffix(".json.tmp")
+    tmp = _tmp_path(FAILED_FILE)
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(dict(sorted(failed.items())), f, indent=1)
     tmp.replace(FAILED_FILE)
@@ -268,7 +332,7 @@ def load_watched():
 
 
 def save_watched(watched):
-    tmp = WATCHED_FILE.with_suffix(".json.tmp")
+    tmp = _tmp_path(WATCHED_FILE)
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(sorted(watched), f, indent=1)
     tmp.replace(WATCHED_FILE)
@@ -524,11 +588,15 @@ def load_durations():
     return {}
 
 
+_durations_lock = threading.Lock()
+
+
 def save_durations(durations):
-    tmp = DURATIONS_FILE.with_suffix(".json.tmp")
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(dict(sorted(durations.items())), f, indent=1)
-    tmp.replace(DURATIONS_FILE)
+    tmp = _tmp_path(DURATIONS_FILE)
+    with _durations_lock:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(dict(sorted(durations.items())), f, indent=1)
+        tmp.replace(DURATIONS_FILE)
 
 
 def record_duration(download_dir, path, duration):
@@ -617,7 +685,7 @@ def scan_downloads(download_dir):
 # Bump when the index.html template changes: the fingerprint below only
 # covers the file listing, so without this an existing index.html would
 # keep the old template until some video is added or removed.
-INDEX_TEMPLATE_VERSION = 28
+INDEX_TEMPLATE_VERSION = 29
 
 
 def fingerprint(groups, site_title=""):
@@ -885,6 +953,7 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "<script>",
         "(function () {",
         '  var API = "http://" + location.hostname + ":' + str(api_port) + '";',
+        f'  var currentFingerprint = "{fp}";',
         '  var KEY = "ytwatcher:watched";',
         "  function load() {",
         "    try { return new Set(JSON.parse(localStorage.getItem(KEY) || '[]')); }",
@@ -893,14 +962,15 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "  function save(s) { localStorage.setItem(KEY, JSON.stringify(Array.from(s))); }",
         "  var watched = load();",
         '  var watchStatus = document.getElementById("watch-status");',
-        "  // The server (watched.json) is the source of truth: merge its IDs",
-        "  // into the local set so marks sync across browsers and stale",
-        "  // localStorage heals. On failure keep the local state.",
+        "  // The server (watched.json) is the source of truth: replace the",
+        "  // local set with its IDs so marks sync across browsers, un-marks",
+        "  // propagate, and stale localStorage heals. On failure keep the",
+        "  // local state.",
         '  fetch(API + "/watched").then(function (r) {',
         '    if (!r.ok) throw new Error("HTTP " + r.status);',
         "    return r.json();",
         "  }).then(function (d) {",
-        "    (d.ids || []).forEach(function (id) { watched.add(id); });",
+        "    watched = new Set(d.ids || []);",
         "    save(watched);",
         "    // Drop playlist entries whose files are gone: watched-marked",
         "    // files are deleted or moved to watched/ at the next scan",
@@ -908,8 +978,8 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "    var serverWatched = new Set(d.ids || []);",
         "    var playing = plIndex >= 0 ? pl[plIndex] : null;",
         "    pl = pl.filter(function (item) {",
-        "      var m = item.name.match(/\\[([A-Za-z0-9_-]{11})\\]/);",
-        "      return !m || !serverWatched.has(m[1]);",
+        "      var id = plItemId(item);",
+        "      return !id || !serverWatched.has(id);",
         "    });",
         "    if (playing) {",
         "      plIndex = pl.indexOf(playing);",
@@ -1055,6 +1125,15 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "  var plRepeat = document.getElementById(\"pl-repeat\");",
         "  var plIndex = -1;",
         "  var plDragIndex = -1;",
+        "  function plItemId(item) {",
+        "    // Items store the entry ID (a real YouTube ID, or a pseudo-ID",
+        "    // for files without one in the name). Items stored by older",
+        "    // versions only have the name, from which a real YouTube ID",
+        "    // can still be extracted.",
+        "    if (item.id) return item.id;",
+        "    var m = item.name.match(/\\[([A-Za-z0-9_-]{11})\\]/);",
+        "    return m ? m[1] : null;",
+        "  }",
         "  function plRemoveAt(i, markWatched) {",
         "    var removed = pl[i];",
         "    var removedCurrent = plIndex === i;",
@@ -1076,11 +1155,11 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "    // watched (it will be deleted at the next scan round). Clearing",
         "    // the whole playlist or untoggling + Playlist does not mark.",
         "    if (markWatched && removed) {",
-        "      var m = removed.name.match(/\\[([A-Za-z0-9_-]{11})\\]/);",
-        "      if (m && !watched.has(m[1])) {",
-        "        watched.add(m[1]);",
+        "      var removedId = plItemId(removed);",
+        "      if (removedId && !watched.has(removedId)) {",
+        "        watched.add(removedId);",
         "        save(watched);",
-        "        report(m[1], true);",
+        "        report(removedId, true);",
         "        applyAll();",
         "      }",
         "    }",
@@ -1179,13 +1258,22 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "      if (plIndex > 0) plPlayAt(plIndex - 1);",
         "    });",
         "  }",
-        "  plVideo.addEventListener(\"ended\", function () {",
+        "  function plAdvance() {",
         "    var next = plIndex + 1;",
         "    if (next >= pl.length) {",
         "      if (!plRepeat.checked) { plIndex = -1; plSavePos(); plRender(); return; }",
         "      next = 0;",
         "    }",
         "    plPlayAt(next);",
+        "  }",
+        "  plVideo.addEventListener(\"ended\", plAdvance);",
+        "  // A dead link (file deleted or moved to watched/ since the page",
+        "  // loaded) fires \"error\"; skip it like a finished video. Ignore",
+        "  // the error fired when the src was just cleared: there is no",
+        "  // current item to advance from.",
+        "  plVideo.addEventListener(\"error\", function () {",
+        "    if (!plVideo.error || !plVideo.currentSrc) return;",
+        "    plAdvance();",
         "  });",
         "  // Persist the play position so a page refresh can resume.",
         "  var PL_POS_KEY = \"ytwatcher:playlist-pos\";",
@@ -1256,7 +1344,7 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "      var href = a.getAttribute(\"href\");",
         "      if (!have[href]) {",
         "        have[href] = true;",
-        "        fresh.push({ href: href, name: a.textContent });",
+        "        fresh.push({ href: href, name: a.textContent, id: li.dataset.id });",
         "      }",
         "    });",
         "    if (shuffle) {",
@@ -1332,7 +1420,7 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         '        var href = a.getAttribute("href");',
         "        var idx = pl.findIndex(function (item) { return item.href === href; });",
         "        if (idx >= 0) { plRemoveAt(idx, false); return; }",
-        "        pl.push({ href: href, name: a.textContent });",
+        "        pl.push({ href: href, name: a.textContent, id: li.dataset.id });",
         "        plSave();",
         "        // First item added to an empty playlist: start playing it.",
         "        if (pl.length === 1) { plPlayAt(0); return; }",
@@ -1358,11 +1446,18 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         '    fetch(location.pathname + "?_library=" + Date.now(), { cache: "no-store" })',
         "      .then(function (r) { if (!r.ok) throw new Error(\"HTTP \" + r.status); return r.text(); })",
         "      .then(function (text) {",
+        "        // Compare the embedded listing fingerprints instead of the",
+        "        // DOM: applyAll() reorders and re-marks the live DOM, so an",
+        "        // innerHTML comparison would never match.",
+        "        var fpMatch = text.match(/<!--\\s*index-fingerprint:\\s*([a-f0-9]{40})\\s*-->/);",
+        "        var incomingFp = fpMatch && fpMatch[1];",
+        "        if (incomingFp && incomingFp === currentFingerprint) return;",
         '        var fresh = new DOMParser().parseFromString(text, "text/html");',
         '        var incoming = fresh.getElementById("video-sections");',
         '        var current = document.getElementById("video-sections");',
-        "        if (!incoming || !current || incoming.innerHTML === current.innerHTML) return;",
+        "        if (!incoming || !current) return;",
         "        current.innerHTML = incoming.innerHTML;",
+        "        if (incomingFp) currentFingerprint = incomingFp;",
         '        var incomingStatus = fresh.getElementById("library-status");',
         '        if (incomingStatus) document.getElementById("library-status").innerHTML = incomingStatus.innerHTML;',
         "        bindAvailableVideos();",
@@ -1383,6 +1478,11 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
     return "\n".join(lines)
 
 
+# Serializes index.html rebuilds: the watcher loop and manual download
+# jobs (API or CLI) can trigger one concurrently.
+_index_lock = threading.Lock()
+
+
 def update_index_html(download_dir, api_port=DEFAULT_API_PORT,
                       site_title=DEFAULT_SITE_TITLE, max_age_days=None):
     """Regenerate download_dir/index.html if the file listing has changed.
@@ -1394,39 +1494,38 @@ def update_index_html(download_dir, api_port=DEFAULT_API_PORT,
     are never listed regardless: they are deleted or archived into
     'watched' subfolders.
     """
-    groups = scan_downloads(download_dir)
-    if max_age_days:
-        cutoff = time.time() - max_age_days * 86400
-        groups = {
-            # "manually" is exempt: those downloads are deliberate one-offs,
-            # and an old upload would otherwise vanish from the page the
-            # moment it is downloaded.
-            channel: ([e for e in entries if e["mtime"] >= cutoff]
-                      if channel != "manually" else entries)
-            for channel, entries in groups.items()
-        }
-        groups = {c: es for c, es in groups.items() if es}
-    total = sum(len(entries) for entries in groups.values())
-    channels = len(groups)
-    fp = fingerprint(groups, site_title)
-    index_path = Path(download_dir) / "index.html"
-    if read_existing_fingerprint(index_path) == fp:
-        return False, total, channels
-    # Top 10 newest videos across all channels.
-    latest = sorted(
-        (entry for entries in groups.values() for entry in entries),
-        key=lambda e: e["mtime"],
-        reverse=True,
-    )[:10]
-    now_str = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
-    html_content = generate_index_html(groups, total, channels, now_str, fp, latest=latest, api_port=api_port, site_title=site_title)
-    # Unique tmp name per process: a fixed "index.html.tmp" races when the
-    # watcher and a manual download rebuild the index concurrently.
-    tmp = index_path.with_name(f"{index_path.name}.{os.getpid()}.tmp")
-    tmp.write_text(html_content, encoding="utf-8")
-    tmp.replace(index_path)
-    log.info("index.html updated (%d videos across %d channels)", total, channels)
-    return True, total, channels
+    with _index_lock:
+        groups = scan_downloads(download_dir)
+        if max_age_days:
+            cutoff = time.time() - max_age_days * 86400
+            groups = {
+                # "manually" is exempt: those downloads are deliberate
+                # one-offs, and an old upload would otherwise vanish from
+                # the page the moment it is downloaded.
+                channel: ([e for e in entries if e["mtime"] >= cutoff]
+                          if channel != "manually" else entries)
+                for channel, entries in groups.items()
+            }
+            groups = {c: es for c, es in groups.items() if es}
+        total = sum(len(entries) for entries in groups.values())
+        channels = len(groups)
+        fp = fingerprint(groups, site_title)
+        index_path = Path(download_dir) / "index.html"
+        if read_existing_fingerprint(index_path) == fp:
+            return False, total, channels
+        # Top 10 newest videos across all channels.
+        latest = sorted(
+            (entry for entries in groups.values() for entry in entries),
+            key=lambda e: e["mtime"],
+            reverse=True,
+        )[:10]
+        now_str = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
+        html_content = generate_index_html(groups, total, channels, now_str, fp, latest=latest, api_port=api_port, site_title=site_title)
+        tmp = _tmp_path(index_path)
+        tmp.write_text(html_content, encoding="utf-8")
+        tmp.replace(index_path)
+        log.info("index.html updated (%d videos across %d channels)", total, channels)
+        return True, total, channels
 
 
 # ---------------------------------------------------------------------------
@@ -1485,6 +1584,31 @@ def delete_watched_videos(download_dir, watched_ids, keep_channels=()):
     return removed
 
 
+def prune_watched_marks(download_dir, watched_ids):
+    """Drop path-derived pseudo-IDs whose file no longer exists.
+
+    Pseudo-IDs ("m" + sha1 of the relative path, see entry_id) die when
+    their file is deleted, renamed, or moved, and would accumulate in
+    watched.json forever. Real YouTube IDs are kept even with no matching
+    file: the ID namespace is global, so the mark may still be wanted for
+    a file that reappears elsewhere under download_dir.
+    """
+    pseudo_ids = {vid for vid in watched_ids if vid.startswith("m")}
+    if not pseudo_ids:
+        return watched_ids
+    live = set()
+    root = Path(download_dir)
+    if root.is_dir():
+        for path in root.rglob("*"):
+            if not is_video_file(path):
+                continue
+            rel = path.relative_to(root).as_posix()
+            vid = "m" + hashlib.sha1(rel.encode("utf-8")).hexdigest()[:10]
+            if vid in pseudo_ids:
+                live.add(vid)
+    return (watched_ids - pseudo_ids) | live
+
+
 class ApiHandler(BaseHTTPRequestHandler):
     """HTTP API backing the index page.
 
@@ -1518,16 +1642,42 @@ class ApiHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _origin_allowed(self):
+        """True when the request has no Origin header (curl, server-side
+        clients) or the Origin's host[:port] matches the Host header.
+
+        Browsers send Origin on cross-origin requests and preflights, so
+        this blocks other sites from calling the unauthenticated API while
+        keeping it reachable from the index page it serves.
+        """
+        origin = self.headers.get("Origin")
+        if not origin:
+            return True
+        origin_host = urllib.parse.urlsplit(origin).netloc.lower()
+        return origin_host == self.headers.get("Host", "").lower()
+
     def _read_body(self):
+        """Read the request body, or None after sending 413 if too big."""
         length = int(self.headers.get("Content-Length", 0))
+        if length > MAX_REQUEST_BODY:
+            self._json(413, {"error": "request body too large"})
+            return None
+        # Bound the time a client can trickle a body (slow-loris).
+        self.connection.settimeout(REQUEST_BODY_TIMEOUT)
         return self.rfile.read(length)
 
     def do_OPTIONS(self):
+        if not self._origin_allowed():
+            self._json(403, {"error": "cross-origin request forbidden"})
+            return
         self.send_response(204)
         self._cors()
         self.end_headers()
 
     def do_GET(self):
+        if not self._origin_allowed():
+            self._json(403, {"error": "cross-origin request forbidden"})
+            return
         if self.path == "/watched":
             # The page merges this into its localStorage watched set, so
             # marks sync across browsers and the server stays the source
@@ -1569,6 +1719,9 @@ class ApiHandler(BaseHTTPRequestHandler):
             self._json(404, {"error": "not found"})
 
     def do_POST(self):
+        if not self._origin_allowed():
+            self._json(403, {"error": "cross-origin request forbidden"})
+            return
         if self.path == "/watched":
             self._post_watched()
         elif self.path == "/config":
@@ -1582,7 +1735,10 @@ class ApiHandler(BaseHTTPRequestHandler):
 
     def _post_watched(self):
         try:
-            data = json.loads(self._read_body() or b"{}")
+            body = self._read_body()
+            if body is None:
+                return
+            data = json.loads(body or b"{}")
             video_id = data.get("id", "")
             if not re.fullmatch(r"[A-Za-z0-9_-]{11}", video_id):
                 raise ValueError(f"bad video id: {video_id!r}")
@@ -1603,7 +1759,10 @@ class ApiHandler(BaseHTTPRequestHandler):
             self._json(400, {"error": str(e)})
 
     def _post_config(self):
-        text = self._read_body().decode("utf-8", errors="replace")
+        body = self._read_body()
+        if body is None:
+            return
+        text = body.decode("utf-8", errors="replace")
         problems = save_config_text(text)
         if problems:
             for problem in problems:
@@ -1614,7 +1773,10 @@ class ApiHandler(BaseHTTPRequestHandler):
         self._json(200, {"ok": True})
 
     def _post_cookies(self):
-        text = self._read_body().decode("utf-8", errors="replace")
+        body = self._read_body()
+        if body is None:
+            return
+        text = body.decode("utf-8", errors="replace")
         if not text.strip():
             try:
                 COOKIES_FILE.unlink(missing_ok=True)
@@ -1625,9 +1787,12 @@ class ApiHandler(BaseHTTPRequestHandler):
             self._json(200, {"ok": True, "set": False})
             return
         # Netscape cookies.txt format: 7 tab-separated fields per line.
+        # "#HttpOnly_" lines are cookie lines too (the prefix marks the
+        # HttpOnly flag), not comments.
         cookie_lines = [
             line for line in text.splitlines()
-            if line.strip() and not line.startswith("#")
+            if line.strip()
+            and (not line.startswith("#") or line.startswith("#HttpOnly_"))
         ]
         if not cookie_lines or any(line.count("\t") < 6 for line in cookie_lines):
             self._json(400, {
@@ -1645,8 +1810,11 @@ class ApiHandler(BaseHTTPRequestHandler):
         self._json(200, {"ok": True, "set": True, "lines": len(cookie_lines)})
 
     def _post_download(self):
+        body = self._read_body()
+        if body is None:
+            return
         try:
-            data = json.loads(self._read_body() or b"{}")
+            data = json.loads(body or b"{}")
         except json.JSONDecodeError as e:
             self._json(400, {"error": str(e)})
             return
@@ -1662,6 +1830,15 @@ class ApiHandler(BaseHTTPRequestHandler):
             return
         job_id = uuid.uuid4().hex[:8]
         with _download_jobs_lock:
+            running = sum(
+                1 for job in _download_jobs.values()
+                if job["status"] == "running"
+            )
+            if running >= MAX_CONCURRENT_DOWNLOADS:
+                self._json(429, {
+                    "error": "too many downloads in progress, try again later",
+                })
+                return
             _download_jobs[job_id] = {
                 "id": job_id, "url": url, "quality": quality,
                 "status": "running", "error": None, "created": time.time(),
@@ -1673,7 +1850,18 @@ class ApiHandler(BaseHTTPRequestHandler):
                 if _download_jobs[oldest]["status"] == "running":
                     break
                 del _download_jobs[oldest]
-        settings = load_config().get("settings", {})
+        try:
+            settings = load_config().get("settings", {})
+        except Exception as e:
+            log.error("manual download job %s: could not load config: %s",
+                      job_id, e)
+            with _download_jobs_lock:
+                job = _download_jobs.get(job_id)
+                if job is not None:
+                    job["status"] = "failed"
+                    job["error"] = "server configuration error"
+            self._json(500, {"error": "could not load server configuration"})
+            return
         thread = threading.Thread(
             target=run_download_job, args=(job_id, url, quality, settings),
             daemon=True,
@@ -1963,7 +2151,7 @@ def record_manual_download(video_id, settings):
     The ID goes into state.json so the watcher never re-downloads the
     video, even after the file is deleted via a watched mark.
     """
-    with _state_lock:
+    with _state_lock, state_file_lock():
         seen = load_state()
         seen.add(video_id)
         save_state(seen)
@@ -1996,7 +2184,13 @@ def run_download_job(job_id, url, quality, settings):
                 job["status"] = "done"
                 job["video_id"] = result[0]
     if result is not None:
-        record_manual_download(result[0], settings)
+        try:
+            record_manual_download(result[0], settings)
+        except Exception as e:
+            # The job is already marked done; only the state.json record
+            # and index rebuild failed.
+            log.error("manual download job %s: could not record %s: %s",
+                      job_id, result[0], e)
         log.info("manual download job %s done: %s", job_id, result[0])
 
 
@@ -2210,6 +2404,15 @@ def run_round(config, seen, scan_only=False, telegram_token=None, telegram_chat_
                 )
             except Exception as e:
                 log.error("failed to update index.html: %s", e)
+        # Drop dead pseudo-ID marks (see prune_watched_marks); runs after
+        # the deletion above so marks consumed by it are pruned too.
+        with _watched_lock:
+            watched = load_watched()
+            pruned = prune_watched_marks(download_dir, watched)
+            if pruned != watched:
+                save_watched(pruned)
+                log.info("pruned %d dead watched mark(s)",
+                         len(watched) - len(pruned))
     for sub in subs:
         try:
             completed.extend(
@@ -2218,7 +2421,7 @@ def run_round(config, seen, scan_only=False, telegram_token=None, telegram_chat_
         except Exception as e:
             log.error("[%s] unexpected error: %s", sub.get("name", "?"), e)
     if not scan_only:
-        with _state_lock:
+        with _state_lock, state_file_lock():
             # Merge in IDs recorded by manual downloads that finished while
             # this round was running, so they aren't lost from state.json.
             seen |= load_state()
