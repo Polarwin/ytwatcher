@@ -14,6 +14,7 @@ import hashlib
 import html
 import json
 import logging
+from logging.handlers import RotatingFileHandler
 import os
 import re
 import subprocess
@@ -37,6 +38,9 @@ FAILED_FILE = Path(__file__).parent / "failed.json"
 # Netscape-format cookie export used as a retry when a yt-dlp download
 # fails without cookies. Managed via the API (never committed to git).
 COOKIES_FILE = Path(__file__).parent / "cookies.txt"
+# Persistent application log. The systemd journal remains useful for service
+# lifecycle events, while this file makes download failures easy to inspect.
+LOG_FILE = Path(__file__).parent / "ytwatcher.log"
 # Duration cache for the index page, keyed by file's relative path and
 # validated by size+mtime. Populated at download time from yt-dlp's
 # after_move printout; deleting it just loses the durations.
@@ -78,10 +82,20 @@ YT_DLP = str(Path(sys.executable).parent / "yt-dlp")
 if not Path(YT_DLP).exists():
     YT_DLP = "yt-dlp"
 
+_log_handlers = [logging.StreamHandler()]
+try:
+    _log_handlers.append(RotatingFileHandler(
+        LOG_FILE, maxBytes=5 * 1024 * 1024, backupCount=3, encoding="utf-8",
+    ))
+except OSError as exc:
+    # Keep the service usable if its working directory is temporarily
+    # read-only; stderr still reaches the systemd journal.
+    print(f"warning: could not open {LOG_FILE}: {exc}", file=sys.stderr)
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
+    handlers=_log_handlers,
 )
 log = logging.getLogger("ytwatcher")
 
@@ -685,7 +699,7 @@ def scan_downloads(download_dir):
 # Bump when the index.html template changes: the fingerprint below only
 # covers the file listing, so without this an existing index.html would
 # keep the old template until some video is added or removed.
-INDEX_TEMPLATE_VERSION = 29
+INDEX_TEMPLATE_VERSION = 30
 
 
 def fingerprint(groups, site_title=""):
@@ -952,7 +966,7 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         f"<!-- index-fingerprint: {fp} -->",
         "<script>",
         "(function () {",
-        '  var API = "http://" + location.hostname + ":' + str(api_port) + '";',
+        '  var API = "/ytwatcher/api";',
         f'  var currentFingerprint = "{fp}";',
         '  var KEY = "ytwatcher:watched";',
         "  function load() {",
@@ -1297,11 +1311,20 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "  window.addEventListener(\"beforeunload\", plSavePos);",
         "  // Audio-only downloads may use a video container such as .webm,",
         "  // so inspect the loaded stream as well as known audio extensions.",
+        "  // Auto playback speed for audio-only files: 2x for Chinese,",
+        "  // 1.5x for other languages, 1x for real videos. Chinese is",
+        "  // detected by channel folder or CJK characters in the title.",
+        "  var ZH_CHANNELS = [\"RhinoFinance\", \"\\u8001\\u9cf4TV\", \"KimsObservation\", \"LT\\u8996\\u754c\"];",
         "  plVideo.addEventListener(\"loadedmetadata\", function () {",
         "    if (plIndex < 0 || !pl[plIndex]) return;",
         "    var href = pl[plIndex].href.split(/[?#]/)[0];",
         "    var audioExtension = /\\.(m4a|mp3|opus|ogg|aac|wav|flac)$/i.test(href);",
-        "    plVideo.playbackRate = audioExtension || plVideo.videoWidth === 0 ? 2 : 1;",
+        "    var isAudio = audioExtension || plVideo.videoWidth === 0;",
+        "    if (!isAudio) { plVideo.playbackRate = 1; return; }",
+        "    var channel = decodeURIComponent(href.split(\"/\")[0] || \"\");",
+        "    var isChinese = ZH_CHANNELS.indexOf(channel) >= 0 ||",
+        "      /[\\u3400-\\u4dbf\\u4e00-\\u9fff]/.test(pl[plIndex].name);",
+        "    plVideo.playbackRate = isChinese ? 2 : 1.5;",
         "  });",
         "  // Resume after a refresh: restore the item (by href, robust",
         "  // against reordering) and position. If autoplay is blocked the",
@@ -1644,17 +1667,19 @@ class ApiHandler(BaseHTTPRequestHandler):
 
     def _origin_allowed(self):
         """True when the request has no Origin header (curl, server-side
-        clients) or the Origin's host[:port] matches the Host header.
+        clients) or the Origin's hostname matches the Host header's.
 
-        Browsers send Origin on cross-origin requests and preflights, so
-        this blocks other sites from calling the unauthenticated API while
-        keeping it reachable from the index page it serves.
+        Ports are ignored: the index page is served by nginx on :80 while
+        the API runs on :8791, so same-host browser requests are
+        cross-origin only by port. Foreign sites are still blocked by the
+        hostname comparison.
         """
         origin = self.headers.get("Origin")
         if not origin:
             return True
-        origin_host = urllib.parse.urlsplit(origin).netloc.lower()
-        return origin_host == self.headers.get("Host", "").lower()
+        origin_host = urllib.parse.urlsplit(origin).hostname or ""
+        host = urllib.parse.urlsplit("//" + self.headers.get("Host", "")).hostname or ""
+        return origin_host.lower() == host.lower()
 
     def _read_body(self):
         """Read the request body, or None after sending 413 if too big."""
@@ -2016,29 +2041,39 @@ def fetch_upload_timestamp(video_id):
     return None
 
 
-def run_yt_dlp(cmd):
+def run_yt_dlp(cmd, context="download"):
     """Run a yt-dlp download command; retry once with cookies.txt on failure.
 
     Some videos (members-only, age-restricted, bot-checked) only download
     with a logged-in session. Returns the CompletedProcess of the last
     attempt. Raises subprocess.TimeoutExpired like subprocess.run.
     """
+    started = time.monotonic()
+    log.info("%s: yt-dlp attempt started (without cookies)", context)
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=3600)
+    log.info("%s: yt-dlp attempt finished rc=%d elapsed=%.1fs",
+             context, result.returncode, time.monotonic() - started)
     if result.returncode == 0:
         return result
     # Log the real error before any retry: the retry's stderr replaces it
     # in the returned result and would otherwise hide it.
-    log.info("download failed (first attempt): %s", result.stderr.strip()[:300])
+    log.warning("%s: yt-dlp first attempt failed:\n%s",
+                context, result.stderr.strip()[-4000:])
     # Skip the retry when cookies.txt is empty: yt-dlp rejects it ("does
     # not look like a Netscape format cookies file"), masking the
     # original failure.
     if COOKIES_FILE.exists() and COOKIES_FILE.stat().st_size > 0:
-        log.info("retrying with cookies from %s", COOKIES_FILE.name)
+        retry_started = time.monotonic()
+        log.info("%s: retrying with %s", context, COOKIES_FILE.name)
         result = subprocess.run(
             cmd + ["--cookies", str(COOKIES_FILE)],
             capture_output=True, text=True, timeout=3600,
         )
+        log.info("%s: cookie retry finished rc=%d elapsed=%.1fs",
+                 context, result.returncode, time.monotonic() - retry_started)
         if result.returncode != 0:
+            log.error("%s: yt-dlp cookie retry failed:\n%s",
+                      context, result.stderr.strip()[-4000:])
             notify_cookie_problem(result.stderr, "even with cookies.txt")
     else:
         notify_cookie_problem(result.stderr,
@@ -2092,7 +2127,7 @@ def download_video(sub, video, download_dir):
     return "ok", downloaded, parse_duration_print(result.stdout)
 
 
-def download_manually(url, out_dir, fmt=None, sort=None):
+def download_manually(url, out_dir, fmt=None, sort=None, job_id=None):
     """Download url into out_dir via yt-dlp.
 
     Returns (video_id, file path) on success, else None. The finished
@@ -2112,14 +2147,16 @@ def download_manually(url, out_dir, fmt=None, sort=None):
     if sort:
         cmd += ["-S", sort]
     cmd.append(url)
-    log.info("running: %s", " ".join(cmd))
+    context = f"manual job {job_id}" if job_id else "manual download"
+    log.info("%s: url=%s format=%s output=%s",
+             context, url, fmt or "default", out_dir)
     try:
-        result = run_yt_dlp(cmd)
+        result = run_yt_dlp(cmd, context=context)
     except subprocess.TimeoutExpired:
-        log.error("download timed out for %s", url)
+        log.error("%s: timed out after 3600s: %s", context, url)
         return None
     if result.returncode != 0:
-        log.error("download failed for %s:\n%s", url, result.stderr.strip()[:500])
+        log.error("%s: failed for %s (final stderr above)", context, url)
         return None
     downloaded = None
     for line in result.stdout.splitlines():
@@ -2128,7 +2165,7 @@ def download_manually(url, out_dir, fmt=None, sort=None):
         if path.is_file() and path.parent == out_dir and is_video_file(path):
             downloaded = path
     if downloaded is None:
-        log.error("yt-dlp exited 0 for %s but the file was not found", url)
+        log.error("%s: yt-dlp exited 0 but the file was not found", context)
         return None
     match = VIDEO_ID_RE.search(downloaded.name)
     if not match:
@@ -2142,6 +2179,8 @@ def download_manually(url, out_dir, fmt=None, sort=None):
     # out_dir is download_dir/manually, so its parent is the index root.
     record_duration(out_dir.parent, downloaded,
                     parse_duration_print(result.stdout))
+    log.info("%s: downloaded id=%s file=%s bytes=%d",
+             context, match.group(1), downloaded, downloaded.stat().st_size)
     return match.group(1), downloaded
 
 
@@ -2168,8 +2207,9 @@ def run_download_job(job_id, url, quality, settings):
     fmt = MANUAL_QUALITY_PRESETS[quality]
     out_dir = Path(settings.get("download_dir", "/srv/files")) / "manually"
     error = None
+    log.info("manual job %s: started quality=%s url=%s", job_id, quality, url)
     try:
-        result = download_manually(url, out_dir, fmt=fmt)
+        result = download_manually(url, out_dir, fmt=fmt, job_id=job_id)
     except Exception as e:
         result = None
         error = str(e)
@@ -2180,6 +2220,7 @@ def run_download_job(job_id, url, quality, settings):
             if result is None:
                 job["status"] = "failed"
                 job["error"] = error or "download failed (see service log)"
+                log.error("manual job %s: failed", job_id)
             else:
                 job["status"] = "done"
                 job["video_id"] = result[0]
