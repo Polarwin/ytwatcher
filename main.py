@@ -597,7 +597,7 @@ def format_duration(seconds):
 
 
 def load_durations():
-    """Return the ffprobe duration cache: {rel path: {duration, size, mtime}}."""
+    """Return the file metadata cache: {rel path: {duration, has_video, size, mtime}}."""
     if DURATIONS_FILE.exists():
         try:
             with open(DURATIONS_FILE, "r", encoding="utf-8") as f:
@@ -621,19 +621,20 @@ def save_durations(durations):
 
 
 def record_duration(download_dir, path, duration):
-    """Cache a downloaded file's duration (known from yt-dlp) for the index."""
-    if duration is None:
-        return
+    """Cache a downloaded file's duration and video-stream presence for the index."""
     path = Path(path)
     try:
         rel = path.relative_to(download_dir).as_posix()
         stat = path.stat()
     except (ValueError, OSError):
         return
+    has_video = _has_video_stream(path)
     durations = load_durations()
-    durations[rel] = {
-        "duration": duration, "size": stat.st_size, "mtime": stat.st_mtime,
-    }
+    entry = durations.setdefault(rel, {})
+    entry.update({"size": stat.st_size, "mtime": stat.st_mtime})
+    if duration is not None:
+        entry["duration"] = duration
+    entry["has_video"] = has_video
     save_durations(durations)
 
 
@@ -650,6 +651,37 @@ def parse_duration_print(stdout):
     return duration
 
 
+def _has_video_stream(path):
+    """Use ffprobe to tell whether a file contains a video stream.
+
+    Audio-only downloads are often in a video container (.webm), so we
+    inspect the streams instead of trusting the extension. Files with a
+    known audio-only extension are skipped without probing.
+    """
+    suffix = path.suffix.lower()
+    if suffix in (".m4a", ".mp3", ".opus", ".ogg", ".aac", ".wav", ".flac"):
+        return False
+    if suffix not in (".webm", ".mp4", ".mkv", ".mov", ".avi"):
+        return False
+    try:
+        result = subprocess.run(
+            [
+                "ffprobe", "-v", "error", "-select_streams", "v:0",
+                "-show_entries", "stream=codec_type", "-of", "json",
+                str(path),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        if result.returncode != 0:
+            return True  # be conservative: assume video if we can't tell
+        data = json.loads(result.stdout)
+        return bool(data.get("streams"))
+    except Exception:
+        return True
+
+
 def scan_downloads(download_dir):
     """Scan download_dir recursively and group video files by top-level subfolder.
 
@@ -657,11 +689,12 @@ def scan_downloads(download_dir):
     keep_watched: true) are not listed. Returns an ordered dict mapping
     channel/subfolder name to a list of entries sorted newest-first by
     file mtime. Each entry is a dict with keys: rel, name, size, mtime,
-    channel, duration (seconds, or None if not in the cache).
+    channel, duration (seconds, or None if not in the cache), has_video.
 
     Durations come from durations.json (recorded at download time from
     yt-dlp's after_move printout), validated by size+mtime; files without
-    a matching cache entry simply show no duration.
+    a matching cache entry simply show no duration. has_video is probed
+    with ffprobe (audio-only files may live in a video container).
     """
     root = Path(download_dir)
     if not root.is_dir():
@@ -682,9 +715,13 @@ def scan_downloads(download_dir):
         rel_posix = rel.as_posix()
         cached = durations.get(rel_posix)
         duration = None
+        has_video = None
         if (cached and cached.get("size") == stat.st_size
                 and cached.get("mtime") == stat.st_mtime):
             duration = cached.get("duration")
+            has_video = cached.get("has_video")
+        if has_video is None:
+            has_video = _has_video_stream(path)
         groups.setdefault(channel, []).append({
             "rel": rel_posix,
             "name": path.name,
@@ -692,6 +729,7 @@ def scan_downloads(download_dir):
             "mtime": stat.st_mtime,
             "channel": channel,
             "duration": duration,
+            "has_video": has_video,
         })
     # Drop cache entries for files that no longer exist.
     seen_rels = {e["rel"] for entries in groups.values() for e in entries}
@@ -706,7 +744,7 @@ def scan_downloads(download_dir):
 # Bump when the index.html template changes: the fingerprint below only
 # covers the file listing, so without this an existing index.html would
 # keep the old template until some video is added or removed.
-INDEX_TEMPLATE_VERSION = 32
+INDEX_TEMPLATE_VERSION = 33
 
 
 def channel_speeds(config):
@@ -779,19 +817,16 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "    .latest h2 { color: #8ab4f8; }",
         "    h2 { margin: 0 0 .5rem; font-size: 1.15rem; color: #fff; }",
         "    ul { list-style: none; padding: 0; margin: 0; }",
-        "    li {",
-        "      display: flex;",
-        "      justify-content: space-between;",
-        "      align-items: center;",
-        "      gap: 1rem;",
-        "      padding: .75rem;",
-        "      border-bottom: 1px solid #2a2a2a;",
-        "    }",
+        "    li { padding: .75rem; border-bottom: 1px solid #2a2a2a; }",
         "    li:last-child { border-bottom: none; }",
-        "    a { color: #8ab4f8; text-decoration: none; word-break: break-word; flex: 1; }",
-        # Long titles are clamped to two lines on desktop; the full name
-        # stays available as the link's hover tooltip (title attribute).
-        "    li > a {",
+        "    .entry-row { display: flex; justify-content: space-between; align-items: flex-start; gap: .75rem; flex-wrap: wrap; }",
+        "    .entry-row > a { color: #8ab4f8; text-decoration: none; word-break: break-word; flex: 1; min-width: 220px; }",
+        "    .entry-col { display: flex; flex-direction: column; gap: .25rem; align-items: flex-end; flex-shrink: 0; }",
+        "    .entry-actions { display: flex; gap: .35rem; flex-wrap: wrap; justify-content: flex-end; }",
+        "    .entry-meta { color: #999; font-size: .85rem; white-space: nowrap; }",
+        # Long titles are clamped to two lines; the full name stays in the
+        # link's hover tooltip (title attribute).
+        "    .entry-row > a {",
         "      display: -webkit-box;",
         "      -webkit-box-orient: vertical;",
         "      -webkit-line-clamp: 2;",
@@ -799,7 +834,6 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "      overflow: hidden;",
         "    }",
         "    a:hover { text-decoration: underline; }",
-        "    .meta { white-space: nowrap; color: #999; font-size: .85rem; flex-shrink: 0; text-align: right; }",
         "    .watch-btn {",
         "      flex-shrink: 0;",
         "      padding: .15rem .55rem;",
@@ -845,15 +879,15 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "    #pl-video { width: 100%; max-height: 70vh; margin-top: .75rem; background: #000; }",
         "    #pl-now { color: #8ab4f8; margin-top: .5rem; font-size: .95rem; }",
         "    li.pl-current a { color: #7bd88a; }",
-        "    li.pl-current-video > a { color: #7bd88a; }",
+        "    li.pl-current-video .entry-row > a { color: #7bd88a; }",
         "    .pl-remove { flex-shrink: 0; }",
         "    #pl-items li { cursor: grab; }",
         "    #pl-items li.pl-drop-target { border-top: 2px solid #8ab4f8; }",
         # Queued-state cues: text/shape changes carry the meaning (color-
         # blind safe); the green tint is only a secondary hint.
         "    .watch-btn.pl-added { color: #7bd88a; border-color: #7bd88a; }",
-        "    li.pl-queued > a { font-weight: bold; }",
-        "    li.pl-queued > a::before { content: \"\\2261  \"; color: #7bd88a; }",
+        "    li.pl-queued .entry-row > a { font-weight: bold; }",
+        "    li.pl-queued .entry-row > a::before { content: \"\\2261  \"; color: #7bd88a; }",
         "    li.watched { opacity: .45; }",
         "    li.watched a { text-decoration: line-through; }",
         "    li.watched .watch-btn { color: #7bd88a; border-color: #7bd88a; }",
@@ -950,23 +984,33 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         pl_add_btn = (
             '          <button class="watch-btn pl-add" type="button">+ Playlist</button>'
         )
-        # Only real YouTube IDs can be upgraded: the server downloads the
-        # video stream by ID; pseudo-ID files have no video to fetch.
-        video_upgrade_btn = (
-            '          <button class="watch-btn video-upgrade" type="button" '
-            'title="Download the video stream and merge it in">⇩ Video</button>'
-            if not entry_id(entry).startswith("m") else None
-        )
+        # Real YouTube IDs can be upgraded. Files that already have a video
+        # stream get a disabled button as a visual hint.
+        eid = entry_id(entry)
+        if eid.startswith("m"):
+            video_upgrade_btn = None
+        else:
+            disabled_attr = ' disabled title="Already has video"' if entry.get("has_video") else ''
+            video_upgrade_btn = (
+                '          <button class="watch-btn video-upgrade" type="button" '
+                f'title="Download the video stream and merge it in"{disabled_attr}>⇩ Video</button>'
+            )
         return [line for line in [
             f"        <li{data_attr}>",
+            '          <div class="entry-row">',
             (
-                f'          <a href="{href}" title="{html.escape(entry["name"])}">'
+                f'            <a href="{href}" title="{html.escape(entry["name"])}">'
                 f"{html.escape(entry['name'])}</a>"
             ),
+            '            <div class="entry-col">',
+            '              <span class="entry-actions">',
             pl_add_btn,
             watch_btn,
             video_upgrade_btn,
-            f'          <span class="meta">{" &middot; ".join(meta_parts)}</span>',
+            '              </span>',
+            f'              <span class="entry-meta">{" &middot; ".join(meta_parts)}</span>',
+            '            </div>',
+            '          </div>',
             "        </li>",
         ] if line]
 
