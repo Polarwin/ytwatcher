@@ -17,8 +17,10 @@ import logging
 from logging.handlers import RotatingFileHandler
 import os
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import urllib.parse
@@ -704,7 +706,7 @@ def scan_downloads(download_dir):
 # Bump when the index.html template changes: the fingerprint below only
 # covers the file listing, so without this an existing index.html would
 # keep the old template until some video is added or removed.
-INDEX_TEMPLATE_VERSION = 31
+INDEX_TEMPLATE_VERSION = 32
 
 
 def channel_speeds(config):
@@ -809,6 +811,7 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "      cursor: pointer;",
         "    }",
         "    .watch-btn:hover { background: #3a3a3a; color: #fff; }",
+        "    .watch-btn:disabled { opacity: .5; cursor: default; }",
         "    .tools { margin-bottom: 2rem; }",
         "    .tools form { display: flex; gap: .5rem; flex-wrap: wrap; align-items: center; }",
         "    .tools input[type=url] {",
@@ -947,6 +950,13 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         pl_add_btn = (
             '          <button class="watch-btn pl-add" type="button">+ Playlist</button>'
         )
+        # Only real YouTube IDs can be upgraded: the server downloads the
+        # video stream by ID; pseudo-ID files have no video to fetch.
+        video_upgrade_btn = (
+            '          <button class="watch-btn video-upgrade" type="button" '
+            'title="Download the video stream and merge it in">⇩ Video</button>'
+            if not entry_id(entry).startswith("m") else None
+        )
         return [line for line in [
             f"        <li{data_attr}>",
             (
@@ -955,6 +965,7 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
             ),
             pl_add_btn,
             watch_btn,
+            video_upgrade_btn,
             f'          <span class="meta">{" &middot; ".join(meta_parts)}</span>',
             "        </li>",
         ] if line]
@@ -1057,6 +1068,31 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "      }",
         "    }).catch(function () {",
         "      setTimeout(function () { pollDownloads(jobId); }, 5000);",
+        "    });",
+        "  }",
+        "  function vuFail(btn, message) {",
+        "    btn.textContent = \"failed\";",
+        "    btn.title = message;",
+        "    setTimeout(function () {",
+        "      btn.disabled = false;",
+        "      btn.textContent = \"\\u21e9 Video\";",
+        "    }, 5000);",
+        "  }",
+        "  function pollVideoUpgrade(btn, jobId) {",
+        "    fetch(API + \"/downloads\").then(function (r) { return r.json(); }).then(function (data) {",
+        "      var job = null;",
+        "      (data.jobs || []).forEach(function (j) { if (j.id === jobId) job = j; });",
+        "      if (!job || job.status === \"running\") {",
+        "        setTimeout(function () { pollVideoUpgrade(btn, jobId); }, 3000);",
+        "      } else if (job.status === \"done\") {",
+        "        btn.disabled = false;",
+        "        btn.textContent = \"\\u21e9 Video\";",
+        "        refreshAvailableVideos();",
+        "      } else {",
+        "        vuFail(btn, job.error || \"unknown error\");",
+        "      }",
+        "    }).catch(function () {",
+        "      setTimeout(function () { pollVideoUpgrade(btn, jobId); }, 5000);",
         "    });",
         "  }",
         "  dlForm.addEventListener(\"submit\", function (ev) {",
@@ -1476,6 +1512,26 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "        report(id, isWatched);",
         "        applyAll();",
         "      });",
+        "      var vuBtn = li.querySelector(\".video-upgrade\");",
+        "      if (vuBtn) vuBtn.addEventListener(\"click\", function () {",
+        "        var btn = vuBtn;",
+        "        var rel = decodeURIComponent(",
+        "          li.querySelector(\"a\").getAttribute(\"href\").split(/[?#]/)[0]);",
+        "        btn.disabled = true;",
+        "        btn.textContent = \"\\u2026\";",
+        "        fetch(API + \"/video-upgrade\", {",
+        "          method: \"POST\",",
+        "          headers: { \"Content-Type\": \"application/json\" },",
+        "          body: JSON.stringify({ rel: rel }),",
+        "        }).then(function (r) {",
+        "          if (!r.ok) return r.json().then(function (d) { throw new Error(d.error || (\"HTTP \" + r.status)); });",
+        "          return r.json();",
+        "        }).then(function (d) {",
+        "          pollVideoUpgrade(btn, d.job_id);",
+        "        }).catch(function (e) {",
+        "          vuFail(btn, e.message);",
+        "        });",
+        "      });",
         "    });",
         "    });",
         "    applyAll();",
@@ -1675,6 +1731,9 @@ class ApiHandler(BaseHTTPRequestHandler):
     POST /download  {"url": "...", "quality": "720"|"best"|"audio"} starts
                     a manual download job; 202 with {"job_id": "..."}.
     GET  /downloads returns the status of recent manual download jobs.
+    POST /video-upgrade {"rel": "<path relative to download_dir>"} starts
+                    a job that downloads the video stream for an audio-only
+                    file and merges it in; 202 with {"job_id": "..."}.
     GET  /cookies   returns whether cookies.txt is set (never its content).
     POST /cookies   replaces cookies.txt (raw Netscape export body); an
                     empty body removes it.
@@ -1782,6 +1841,8 @@ class ApiHandler(BaseHTTPRequestHandler):
             self._post_config()
         elif self.path == "/download":
             self._post_download()
+        elif self.path == "/video-upgrade":
+            self._post_video_upgrade()
         elif self.path == "/cookies":
             self._post_cookies()
         else:
@@ -1894,7 +1955,8 @@ class ApiHandler(BaseHTTPRequestHandler):
                 })
                 return
             _download_jobs[job_id] = {
-                "id": job_id, "url": url, "quality": quality,
+                "id": job_id, "kind": "download", "url": url,
+                "quality": quality,
                 "status": "running", "error": None, "created": time.time(),
             }
             # Cap the job history; never evict a still-running job.
@@ -1922,6 +1984,70 @@ class ApiHandler(BaseHTTPRequestHandler):
         )
         thread.start()
         log.info("manual download job %s started: %s (%s)", job_id, url, quality)
+        self._json(202, {"job_id": job_id})
+
+    def _post_video_upgrade(self):
+        body = self._read_body()
+        if body is None:
+            return
+        try:
+            data = json.loads(body or b"{}")
+        except json.JSONDecodeError as e:
+            self._json(400, {"error": str(e)})
+            return
+        try:
+            settings = load_config().get("settings", {})
+        except Exception as e:
+            log.error("video-upgrade: could not load config: %s", e)
+            self._json(500, {"error": "could not load server configuration"})
+            return
+        download_dir = settings.get("download_dir", "/srv/files")
+        path = resolve_download_rel(download_dir, str(data.get("rel", "")))
+        if path is None or not path.is_file():
+            self._json(400, {"error": "path is not a file under download_dir"})
+            return
+        match = VIDEO_ID_RE.search(path.name)
+        if not match:
+            self._json(400, {"error": "no YouTube ID in filename"})
+            return
+        try:
+            codecs = probe_codecs(path)
+        except Exception as e:
+            self._json(400, {"error": f"could not probe file: {e}"})
+            return
+        if codecs["video"]:
+            self._json(400, {"error": "file already has a video stream"})
+            return
+        job_id = uuid.uuid4().hex[:8]
+        with _download_jobs_lock:
+            running = sum(
+                1 for job in _download_jobs.values()
+                if job["status"] == "running"
+            )
+            if running >= MAX_CONCURRENT_DOWNLOADS:
+                self._json(429, {
+                    "error": "too many downloads in progress, try again later",
+                })
+                return
+            _download_jobs[job_id] = {
+                "id": job_id, "kind": "video-upgrade", "rel": path.name,
+                "status": "running", "error": None, "created": time.time(),
+            }
+            # Cap the job history; never evict a still-running job.
+            while len(_download_jobs) > MAX_DOWNLOAD_JOBS:
+                oldest = min(_download_jobs,
+                             key=lambda k: _download_jobs[k]["created"])
+                if _download_jobs[oldest]["status"] == "running":
+                    break
+                del _download_jobs[oldest]
+        thread = threading.Thread(
+            target=run_video_upgrade_job,
+            args=(job_id, path, match.group(1), settings),
+            daemon=True,
+        )
+        thread.start()
+        log.info("video-upgrade job %s started: %s (%s)",
+                 job_id, match.group(1), path.name)
         self._json(202, {"job_id": job_id})
 
     def log_message(self, fmt, *args):
@@ -2262,6 +2388,152 @@ def run_download_job(job_id, url, quality, settings):
             log.error("manual download job %s: could not record %s: %s",
                       job_id, result[0], e)
         log.info("manual download job %s done: %s", job_id, result[0])
+
+
+def resolve_download_rel(download_dir, rel):
+    """Resolve a download_dir-relative path, rejecting escapes.
+
+    Returns the Path strictly under download_dir, or None when rel is
+    empty, absolute, or contains ".." that would leave download_dir.
+    """
+    root = Path(os.path.normpath(str(download_dir)))
+    if not rel or os.path.isabs(rel):
+        return None
+    normalized = os.path.normpath(rel)
+    if normalized in (".", "..") or normalized.startswith(".." + os.sep):
+        return None
+    path = root / normalized
+    if root not in path.parents:
+        return None
+    return path
+
+
+def probe_codecs(path):
+    """Return {"video": codec or None, "audio": codec or None} via ffprobe."""
+    result = subprocess.run(
+        ["ffprobe", "-v", "error", "-print_format", "json",
+         "-show_streams", str(path)],
+        capture_output=True, text=True, timeout=120,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"ffprobe failed for {Path(path).name}: "
+            + result.stderr.strip()[:200]
+        )
+    codecs = {"video": None, "audio": None}
+    for stream in json.loads(result.stdout).get("streams", []):
+        kind = stream.get("codec_type")
+        if kind in codecs and codecs[kind] is None:
+            codecs[kind] = stream.get("codec_name")
+    return codecs
+
+
+def merged_container(audio_codec, video_codec):
+    """Pick the output container for a video-only + audio-only merge.
+
+    webm/mp4 only accept their native codec families; mkv takes anything.
+    """
+    if audio_codec in ("opus", "vorbis") and video_codec in ("vp8", "vp9", "av1"):
+        return ".webm"
+    if audio_codec in ("aac", "mp3", "mp4a") and video_codec in ("h264", "avc1"):
+        return ".mp4"
+    return ".mkv"
+
+
+# ffmpeg muxer names for the containers merged_container can return; needed
+# because the merge target is a ".tmp" file, so ffmpeg can't guess.
+CONTAINER_FORMATS = {".webm": "webm", ".mp4": "mp4", ".mkv": "matroska"}
+
+
+def merge_video_audio(video_file, audio_path):
+    """Mux a video-only file with an audio-only file (-c copy).
+
+    The merged file atomically replaces audio_path, keeping its base name
+    (title + [ID]) and taking the extension of the chosen container; when
+    the extension changed, the old audio-only file is deleted. Returns the
+    merged path. On failure the original audio file is left untouched.
+    """
+    audio_codec = probe_codecs(audio_path)["audio"]
+    video_codec = probe_codecs(video_file)["video"]
+    if not video_codec:
+        raise RuntimeError(f"{Path(video_file).name} has no video stream")
+    ext = merged_container(audio_codec, video_codec)
+    final_path = audio_path.with_suffix(ext)
+    merged_tmp = _tmp_path(final_path)
+    try:
+        result = subprocess.run(
+            ["ffmpeg", "-y", "-i", str(video_file), "-i", str(audio_path),
+             "-c", "copy", "-map", "0:v:0", "-map", "1:a:0",
+             "-f", CONTAINER_FORMATS[ext], str(merged_tmp)],
+            capture_output=True, text=True, timeout=3600,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(
+                "ffmpeg merge failed: " + result.stderr.strip()[-300:])
+        # Keep the original mtime (the YouTube upload time) so the merged
+        # file keeps its place in the index listing.
+        stat = audio_path.stat()
+        merged_tmp.replace(final_path)
+        os.utime(final_path, (stat.st_atime, stat.st_mtime))
+    finally:
+        merged_tmp.unlink(missing_ok=True)
+    if final_path != audio_path:
+        audio_path.unlink()
+    return final_path
+
+
+def run_video_upgrade_job(job_id, audio_path, video_id, settings):
+    """Run a video-upgrade job from the API in a background thread."""
+    error = None
+    merged = None
+    tmp_dir = None
+    log.info("video-upgrade job %s: started id=%s file=%s",
+             job_id, video_id, audio_path)
+    try:
+        tmp_dir = Path(tempfile.mkdtemp(prefix="ytwatcher-upgrade-"))
+        cmd = [
+            YT_DLP,
+            "-f", "bestvideo[height<=720]",
+            "-o", str(tmp_dir / f"{video_id}.%(ext)s"),
+            "--no-playlist",
+            f"https://youtu.be/{video_id}",
+        ]
+        result = run_yt_dlp(cmd, context=f"video-upgrade job {job_id}")
+        if result.returncode != 0:
+            raise RuntimeError("video download failed (see service log)")
+        videos = [f for f in tmp_dir.iterdir() if is_video_file(f)]
+        if not videos:
+            raise RuntimeError("video download produced no file")
+        merged = merge_video_audio(videos[0], audio_path)
+    except Exception as e:
+        error = str(e)
+        log.error("video-upgrade job %s errored: %s", job_id, e)
+    finally:
+        if tmp_dir is not None:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+    with _download_jobs_lock:
+        job = _download_jobs.get(job_id)
+        if job is not None:
+            if error is None:
+                job["status"] = "done"
+                job["video_id"] = video_id
+            else:
+                job["status"] = "failed"
+                job["error"] = error
+    if error is None:
+        try:
+            update_index_html(
+                settings.get("download_dir", "/srv/files"),
+                api_port=settings.get("api_port", DEFAULT_API_PORT),
+                site_title=settings.get("site_title", DEFAULT_SITE_TITLE),
+                max_age_days=settings.get("watchlist_max_age_days"),
+            )
+        except Exception as e:
+            # The job is already marked done; only the index rebuild failed.
+            log.error("video-upgrade job %s: index rebuild failed: %s",
+                      job_id, e)
+        log.info("video-upgrade job %s done: %s -> %s",
+                 job_id, video_id, merged.name)
 
 
 def save_config_text(text):
