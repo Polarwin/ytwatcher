@@ -11,6 +11,7 @@ SITE_AVAILABLE="/etc/nginx/sites-available/$SITE_NAME"
 SITE_ENABLED="/etc/nginx/sites-enabled/$SITE_NAME"
 LANDING_ROOT="/srv/www"
 STOCKTICKER_PORT=8010
+YTWATCHER_API_PORT=8791
 
 # Videos root comes from subscriptions.yaml (settings.download_dir), falling
 # back to /srv/files/ytwatcher if the key is missing.
@@ -101,6 +102,15 @@ server {
 
     location = /ytwatcher {
         return 301 /ytwatcher/;
+    }
+
+    location /ytwatcher/api/ {
+        proxy_pass http://127.0.0.1:$YTWATCHER_API_PORT/;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_read_timeout 3600s;
+        client_max_body_size 1m;
     }
 
     location /ytwatcher/ {

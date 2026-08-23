@@ -218,6 +218,11 @@ def validate_config(config):
             problems.append(f"{label}: 'shorts_max_duration' must be a number")
         if "keep_watched" in sub and not isinstance(sub["keep_watched"], bool):
             problems.append(f"{label}: 'keep_watched' must be true or false")
+        speed = sub.get("playback_speed")
+        if speed is not None and not (
+            isinstance(speed, (int, float)) and not isinstance(speed, bool) and speed > 0
+        ):
+            problems.append(f"{label}: 'playback_speed' must be a positive number")
     return problems
 
 
@@ -699,10 +704,21 @@ def scan_downloads(download_dir):
 # Bump when the index.html template changes: the fingerprint below only
 # covers the file listing, so without this an existing index.html would
 # keep the old template until some video is added or removed.
-INDEX_TEMPLATE_VERSION = 30
+INDEX_TEMPLATE_VERSION = 31
 
 
-def fingerprint(groups, site_title=""):
+def channel_speeds(config):
+    """Return {subscription name: playback speed} for subscriptions that set it."""
+    speeds = {}
+    for sub in config.get("subscriptions", []):
+        if isinstance(sub, dict) and isinstance(sub.get("name"), str):
+            speed = sub.get("playback_speed")
+            if isinstance(speed, (int, float)) and speed > 0:
+                speeds[sub["name"]] = float(speed)
+    return speeds
+
+
+def fingerprint(groups, site_title="", speeds=None):
     """Return a stable hash of the current download listing and page title."""
     data = []
     for channel, entries in groups.items():
@@ -714,8 +730,9 @@ def fingerprint(groups, site_title=""):
             ],
         })
     canonical = json.dumps(data, sort_keys=True, ensure_ascii=True, separators=(",", ":"))
+    speeds_json = json.dumps(speeds or {}, sort_keys=True, separators=(",", ":"))
     return hashlib.sha1(
-        (f"{INDEX_TEMPLATE_VERSION}\n" + site_title + "\n" + canonical).encode("utf-8")
+        (f"{INDEX_TEMPLATE_VERSION}\n" + site_title + "\n" + canonical + "\n" + speeds_json).encode("utf-8")
     ).hexdigest()
 
 
@@ -731,10 +748,11 @@ def read_existing_fingerprint(index_path):
     return match.group(1) if match else None
 
 
-def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_port=DEFAULT_API_PORT, site_title=DEFAULT_SITE_TITLE):
+def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_port=DEFAULT_API_PORT, site_title=DEFAULT_SITE_TITLE, speeds=None):
     """Build the index.html page."""
     latest = latest or []
     escaped_title = html.escape(site_title)
+    speeds_json = json.dumps(speeds or {}, ensure_ascii=False)
     lines = [
         "<!DOCTYPE html>",
         '<html lang="en">',
@@ -1309,22 +1327,23 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "  });",
         "  plVideo.addEventListener(\"pause\", plSavePos);",
         "  window.addEventListener(\"beforeunload\", plSavePos);",
-        "  // Audio-only downloads may use a video container such as .webm,",
-        "  // so inspect the loaded stream as well as known audio extensions.",
-        "  // Auto playback speed for audio-only files: 2x for Chinese,",
-        "  // 1.5x for other languages, 1x for real videos. Chinese is",
-        "  // detected by channel folder or CJK characters in the title.",
-        "  var ZH_CHANNELS = [\"RhinoFinance\", \"\\u8001\\u9cf4TV\", \"KimsObservation\", \"LT\\u8996\\u754c\"];",
+        "  // Playback speed comes from each subscription's playback_speed",
+        "  // in subscriptions.yaml (SPEED_BY_CHANNEL). Channels without a",
+        "  // setting (e.g. manual downloads) fall back to a heuristic:",
+        "  // audio-only Chinese 2x, other audio 1.5x, real videos 1x.",
+        f"  var SPEED_BY_CHANNEL = {speeds_json};",
         "  plVideo.addEventListener(\"loadedmetadata\", function () {",
         "    if (plIndex < 0 || !pl[plIndex]) return;",
         "    var href = pl[plIndex].href.split(/[?#]/)[0];",
+        "    var channel = decodeURIComponent(href.split(\"/\")[0] || \"\");",
+        "    if (SPEED_BY_CHANNEL[channel]) {",
+        "      plVideo.playbackRate = SPEED_BY_CHANNEL[channel];",
+        "      return;",
+        "    }",
         "    var audioExtension = /\\.(m4a|mp3|opus|ogg|aac|wav|flac)$/i.test(href);",
         "    var isAudio = audioExtension || plVideo.videoWidth === 0;",
         "    if (!isAudio) { plVideo.playbackRate = 1; return; }",
-        "    var channel = decodeURIComponent(href.split(\"/\")[0] || \"\");",
-        "    var isChinese = ZH_CHANNELS.indexOf(channel) >= 0 ||",
-        "      /[\\u3400-\\u4dbf\\u4e00-\\u9fff]/.test(pl[plIndex].name);",
-        "    plVideo.playbackRate = isChinese ? 2 : 1.5;",
+        "    plVideo.playbackRate = /[\\u3400-\\u4dbf\\u4e00-\\u9fff]/.test(pl[plIndex].name) ? 2 : 1.5;",
         "  });",
         "  // Resume after a refresh: restore the item (by href, robust",
         "  // against reordering) and position. If autoplay is blocked the",
@@ -1507,7 +1526,8 @@ _index_lock = threading.Lock()
 
 
 def update_index_html(download_dir, api_port=DEFAULT_API_PORT,
-                      site_title=DEFAULT_SITE_TITLE, max_age_days=None):
+                      site_title=DEFAULT_SITE_TITLE, max_age_days=None,
+                      speeds=None):
     """Regenerate download_dir/index.html if the file listing has changed.
 
     The page is always built from a full recursive scan of download_dir, so
@@ -1516,8 +1536,17 @@ def update_index_html(download_dir, api_port=DEFAULT_API_PORT,
     (they stay on disk); the "manually" folder is exempt. Watched files
     are never listed regardless: they are deleted or archived into
     'watched' subfolders.
+
+    speeds maps channel folder -> playback speed (from subscriptions.yaml);
+    when omitted it is derived from the current config, falling back to
+    empty if the config cannot be read.
     """
     with _index_lock:
+        if speeds is None:
+            try:
+                speeds = channel_speeds(load_config())
+            except Exception:
+                speeds = {}
         groups = scan_downloads(download_dir)
         if max_age_days:
             cutoff = time.time() - max_age_days * 86400
@@ -1532,7 +1561,7 @@ def update_index_html(download_dir, api_port=DEFAULT_API_PORT,
             groups = {c: es for c, es in groups.items() if es}
         total = sum(len(entries) for entries in groups.values())
         channels = len(groups)
-        fp = fingerprint(groups, site_title)
+        fp = fingerprint(groups, site_title, speeds)
         index_path = Path(download_dir) / "index.html"
         if read_existing_fingerprint(index_path) == fp:
             return False, total, channels
@@ -1543,7 +1572,7 @@ def update_index_html(download_dir, api_port=DEFAULT_API_PORT,
             reverse=True,
         )[:10]
         now_str = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
-        html_content = generate_index_html(groups, total, channels, now_str, fp, latest=latest, api_port=api_port, site_title=site_title)
+        html_content = generate_index_html(groups, total, channels, now_str, fp, latest=latest, api_port=api_port, site_title=site_title, speeds=speeds)
         tmp = _tmp_path(index_path)
         tmp.write_text(html_content, encoding="utf-8")
         tmp.replace(index_path)
