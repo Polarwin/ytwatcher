@@ -805,7 +805,7 @@ def scan_downloads(download_dir):
 # Bump when the index.html template changes: the fingerprint below only
 # covers the file listing, so without this an existing index.html would
 # keep the old template until some video is added or removed.
-INDEX_TEMPLATE_VERSION = 33
+INDEX_TEMPLATE_VERSION = 35
 
 
 def channel_speeds(config):
@@ -1027,7 +1027,7 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
     ])
 
     def entry_lines(entry, show_channel=False):
-        href = urllib.parse.quote(entry["rel"], safe="/")
+        href = urllib.parse.quote(entry["rel"], safe="/") + "?v=" + str(int(entry["mtime"]))
         size = format_size(entry["size"])
         mtime_str = datetime.fromtimestamp(entry["mtime"]).strftime("%Y-%m-%d %H:%M")
         meta_parts = [mtime_str, size]
@@ -1664,6 +1664,20 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         '        var incomingStatus = fresh.getElementById("library-status");',
         '        if (incomingStatus) document.getElementById("library-status").innerHTML = incomingStatus.innerHTML;',
         "        bindAvailableVideos();",
+        "        // Reconcile stored playlist hrefs with the refreshed library:",
+        "        // a video upgrade can change the file extension, so keep the",
+        "        // playlist pointing at the current file by matching data-id.",
+        "        var hrefById = {};",
+        '        document.querySelectorAll("#video-sections li[data-id]").forEach(function (li) {',
+        '          var a = li.querySelector("a");',
+        '          if (a) hrefById[li.dataset.id] = a.getAttribute("href");',
+        "        });",
+        "        var plChanged = false;",
+        "        pl.forEach(function (item) {",
+        "          var newHref = hrefById[item.id];",
+        "          if (newHref && newHref !== item.href) { item.href = newHref; plChanged = true; }",
+        "        });",
+        "        if (plChanged) { plSave(); plRender(); }",
         "      })",
         "      .catch(function () {})",
         "      .then(function () { libraryRefreshBusy = false; });",
