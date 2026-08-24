@@ -596,6 +596,61 @@ def format_duration(seconds):
     return f"{minutes}:{secs:02d}"
 
 
+def _file_creation_time(path):
+    """Return the file's birth (creation) time as a float timestamp.
+
+    Uses the Linux statx syscall when available so we get the real
+    creation time even over NFS. Falls back to st_mtime if statx fails.
+    """
+    try:
+        import ctypes
+        libc = ctypes.CDLL(None, use_errno=True)
+        class StatxTimestamp(ctypes.Structure):
+            _fields_ = [
+                ("tv_sec", ctypes.c_int64),
+                ("tv_nsec", ctypes.c_uint32),
+                ("__reserved", ctypes.c_int32),
+            ]
+        class Statx(ctypes.Structure):
+            _fields_ = [
+                ("stx_mask", ctypes.c_uint32),
+                ("stx_blksize", ctypes.c_uint32),
+                ("stx_attributes", ctypes.c_uint64),
+                ("stx_nlink", ctypes.c_uint32),
+                ("stx_uid", ctypes.c_uint32),
+                ("stx_gid", ctypes.c_uint32),
+                ("stx_mode", ctypes.c_uint16),
+                ("__spare0", ctypes.c_uint16 * 1),
+                ("stx_ino", ctypes.c_uint64),
+                ("stx_size", ctypes.c_uint64),
+                ("stx_blocks", ctypes.c_uint64),
+                ("stx_attributes_mask", ctypes.c_uint64),
+                ("stx_atime", StatxTimestamp),
+                ("stx_btime", StatxTimestamp),
+                ("stx_ctime", StatxTimestamp),
+                ("stx_mtime", StatxTimestamp),
+                ("stx_rdev_major", ctypes.c_uint32),
+                ("stx_rdev_minor", ctypes.c_uint32),
+                ("stx_dev_major", ctypes.c_uint32),
+                ("stx_dev_minor", ctypes.c_uint32),
+                ("stx_mnt_id", ctypes.c_uint64),
+                ("__spare2", ctypes.c_uint64),
+                ("__spare3", ctypes.c_uint64 * 12),
+            ]
+        AT_FDCWD = -100
+        STATX_BTIME = 0x800
+        statx = libc.statx
+        statx.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_uint32, ctypes.POINTER(Statx)]
+        statx.restype = ctypes.c_int
+        buf = Statx()
+        if statx(AT_FDCWD, os.fsencode(path), 0, STATX_BTIME, ctypes.byref(buf)) == 0:
+            if buf.stx_mask & STATX_BTIME:
+                return buf.stx_btime.tv_sec + buf.stx_btime.tv_nsec / 1e9
+    except Exception:
+        pass
+    return Path(path).stat().st_mtime
+
+
 def load_durations():
     """Return the file metadata cache: {rel path: {duration, has_video, size, mtime}}."""
     if DURATIONS_FILE.exists():
@@ -626,12 +681,13 @@ def record_duration(download_dir, path, duration):
     try:
         rel = path.relative_to(download_dir).as_posix()
         stat = path.stat()
+        ctime = _file_creation_time(path)
     except (ValueError, OSError):
         return
     has_video = _has_video_stream(path)
     durations = load_durations()
     entry = durations.setdefault(rel, {})
-    entry.update({"size": stat.st_size, "mtime": stat.st_mtime})
+    entry.update({"size": stat.st_size, "mtime": ctime})
     if duration is not None:
         entry["duration"] = duration
     entry["has_video"] = has_video
@@ -688,13 +744,17 @@ def scan_downloads(download_dir):
     Files under 'watched' subdirectories (archived by subscriptions with
     keep_watched: true) are not listed. Returns an ordered dict mapping
     channel/subfolder name to a list of entries sorted newest-first by
-    file mtime. Each entry is a dict with keys: rel, name, size, mtime,
-    channel, duration (seconds, or None if not in the cache), has_video.
+    file creation time. Each entry is a dict with keys: rel, name, size,
+    mtime, channel, duration (seconds, or None if not in the cache),
+    has_video.
 
     Durations come from durations.json (recorded at download time from
     yt-dlp's after_move printout), validated by size+mtime; files without
-    a matching cache entry simply show no duration. has_video is probed
-    with ffprobe (audio-only files may live in a video container).
+    a matching cache entry simply show no duration. mtime is actually the
+    file's creation (birth) time so the index and "Latest" section reflect
+    when the file first appeared on this filesystem, not when it was last
+    touched. has_video is probed with ffprobe (audio-only files may live
+    in a video container).
     """
     root = Path(download_dir)
     if not root.is_dir():
@@ -712,12 +772,13 @@ def scan_downloads(download_dir):
         else:
             channel = "(root)"
         stat = path.stat()
+        ctime = _file_creation_time(path)
         rel_posix = rel.as_posix()
         cached = durations.get(rel_posix)
         duration = None
         has_video = None
         if (cached and cached.get("size") == stat.st_size
-                and cached.get("mtime") == stat.st_mtime):
+                and cached.get("mtime") == ctime):
             duration = cached.get("duration")
             has_video = cached.get("has_video")
         if has_video is None:
@@ -726,7 +787,7 @@ def scan_downloads(download_dir):
             "rel": rel_posix,
             "name": path.name,
             "size": stat.st_size,
-            "mtime": stat.st_mtime,
+            "mtime": ctime,
             "channel": channel,
             "duration": duration,
             "has_video": has_video,
