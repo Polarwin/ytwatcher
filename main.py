@@ -147,7 +147,8 @@ def validate_config(config):
         problems.append("settings: must be a mapping")
     else:
         for key in ("check_interval_minutes", "recent_videos_to_scan",
-                    "api_port", "max_video_age_days", "watchlist_max_age_days"):
+                    "api_port", "max_video_age_days", "watchlist_max_age_days",
+                    "latest_max_age_days"):
             if key in settings and not isinstance(settings[key], (int, float)):
                 problems.append(f"settings.{key}: must be a number")
         download_dir = settings.get("download_dir")
@@ -1702,7 +1703,7 @@ _index_lock = threading.Lock()
 
 def update_index_html(download_dir, api_port=DEFAULT_API_PORT,
                       site_title=DEFAULT_SITE_TITLE, max_age_days=None,
-                      speeds=None):
+                      latest_max_age_days=None, speeds=None):
     """Regenerate download_dir/index.html if the file listing has changed.
 
     The page is always built from a full recursive scan of download_dir, so
@@ -1712,9 +1713,10 @@ def update_index_html(download_dir, api_port=DEFAULT_API_PORT,
     are never listed regardless: they are deleted or archived into
     'watched' subfolders.
 
-    speeds maps channel folder -> playback speed (from subscriptions.yaml);
-    when omitted it is derived from the current config, falling back to
-    empty if the config cannot be read.
+    latest_max_age_days filters the "Latest" section to the most recent N
+    days (creation time). speeds maps channel folder -> playback speed
+    (from subscriptions.yaml); when omitted it is derived from the current
+    config, falling back to empty if the config cannot be read.
     """
     with _index_lock:
         if speeds is None:
@@ -1746,6 +1748,9 @@ def update_index_html(download_dir, api_port=DEFAULT_API_PORT,
             key=lambda e: e["mtime"],
             reverse=True,
         )[:10]
+        if latest_max_age_days:
+            cutoff = time.time() - latest_max_age_days * 86400
+            latest = [e for e in latest if e["mtime"] >= cutoff]
         now_str = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
         html_content = generate_index_html(groups, total, channels, now_str, fp, latest=latest, api_port=api_port, site_title=site_title, speeds=speeds)
         tmp = _tmp_path(index_path)
@@ -2473,6 +2478,7 @@ def record_manual_download(video_id, settings):
         api_port=settings.get("api_port", DEFAULT_API_PORT),
         site_title=settings.get("site_title", DEFAULT_SITE_TITLE),
         max_age_days=settings.get("watchlist_max_age_days"),
+        latest_max_age_days=settings.get("latest_max_age_days"),
     )
 
 
@@ -2646,6 +2652,7 @@ def run_video_upgrade_job(job_id, audio_path, video_id, settings):
                 api_port=settings.get("api_port", DEFAULT_API_PORT),
                 site_title=settings.get("site_title", DEFAULT_SITE_TITLE),
                 max_age_days=settings.get("watchlist_max_age_days"),
+                latest_max_age_days=settings.get("latest_max_age_days"),
             )
         except Exception as e:
             # The job is already marked done; only the index rebuild failed.
@@ -2862,6 +2869,7 @@ def run_round(config, seen, scan_only=False, telegram_token=None, telegram_chat_
                     api_port=settings.get("api_port", DEFAULT_API_PORT),
                     site_title=settings.get("site_title", DEFAULT_SITE_TITLE),
                     max_age_days=settings.get("watchlist_max_age_days"),
+                    latest_max_age_days=settings.get("latest_max_age_days"),
                 )
             except Exception as e:
                 log.error("failed to update index.html: %s", e)
@@ -2895,6 +2903,7 @@ def run_round(config, seen, scan_only=False, telegram_token=None, telegram_chat_
                     api_port=settings.get("api_port", DEFAULT_API_PORT),
                     site_title=settings.get("site_title", DEFAULT_SITE_TITLE),
                     max_age_days=settings.get("watchlist_max_age_days"),
+                    latest_max_age_days=settings.get("latest_max_age_days"),
                 )
             except Exception as e:
                 log.error("failed to update index.html: %s", e)
@@ -2961,7 +2970,8 @@ def main():
 
     if args.generate_index:
         update_index_html(download_dir, api_port=api_port, site_title=site_title,
-                          max_age_days=settings.get("watchlist_max_age_days"))
+                          max_age_days=settings.get("watchlist_max_age_days"),
+                          latest_max_age_days=settings.get("latest_max_age_days"))
         return 0
 
     if args.test_notify:
@@ -2989,7 +2999,8 @@ def main():
     # browseable before the first new download completes.
     try:
         update_index_html(download_dir, api_port=api_port, site_title=site_title,
-                          max_age_days=settings.get("watchlist_max_age_days"))
+                          max_age_days=settings.get("watchlist_max_age_days"),
+                          latest_max_age_days=settings.get("latest_max_age_days"))
     except Exception as e:
         log.error("failed to generate initial index.html: %s", e)
 
