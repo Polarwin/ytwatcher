@@ -806,7 +806,7 @@ def scan_downloads(download_dir):
 # Bump when the index.html template changes: the fingerprint below only
 # covers the file listing, so without this an existing index.html would
 # keep the old template until some video is added or removed.
-INDEX_TEMPLATE_VERSION = 36
+INDEX_TEMPLATE_VERSION = 37
 
 
 def channel_speeds(config):
@@ -1019,6 +1019,7 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         'title="Queue every Spanish video in listed order">Add all Spanish</button>',
         '        <label><input type="checkbox" id="pl-repeat"> Repeat</label>',
         '        <button type="button" id="pl-clear">Clear</button>',
+        '        <button type="button" id="pl-download" title="Download every playlist file to this device">Download playlist</button>',
         '      </div>',
         '      <div id="pl-player" hidden>',
         '        <video id="pl-video" controls playsinline></video>',
@@ -1572,6 +1573,21 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "    plPlayer.hidden = true;",
         "    plSave();",
         "    plRender();",
+        "  });",
+        "  document.getElementById(\"pl-download\").addEventListener(\"click\", function () {",
+        "    if (!pl.length) return;",
+        "    var base = location.href.replace(/\\?.*$/, \"\").replace(/\\/$/, \"\");",
+        "    pl.forEach(function (item, i) {",
+        "      setTimeout(function () {",
+        "        var a = document.createElement(\"a\");",
+        "        a.href = base + \"/\" + item.href;",
+        "        a.download = item.name;",
+        "        a.style.display = \"none\";",
+        "        document.body.appendChild(a);",
+        "        a.click();",
+        "        document.body.removeChild(a);",
+        "      }, i * 300);",
+        "    });",
         "  });",
         "  function plUpdateButtons() {",
         "    var playingHref = plIndex >= 0 && pl[plIndex] ? pl[plIndex].href : null;",
