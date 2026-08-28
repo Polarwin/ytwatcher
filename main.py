@@ -806,7 +806,7 @@ def scan_downloads(download_dir):
 # Bump when the index.html template changes: the fingerprint below only
 # covers the file listing, so without this an existing index.html would
 # keep the old template until some video is added or removed.
-INDEX_TEMPLATE_VERSION = 35
+INDEX_TEMPLATE_VERSION = 36
 
 
 def channel_speeds(config):
@@ -1432,7 +1432,13 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "      if (plIndex > 0) plPlayAt(plIndex - 1);",
         "    });",
         "  }",
+        "  var plLastAdvance = 0;",
         "  function plAdvance() {",
+        "    var now = Date.now();",
+        "    // Debounce: mobile browsers sometimes fire ended/error twice during",
+        "    // the transition to the next item, which would skip over it.",
+        "    if (now - plLastAdvance < 800) return;",
+        "    plLastAdvance = now;",
         "    var next = plIndex + 1;",
         "    if (next >= pl.length) {",
         "      if (!plRepeat.checked) { plIndex = -1; plSavePos(); plRender(); return; }",
@@ -1444,9 +1450,11 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "  // A dead link (file deleted or moved to watched/ since the page",
         "  // loaded) fires \"error\"; skip it like a finished video. Ignore",
         "  // the error fired when the src was just cleared: there is no",
-        "  // current item to advance from.",
+        "  // current item to advance from. Also ignore abort errors caused",
+        "  // by changing src during normal next/previous transitions.",
         "  plVideo.addEventListener(\"error\", function () {",
         "    if (!plVideo.error || !plVideo.currentSrc) return;",
+        "    if (plVideo.error.code === MediaError.MEDIA_ERR_ABORTED) return;",
         "    plAdvance();",
         "  });",
         "  // Persist the play position so a page refresh can resume.",
