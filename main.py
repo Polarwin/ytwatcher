@@ -806,7 +806,7 @@ def scan_downloads(download_dir):
 # Bump when the index.html template changes: the fingerprint below only
 # covers the file listing, so without this an existing index.html would
 # keep the old template until some video is added or removed.
-INDEX_TEMPLATE_VERSION = 37
+INDEX_TEMPLATE_VERSION = 38
 
 
 def channel_speeds(config):
@@ -1169,6 +1169,10 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "        setTimeout(function () { pollDownloads(jobId); }, 3000);",
         "      } else if (job.status === \"done\") {",
         "        dlStatus.textContent = \"done \\u2014 reloading\\u2026\";",
+        "        // Queue the just-downloaded file right behind the currently",
+        "        // playing item: the reload below restores the playlist and",
+        "        // the marker is consumed after the page has loaded again.",
+        "        localStorage.setItem(\"ytwatcher:pl-queue-next\", job.video_id || \"latest\");",
         "        setTimeout(function () { location.reload(); }, 1500);",
         "      } else {",
         "        dlStatus.textContent = \"failed: \" + (job.error || \"unknown error\");",
@@ -1708,6 +1712,29 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "      .then(function () { libraryRefreshBusy = false; });",
         "  }",
         "  bindAvailableVideos();",
+        "  // A manual download just finished (marker set before the reload):",
+        "  // insert the new file right behind the currently playing item",
+        "  // so it plays next. With nothing playing, it lands at the end.",
+        "  (function plQueueJustDownloaded() {",
+        "    var marker = localStorage.getItem(\"ytwatcher:pl-queue-next\");",
+        "    if (!marker) return;",
+        "    localStorage.removeItem(\"ytwatcher:pl-queue-next\");",
+        "    var li = null;",
+        "    if (marker !== \"latest\") {",
+        "      li = document.querySelector('#video-sections li[data-id=\"' + marker + '\"]');",
+        "    }",
+        "    if (!li) {",
+        "      li = document.querySelector(\"section[data-channel='manually'] li[data-id]\");",
+        "    }",
+        "    if (!li) return;",
+        "    var a = li.querySelector(\"a\");",
+        "    var href = a.getAttribute(\"href\");",
+        "    if (pl.some(function (item) { return item.href === href; })) return;",
+        "    var insertAt = plIndex >= 0 ? plIndex + 1 : pl.length;",
+        "    pl.splice(insertAt, 0, { href: href, name: a.textContent, id: li.dataset.id });",
+        "    plSave();",
+        "    plRender();",
+        "  })();",
         "  setInterval(refreshAvailableVideos, 60000);",
         '  document.addEventListener("visibilitychange", function () {',
         "    if (!document.hidden) refreshAvailableVideos();",
