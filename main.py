@@ -806,7 +806,7 @@ def scan_downloads(download_dir):
 # Bump when the index.html template changes: the fingerprint below only
 # covers the file listing, so without this an existing index.html would
 # keep the old template until some video is added or removed.
-INDEX_TEMPLATE_VERSION = 38
+INDEX_TEMPLATE_VERSION = 39
 
 
 def channel_speeds(config):
@@ -1471,6 +1471,7 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "    }",
         "    localStorage.setItem(PL_POS_KEY, JSON.stringify({",
         "      href: pl[plIndex].href, time: plVideo.currentTime,",
+        "      rate: plVideo.playbackRate,",
         "    }));",
         "  }",
         "  var plPosSavedAt = 0;",
@@ -1515,12 +1516,13 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "    plNow.textContent = (idx + 1) + \"/\" + pl.length + \" \\u2014 \" + pl[idx].name;",
         "    plVideo.src = pl[idx].href;",
         "    plVideo.playbackRate = 1;",
-        "    if (saved.time > 0) {",
-        "      plVideo.addEventListener(\"loadedmetadata\", function seek() {",
-        "        plVideo.removeEventListener(\"loadedmetadata\", seek);",
-        "        plVideo.currentTime = saved.time;",
-        "      });",
-        "    }",
+        "    plVideo.addEventListener(\"loadedmetadata\", function seek() {",
+        "      plVideo.removeEventListener(\"loadedmetadata\", seek);",
+        "      if (saved.time > 0) plVideo.currentTime = saved.time;",
+        "      // Runs after the channel-speed listener (registered earlier),",
+        "      // so the speed the user had before the refresh wins.",
+        "      if (saved.rate > 0) plVideo.playbackRate = saved.rate;",
+        "    });",
         "    plVideo.play().catch(function () {});",
         "    plRender();",
         "  }",
