@@ -12,6 +12,7 @@ import contextlib
 import fcntl
 import hashlib
 import html
+import ipaddress
 import json
 import logging
 from logging.handlers import RotatingFileHandler
@@ -1984,9 +1985,10 @@ class ApiHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    # Hostnames the API answers for (compared against the Host header).
-    # start_api replaces this with the server's own addresses plus
-    # settings.api_allowed_hosts. The class default is loopback-only.
+    # Hostnames the API answers for (compared against the Host header):
+    # exact names, 'prefix*' wildcards, or CIDR networks (see
+    # host_allowed). start_api replaces this with the server's own
+    # addresses plus settings.api_allowed_hosts.
     allowed_hosts = frozenset({"127.0.0.1", "::1", "localhost"})
 
     def _origin_allowed(self):
@@ -2001,7 +2003,7 @@ class ApiHandler(BaseHTTPRequestHandler):
         browser requests are cross-origin only by port.
         """
         host = urllib.parse.urlsplit("//" + self.headers.get("Host", "")).hostname or ""
-        if host.lower() not in self.allowed_hosts:
+        if not host_allowed(host, self.allowed_hosts):
             return False
         origin = self.headers.get("Origin")
         if not origin:
@@ -2292,6 +2294,30 @@ class ApiHandler(BaseHTTPRequestHandler):
 
     def log_message(self, fmt, *args):
         log.debug("api: " + fmt, *args)
+
+
+def host_allowed(host, patterns):
+    """True when host matches any allowlist entry.
+
+    Entry forms: exact hostname/IP, 'prefix*' wildcard (e.g.
+    "192.168.0.*"), or a CIDR network (e.g. "100.64.0.0/10").
+    """
+    host = host.lower()
+    for pattern in patterns:
+        pattern = pattern.lower()
+        if pattern == host:
+            return True
+        if pattern.endswith("*") and host.startswith(pattern[:-1]):
+            return True
+        if "/" in pattern:
+            try:
+                if ipaddress.ip_address(host) in ipaddress.ip_network(
+                    pattern, strict=False
+                ):
+                    return True
+            except ValueError:
+                continue
+    return False
 
 
 def local_host_names():
