@@ -18,6 +18,7 @@ from logging.handlers import RotatingFileHandler
 import os
 import re
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
@@ -116,21 +117,37 @@ INDEX_FINGERPRINT_RE = re.compile(r"<!--\s*index-fingerprint:\s*([a-f0-9]{40})\s
 # YouTube video ID embedded in download filenames: "<title> [<id>].<ext>"
 VIDEO_ID_RE = re.compile(r"\[([A-Za-z0-9_-]{11})\]")
 
+# ID shapes the API accepts for watch marks: a real YouTube ID (11 chars),
+# or a path-derived pseudo-ID ("m_" + 10 hex chars, see entry_id). The
+# legacy pseudo format ("m" + 10 hex) matches the first alternative.
+VIDEO_ID_API_RE = re.compile(r"[A-Za-z0-9_-]{11}|m_[0-9a-f]{10}")
+
+# Path-derived pseudo-ID prefixes: new format and the legacy one. Used to
+# tell pseudo-IDs from real YouTube IDs when pruning watched.json — a real
+# ID must never be pruned just because its file is gone.
+LEGACY_PSEUDO_ID_RE = re.compile(r"m[0-9a-f]{10}")
+
+
+def is_pseudo_id(vid):
+    """True for path-derived pseudo-IDs, never for real YouTube IDs."""
+    return vid.startswith("m_") or bool(LEGACY_PSEUDO_ID_RE.fullmatch(vid))
+
 
 def entry_id(entry):
     """Stable watch-mark ID for an index entry.
 
     Files downloaded by the watcher carry their YouTube ID in the name.
     Manually added files get a pseudo-ID derived from their path
-    ("m" + 10 hex chars, matching the 11-char ID shape the API accepts),
-    so they can be marked watched too. The pseudo-ID changes if the file
-    is renamed or moved.
+    ("m_" + 10 hex chars), so they can be marked watched too. Real
+    YouTube IDs are exactly 11 chars, so the 12-char pseudo-ID can never
+    collide with one (the legacy "m" + 10 hex format could, in theory).
+    The pseudo-ID changes if the file is renamed or moved.
     """
     match = VIDEO_ID_RE.search(entry["name"])
     if match:
         return match.group(1)
     digest = hashlib.sha1(entry["rel"].encode("utf-8")).hexdigest()
-    return "m" + digest[:10]
+    return "m_" + digest[:10]
 
 
 def validate_config(config):
@@ -151,6 +168,14 @@ def validate_config(config):
                     "latest_max_age_days"):
             if key in settings and not isinstance(settings[key], (int, float)):
                 problems.append(f"settings.{key}: must be a number")
+        if "api_host" in settings and not isinstance(settings["api_host"], str):
+            problems.append("settings.api_host: must be a string")
+        allowed_hosts = settings.get("api_allowed_hosts")
+        if allowed_hosts is not None and not (
+            isinstance(allowed_hosts, list)
+            and all(isinstance(h, str) for h in allowed_hosts)
+        ):
+            problems.append("settings.api_allowed_hosts: must be a list of hostnames")
         download_dir = settings.get("download_dir")
         if download_dir is not None:
             normalized = os.path.normpath(str(download_dir))
@@ -739,7 +764,7 @@ def _has_video_stream(path):
         return True
 
 
-def scan_downloads(download_dir):
+def scan_downloads(download_dir, files=None):
     """Scan download_dir recursively and group video files by top-level subfolder.
 
     Files under 'watched' subdirectories (archived by subscriptions with
@@ -756,15 +781,19 @@ def scan_downloads(download_dir):
     when the file first appeared on this filesystem, not when it was last
     touched. has_video is probed with ffprobe (audio-only files may live
     in a video container).
+
+    files: optional precomputed list from walk_video_files, to avoid a
+    second NFS tree walk per round. Files that vanished between the
+    walk and the stat are skipped.
     """
     root = Path(download_dir)
     if not root.is_dir():
         return {}
+    if files is None:
+        files = walk_video_files(root)
     durations = load_durations()
     groups = {}
-    for path in root.rglob("*"):
-        if not is_video_file(path):
-            continue
+    for path in files:
         rel = path.relative_to(root)
         if "watched" in rel.parts[:-1]:
             continue
@@ -772,7 +801,10 @@ def scan_downloads(download_dir):
             channel = rel.parts[0]
         else:
             channel = "(root)"
-        stat = path.stat()
+        try:
+            stat = path.stat()
+        except OSError:
+            continue  # deleted between the walk and this scan
         ctime = _file_creation_time(path)
         rel_posix = rel.as_posix()
         cached = durations.get(rel_posix)
@@ -806,7 +838,7 @@ def scan_downloads(download_dir):
 # Bump when the index.html template changes: the fingerprint below only
 # covers the file listing, so without this an existing index.html would
 # keep the old template until some video is added or removed.
-INDEX_TEMPLATE_VERSION = 39
+INDEX_TEMPLATE_VERSION = 40
 
 
 def channel_speeds(config):
@@ -1756,7 +1788,7 @@ _index_lock = threading.Lock()
 
 def update_index_html(download_dir, api_port=DEFAULT_API_PORT,
                       site_title=DEFAULT_SITE_TITLE, max_age_days=None,
-                      latest_max_age_days=None, speeds=None):
+                      latest_max_age_days=None, speeds=None, files=None):
     """Regenerate download_dir/index.html if the file listing has changed.
 
     The page is always built from a full recursive scan of download_dir, so
@@ -1769,7 +1801,8 @@ def update_index_html(download_dir, api_port=DEFAULT_API_PORT,
     latest_max_age_days filters the "Latest" section to the most recent N
     days (creation time). speeds maps channel folder -> playback speed
     (from subscriptions.yaml); when omitted it is derived from the current
-    config, falling back to empty if the config cannot be read.
+    config, falling back to empty if the config cannot be read. files is an
+    optional precomputed walk_video_files list (NFS walk dedup).
     """
     with _index_lock:
         if speeds is None:
@@ -1777,7 +1810,7 @@ def update_index_html(download_dir, api_port=DEFAULT_API_PORT,
                 speeds = channel_speeds(load_config())
             except Exception:
                 speeds = {}
-        groups = scan_downloads(download_dir)
+        groups = scan_downloads(download_dir, files=files)
         if max_age_days:
             cutoff = time.time() - max_age_days * 86400
             groups = {
@@ -1818,39 +1851,42 @@ def update_index_html(download_dir, api_port=DEFAULT_API_PORT,
 # ---------------------------------------------------------------------------
 
 
-def delete_watched_videos(download_dir, watched_ids, keep_channels=()):
+def delete_watched_videos(download_dir, watched_ids, keep_channels=(), files=None):
     """Delete downloaded files whose video ID is in watched_ids.
 
     Files under a channel named in keep_channels are moved into a
     'watched' subdirectory of the channel folder instead of being
-    deleted. Returns the number of files removed from the listing. The
-    index page is rebuilt from a full scan, so they disappear from it
-    automatically.
+    deleted. Returns the list of paths removed from the listing (deleted
+    or moved away). The index page is rebuilt from a full scan, so they
+    disappear from it automatically.
+
+    files: optional precomputed list from walk_video_files, to avoid a
+    second NFS tree walk per round.
     """
     if not watched_ids:
-        return 0
+        return []
     root = Path(download_dir)
     if not root.is_dir():
-        return 0
-    removed = 0
-    for path in root.rglob("*"):
-        if not is_video_file(path):
-            continue
+        return []
+    if files is None:
+        files = walk_video_files(root)
+    removed = []
+    for path in files:
         rel = path.relative_to(root)
         if "watched" in rel.parts[:-1]:
             # Already archived in a 'watched' subdirectory.
             continue
         id_match = VIDEO_ID_RE.search(path.name)
         if id_match:
-            video_id = id_match.group(1)
+            candidate_ids = (id_match.group(1),)
         else:
             # Files without a YouTube ID in the name are marked on the
             # index page with a path-derived pseudo-ID (see entry_id);
-            # compute the same ID here so those marks can be acted on.
-            video_id = (
-                "m" + hashlib.sha1(rel.as_posix().encode("utf-8")).hexdigest()[:10]
-            )
-        if video_id not in watched_ids:
+            # check both the current "m_" and the legacy "m" format so
+            # older marks in watched.json still apply.
+            digest = hashlib.sha1(rel.as_posix().encode("utf-8")).hexdigest()[:10]
+            candidate_ids = ("m_" + digest, "m" + digest)
+        if not any(vid in watched_ids for vid in candidate_ids):
             continue
         channel = rel.parts[0] if len(rel.parts) > 1 else None
         try:
@@ -1858,39 +1894,57 @@ def delete_watched_videos(download_dir, watched_ids, keep_channels=()):
                 dest_dir = root / channel / "watched"
                 dest_dir.mkdir(exist_ok=True)
                 path.replace(dest_dir / path.name)
-                removed += 1
+                removed.append(path)
                 log.info("moved watched video to %s: %s", dest_dir.name, path.name)
             else:
                 path.unlink()
-                removed += 1
+                removed.append(path)
                 log.info("deleted watched video: %s", path.name)
         except OSError as e:
             log.error("failed to remove %s: %s", path, e)
     return removed
 
 
-def prune_watched_marks(download_dir, watched_ids):
+def walk_video_files(download_dir):
+    """One recursive walk of download_dir, returning only video files.
+
+    The download dir is on NFS, where a full tree enumeration is slow;
+    callers doing several listing passes per round should share one walk.
+    """
+    root = Path(download_dir)
+    if not root.is_dir():
+        return []
+    return [p for p in root.rglob("*") if is_video_file(p)]
+
+
+def prune_watched_marks(download_dir, watched_ids, files=None):
     """Drop path-derived pseudo-IDs whose file no longer exists.
 
-    Pseudo-IDs ("m" + sha1 of the relative path, see entry_id) die when
-    their file is deleted, renamed, or moved, and would accumulate in
-    watched.json forever. Real YouTube IDs are kept even with no matching
-    file: the ID namespace is global, so the mark may still be wanted for
-    a file that reappears elsewhere under download_dir.
+    Pseudo-IDs (see entry_id) die when their file is deleted, renamed, or
+    moved, and would accumulate in watched.json forever. Real YouTube IDs
+    are kept even with no matching file: the ID namespace is global, so
+    the mark may still be wanted for a file that reappears elsewhere
+    under download_dir. Legacy "m"+10hex pseudo-IDs stay live when the
+    same path hash exists under the new "m_" format.
+
+    files: optional precomputed list from walk_video_files, to avoid a
+    second NFS tree walk per round.
     """
-    pseudo_ids = {vid for vid in watched_ids if vid.startswith("m")}
+    pseudo_ids = {vid for vid in watched_ids if is_pseudo_id(vid)}
     if not pseudo_ids:
         return watched_ids
-    live = set()
     root = Path(download_dir)
-    if root.is_dir():
-        for path in root.rglob("*"):
-            if not is_video_file(path):
-                continue
-            rel = path.relative_to(root).as_posix()
-            vid = "m" + hashlib.sha1(rel.encode("utf-8")).hexdigest()[:10]
-            if vid in pseudo_ids:
-                live.add(vid)
+    if files is None:
+        files = walk_video_files(root)
+    live_hashes = set()
+    for path in files:
+        rel = path.relative_to(root).as_posix()
+        live_hashes.add(hashlib.sha1(rel.encode("utf-8")).hexdigest()[:10])
+    live = set()
+    for vid in pseudo_ids:
+        digest = vid[2:] if vid.startswith("m_") else vid[1:]
+        if digest in live_hashes:
+            live.add(vid)
     return (watched_ids - pseudo_ids) | live
 
 
@@ -1930,20 +1984,29 @@ class ApiHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def _origin_allowed(self):
-        """True when the request has no Origin header (curl, server-side
-        clients) or the Origin's hostname matches the Host header's.
+    # Hostnames the API answers for (compared against the Host header).
+    # start_api replaces this with the server's own addresses plus
+    # settings.api_allowed_hosts. The class default is loopback-only.
+    allowed_hosts = frozenset({"127.0.0.1", "::1", "localhost"})
 
-        Ports are ignored: the index page is served by nginx on :80 while
-        the API runs on :8791, so same-host browser requests are
-        cross-origin only by port. Foreign sites are still blocked by the
-        hostname comparison.
+    def _origin_allowed(self):
+        """True when the Host header names this server and the request has
+        no Origin header (curl, server-side clients) or the Origin's
+        hostname matches the Host header's.
+
+        The Host allowlist blocks DNS-rebinding: a foreign site whose DNS
+        starts pointing at this server would otherwise pass the
+        Origin==Host comparison. Ports are ignored: the index page is
+        served by nginx on :443 while the API runs on :8791, so same-host
+        browser requests are cross-origin only by port.
         """
+        host = urllib.parse.urlsplit("//" + self.headers.get("Host", "")).hostname or ""
+        if host.lower() not in self.allowed_hosts:
+            return False
         origin = self.headers.get("Origin")
         if not origin:
             return True
         origin_host = urllib.parse.urlsplit(origin).hostname or ""
-        host = urllib.parse.urlsplit("//" + self.headers.get("Host", "")).hostname or ""
         return origin_host.lower() == host.lower()
 
     def _read_body(self):
@@ -2032,7 +2095,7 @@ class ApiHandler(BaseHTTPRequestHandler):
                 return
             data = json.loads(body or b"{}")
             video_id = data.get("id", "")
-            if not re.fullmatch(r"[A-Za-z0-9_-]{11}", video_id):
+            if not VIDEO_ID_API_RE.fullmatch(video_id):
                 raise ValueError(f"bad video id: {video_id!r}")
             with _watched_lock:
                 watched = load_watched()
@@ -2231,12 +2294,38 @@ class ApiHandler(BaseHTTPRequestHandler):
         log.debug("api: " + fmt, *args)
 
 
-def start_api(host, port):
+def local_host_names():
+    """Names and IPs that identify this machine in a Host header.
+
+    Best-effort: loopback plus every address getaddrinfo returns for the
+    hostname, plus the primary outbound interface address (the UDP
+    connect sends no traffic).
+    """
+    names = {"127.0.0.1", "::1", "localhost"}
+    try:
+        for info in socket.getaddrinfo(socket.gethostname(), None):
+            names.add(info[4][0])
+    except OSError:
+        pass
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.connect(("192.0.2.1", 80))  # TEST-NET-1; no packet is sent
+            names.add(s.getsockname()[0])
+    except OSError:
+        pass
+    return names
+
+
+def start_api(host, port, allowed_hosts=()):
     """Start the HTTP API in a daemon thread."""
+    ApiHandler.allowed_hosts = frozenset(
+        h.lower() for h in local_host_names() | set(allowed_hosts)
+    )
     server = ThreadingHTTPServer((host, port), ApiHandler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
-    log.info("API listening on %s:%d", host, port)
+    log.info("API listening on %s:%d (allowed hosts: %s)",
+             host, port, ", ".join(sorted(ApiHandler.allowed_hosts)))
     return server
 
 
@@ -2909,13 +2998,19 @@ def run_round(config, seen, scan_only=False, telegram_token=None, telegram_chat_
     failed = load_failed()
     if not scan_only:
         # Delete (or archive, for keep_watched subscriptions) files the
-        # user marked as watched since the last round.
+        # user marked as watched since the last round. One NFS tree walk
+        # is shared by the deletion, the index rebuild, and the watched
+        # mark pruning below (the walk is the slow part on NFS).
         download_dir = settings.get("download_dir", "/srv/files")
+        files = walk_video_files(download_dir)
         keep_channels = {s["name"] for s in subs
                          if s.get("keep_watched") and "name" in s}
-        removed = delete_watched_videos(download_dir, load_watched(), keep_channels)
+        removed = delete_watched_videos(
+            download_dir, load_watched(), keep_channels, files=files)
         if removed:
-            log.info("removed %d watched video(s)", removed)
+            log.info("removed %d watched video(s)", len(removed))
+            removed_set = set(removed)
+            files = [f for f in files if f not in removed_set]
             try:
                 update_index_html(
                     download_dir,
@@ -2923,14 +3018,16 @@ def run_round(config, seen, scan_only=False, telegram_token=None, telegram_chat_
                     site_title=settings.get("site_title", DEFAULT_SITE_TITLE),
                     max_age_days=settings.get("watchlist_max_age_days"),
                     latest_max_age_days=settings.get("latest_max_age_days"),
+                    files=files,
                 )
             except Exception as e:
                 log.error("failed to update index.html: %s", e)
         # Drop dead pseudo-ID marks (see prune_watched_marks); runs after
-        # the deletion above so marks consumed by it are pruned too.
+        # the deletion above (on the post-deletion file list) so marks
+        # consumed by it are pruned too.
         with _watched_lock:
             watched = load_watched()
-            pruned = prune_watched_marks(download_dir, watched)
+            pruned = prune_watched_marks(download_dir, watched, files=files)
             if pruned != watched:
                 save_watched(pruned)
                 log.info("pruned %d dead watched mark(s)",
@@ -3012,7 +3109,9 @@ def main():
     settings = config.get("settings", {})
     interval = settings.get("check_interval_minutes", 30)
     download_dir = settings.get("download_dir", "/srv/files")
-    api_host = settings.get("api_host", "0.0.0.0")
+    # Loopback by default: the only legitimate client path is the nginx
+    # proxy on the same host, so the API has no reason to listen on LAN.
+    api_host = settings.get("api_host", "127.0.0.1")
     api_port = settings.get("api_port", DEFAULT_API_PORT)
     site_title = settings.get("site_title", DEFAULT_SITE_TITLE)
     telegram_token, telegram_chat_id = load_telegram_config()
@@ -3044,7 +3143,8 @@ def main():
     # Start the HTTP API backing the index page (watched marks, config
     # editing, manual downloads).
     try:
-        start_api(api_host, api_port)
+        start_api(api_host, api_port,
+                  allowed_hosts=settings.get("api_allowed_hosts") or ())
     except Exception as e:
         log.error("API failed to start: %s", e)
 

@@ -7,6 +7,12 @@ PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VENV_PYTHON="$PROJECT_DIR/.venv/bin/python"
 UNIT_FILE="/etc/systemd/system/$SERVICE_NAME.service"
 
+# Download dir from subscriptions.yaml (settings.download_dir), same
+# extraction as setup_nginx.sh; needed for the sandbox ReadWritePaths.
+DOWNLOAD_DIR=$(grep -E '^[[:space:]]*download_dir:' "$PROJECT_DIR/subscriptions.yaml" \
+    | head -1 | sed -E 's/.*download_dir:[[:space:]]*//; s/[[:space:]]*$//; s|/$||')
+DOWNLOAD_DIR="${DOWNLOAD_DIR:-/srv/files/ytwatcher}"
+
 if [ ! -x "$VENV_PYTHON" ]; then
     echo "ERROR: $VENV_PYTHON not found. Create the venv first:" >&2
     echo "  python -m venv .venv && .venv/bin/pip install yt-dlp PyYAML" >&2
@@ -29,9 +35,19 @@ User=$USER
 WorkingDirectory=$PROJECT_DIR
 Environment=PYTHONUNBUFFERED=1
 Environment=PATH=$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin
+# yt-dlp writes its cache under XDG_CACHE_HOME; with ProtectHome=read-only
+# $HOME/.cache would be read-only, so redirect it into the project dir.
+Environment=XDG_CACHE_HOME=$PROJECT_DIR/.cache
 ExecStart=$VENV_PYTHON main.py
 Restart=always
 RestartSec=10
+# Sandboxing: the service needs write access only to the project dir and
+# the download dir; everything else stays read-only.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=read-only
+ReadWritePaths=-$PROJECT_DIR -$DOWNLOAD_DIR
 
 [Install]
 WantedBy=multi-user.target

@@ -2,12 +2,16 @@
 __pycache__/
 *.pyc
 state.json
+state.json.*
 watched.json
 failed.json
 durations.json
 subscriptions.yaml
+subscriptions.yaml.*
 cookies.txt
 downloads/
 *.log
+*.log.*
 .env
 *.swp
+.cache/
