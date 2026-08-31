@@ -9,6 +9,7 @@ failed-download attempt counts in failed.json.
 
 import argparse
 import contextlib
+import ctypes
 import fcntl
 import hashlib
 import html
@@ -129,9 +130,20 @@ VIDEO_ID_API_RE = re.compile(r"[A-Za-z0-9_-]{11}|m_[0-9a-f]{10}")
 LEGACY_PSEUDO_ID_RE = re.compile(r"m[0-9a-f]{10}")
 
 
+PSEUDO_ID_RE = re.compile(r"m_[0-9a-f]{10}")
+
+
 def is_pseudo_id(vid):
-    """True for path-derived pseudo-IDs, never for real YouTube IDs."""
-    return vid.startswith("m_") or bool(LEGACY_PSEUDO_ID_RE.fullmatch(vid))
+    """True for path-derived pseudo-IDs, never for real YouTube IDs.
+
+    Strict fullmatch: digests are exactly 10 lowercase hex chars, so an
+    11-char real YouTube ID that happens to start with "m_" is not
+    misclassified. (The legacy "m" + 10-hex ambiguity is unavoidable for
+    old marks but astronomically rare.)
+    """
+    return bool(
+        PSEUDO_ID_RE.fullmatch(vid) or LEGACY_PSEUDO_ID_RE.fullmatch(vid)
+    )
 
 
 def entry_id(entry):
@@ -435,6 +447,12 @@ def parse_flat_playlist(stdout):
         if not line.strip():
             continue
         parts = line.split("\t")
+        if len(parts) > 7:
+            # A title containing a literal tab would shift every field
+            # after it. The five trailing fields (availability, duration,
+            # live_status, timestamp, upload_date) never contain tabs, so
+            # rejoin the middle as the title.
+            parts = [parts[0], "\t".join(parts[1:-5])] + parts[-5:]
         vid = parts[0].strip()
         if not vid:
             continue
@@ -623,58 +641,82 @@ def format_duration(seconds):
     return f"{minutes}:{secs:02d}"
 
 
+# Lazy one-time ctypes binding for the statx(2) syscall; built on first
+# use instead of on every _file_creation_time call (which runs once per
+# file per listing pass). None until initialized, False when unavailable.
+_statx_binding = None
+
+
+def _get_statx():
+    global _statx_binding
+    if _statx_binding is not None:
+        return _statx_binding or None
+
+    class StatxTimestamp(ctypes.Structure):
+        _fields_ = [
+            ("tv_sec", ctypes.c_int64),
+            ("tv_nsec", ctypes.c_uint32),
+            ("__reserved", ctypes.c_int32),
+        ]
+
+    class Statx(ctypes.Structure):
+        _fields_ = [
+            ("stx_mask", ctypes.c_uint32),
+            ("stx_blksize", ctypes.c_uint32),
+            ("stx_attributes", ctypes.c_uint64),
+            ("stx_nlink", ctypes.c_uint32),
+            ("stx_uid", ctypes.c_uint32),
+            ("stx_gid", ctypes.c_uint32),
+            ("stx_mode", ctypes.c_uint16),
+            ("__spare0", ctypes.c_uint16 * 1),
+            ("stx_ino", ctypes.c_uint64),
+            ("stx_size", ctypes.c_uint64),
+            ("stx_blocks", ctypes.c_uint64),
+            ("stx_attributes_mask", ctypes.c_uint64),
+            ("stx_atime", StatxTimestamp),
+            ("stx_btime", StatxTimestamp),
+            ("stx_ctime", StatxTimestamp),
+            ("stx_mtime", StatxTimestamp),
+            ("stx_rdev_major", ctypes.c_uint32),
+            ("stx_rdev_minor", ctypes.c_uint32),
+            ("stx_dev_major", ctypes.c_uint32),
+            ("stx_dev_minor", ctypes.c_uint32),
+            ("stx_mnt_id", ctypes.c_uint64),
+            ("__spare2", ctypes.c_uint64),
+            ("__spare3", ctypes.c_uint64 * 12),
+        ]
+
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+        statx = libc.statx
+        statx.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int,
+                          ctypes.c_uint32, ctypes.POINTER(Statx)]
+        statx.restype = ctypes.c_int
+        _statx_binding = (statx, Statx)
+    except Exception:
+        _statx_binding = False
+    return _statx_binding or None
+
+
 def _file_creation_time(path):
     """Return the file's birth (creation) time as a float timestamp.
 
     Uses the Linux statx syscall when available so we get the real
     creation time even over NFS. Falls back to st_mtime if statx fails.
     """
-    try:
-        import ctypes
-        libc = ctypes.CDLL(None, use_errno=True)
-        class StatxTimestamp(ctypes.Structure):
-            _fields_ = [
-                ("tv_sec", ctypes.c_int64),
-                ("tv_nsec", ctypes.c_uint32),
-                ("__reserved", ctypes.c_int32),
-            ]
-        class Statx(ctypes.Structure):
-            _fields_ = [
-                ("stx_mask", ctypes.c_uint32),
-                ("stx_blksize", ctypes.c_uint32),
-                ("stx_attributes", ctypes.c_uint64),
-                ("stx_nlink", ctypes.c_uint32),
-                ("stx_uid", ctypes.c_uint32),
-                ("stx_gid", ctypes.c_uint32),
-                ("stx_mode", ctypes.c_uint16),
-                ("__spare0", ctypes.c_uint16 * 1),
-                ("stx_ino", ctypes.c_uint64),
-                ("stx_size", ctypes.c_uint64),
-                ("stx_blocks", ctypes.c_uint64),
-                ("stx_attributes_mask", ctypes.c_uint64),
-                ("stx_atime", StatxTimestamp),
-                ("stx_btime", StatxTimestamp),
-                ("stx_ctime", StatxTimestamp),
-                ("stx_mtime", StatxTimestamp),
-                ("stx_rdev_major", ctypes.c_uint32),
-                ("stx_rdev_minor", ctypes.c_uint32),
-                ("stx_dev_major", ctypes.c_uint32),
-                ("stx_dev_minor", ctypes.c_uint32),
-                ("stx_mnt_id", ctypes.c_uint64),
-                ("__spare2", ctypes.c_uint64),
-                ("__spare3", ctypes.c_uint64 * 12),
-            ]
+    binding = _get_statx()
+    if binding is not None:
+        statx, Statx = binding
         AT_FDCWD = -100
         STATX_BTIME = 0x800
-        statx = libc.statx
-        statx.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_uint32, ctypes.POINTER(Statx)]
-        statx.restype = ctypes.c_int
         buf = Statx()
-        if statx(AT_FDCWD, os.fsencode(path), 0, STATX_BTIME, ctypes.byref(buf)) == 0:
-            if buf.stx_mask & STATX_BTIME:
-                return buf.stx_btime.tv_sec + buf.stx_btime.tv_nsec / 1e9
-    except Exception:
-        pass
+        try:
+            if statx(AT_FDCWD, os.fsencode(path), 0, STATX_BTIME,
+                     ctypes.byref(buf)) == 0:
+                if buf.stx_mask & STATX_BTIME:
+                    return buf.stx_btime.tv_sec + buf.stx_btime.tv_nsec / 1e9
+        except Exception:
+            pass
     return Path(path).stat().st_mtime
 
 
@@ -2012,8 +2054,12 @@ class ApiHandler(BaseHTTPRequestHandler):
         return origin_host.lower() == host.lower()
 
     def _read_body(self):
-        """Read the request body, or None after sending 413 if too big."""
-        length = int(self.headers.get("Content-Length", 0))
+        """Read the request body, or None after sending 4xx if unusable."""
+        try:
+            length = int(self.headers.get("Content-Length", 0))
+        except ValueError:
+            self._json(400, {"error": "bad Content-Length"})
+            return None
         if length > MAX_REQUEST_BODY:
             self._json(413, {"error": "request body too large"})
             return None
@@ -2299,15 +2345,17 @@ class ApiHandler(BaseHTTPRequestHandler):
 def host_allowed(host, patterns):
     """True when host matches any allowlist entry.
 
-    Entry forms: exact hostname/IP, 'prefix*' wildcard (e.g.
-    "192.168.0.*"), or a CIDR network (e.g. "100.64.0.0/10").
+    Entry forms: exact hostname/IP, CIDR network ("100.64.0.0/10"), or an
+    IP-prefix wildcard ("192.168.0.*"). The wildcard only matches when
+    host is an IP literal — otherwise "192.168.0.*" would also match a
+    hostname like "192.168.0.5.evil.com", reopening the DNS-rebinding
+    path this check exists to close. A bare "*" and hostname wildcards
+    are ignored.
     """
     host = host.lower()
     for pattern in patterns:
         pattern = pattern.lower()
         if pattern == host:
-            return True
-        if pattern.endswith("*") and host.startswith(pattern[:-1]):
             return True
         if "/" in pattern:
             try:
@@ -2317,6 +2365,16 @@ def host_allowed(host, patterns):
                     return True
             except ValueError:
                 continue
+        elif pattern.endswith("*"):
+            stem = pattern[:-1]
+            if not stem or not all(c in "0123456789abcdef:." for c in stem):
+                continue  # bare "*" or hostname wildcard: not supported
+            try:
+                ipaddress.ip_address(host)
+            except ValueError:
+                continue  # hostname, not an IP literal: never wildcard-match
+            if host.startswith(stem):
+                return True
     return False
 
 
@@ -2842,7 +2900,7 @@ def save_config_text(text):
     problems = validate_config(config)
     if problems:
         return problems
-    tmp = CONFIG_FILE.with_suffix(".yaml.tmp")
+    tmp = _tmp_path(CONFIG_FILE)
     with open(tmp, "w", encoding="utf-8") as f:
         f.write(text)
     tmp.replace(CONFIG_FILE)

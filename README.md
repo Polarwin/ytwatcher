@@ -37,7 +37,12 @@ the real file is gitignored):
 - `settings.recent_videos_to_scan` — how many recent videos per channel to
   inspect each round.
 - `settings.api_host` / `settings.api_port` — where the watched-mark
-  endpoint listens (defaults `0.0.0.0` / `8791`).
+  endpoint listens (defaults `127.0.0.1` / `8791`; loopback is enough
+  when nginx proxies on the same host).
+- `settings.api_allowed_hosts` — optional list of extra `Host` header
+  names the API answers for: exact hostnames, CIDR networks
+  (`100.64.0.0/10`), or IP-prefix wildcards (`192.168.0.*`). The server's
+  own addresses are always allowed.
 - `settings.site_title` — title of the generated `index.html` page, used for
   both `<title>` and `<h1>` (default `Downloads`).
 - Each subscription has:
@@ -192,11 +197,15 @@ The same API also backs the two tools at the top of the index page:
   content); `POST /cookies` with a Netscape cookie export in the body
   replaces it, or removes it when the body is empty.
 
-The API binds to `settings.api_host` (default `0.0.0.0`) so the browser
-can reach it; it has no authentication, so anyone who can reach the port
-can mark IDs for deletion, rewrite `subscriptions.yaml`, and start
-arbitrary downloads. Keep it on a trusted network or set
-`api_host: 127.0.0.1` and proxy it through nginx with authentication.
+The API binds to `settings.api_host` (default `127.0.0.1`), so the only
+client path is the nginx proxy on the same host. It has **no
+authentication** — the security posture is "unauthenticated,
+network-trusted": any device that can reach nginx (your LAN, plus any
+network in `api_allowed_hosts`, e.g. a Tailnet) can mark IDs for
+deletion, rewrite `subscriptions.yaml`, and start arbitrary downloads.
+The `Host` allowlist only guards against DNS-rebinding from browsers;
+it is not access control. Do not expose nginx to untrusted networks
+without adding authentication there (e.g. `auth_basic`).
 
 ## Telegram notifications
 

@@ -7,12 +7,6 @@ PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VENV_PYTHON="$PROJECT_DIR/.venv/bin/python"
 UNIT_FILE="/etc/systemd/system/$SERVICE_NAME.service"
 
-# Download dir from subscriptions.yaml (settings.download_dir), same
-# extraction as setup_nginx.sh; needed for the sandbox ReadWritePaths.
-DOWNLOAD_DIR=$(grep -E '^[[:space:]]*download_dir:' "$PROJECT_DIR/subscriptions.yaml" \
-    | head -1 | sed -E 's/.*download_dir:[[:space:]]*//; s/[[:space:]]*$//; s|/$||')
-DOWNLOAD_DIR="${DOWNLOAD_DIR:-/srv/files/ytwatcher}"
-
 if [ ! -x "$VENV_PYTHON" ]; then
     echo "ERROR: $VENV_PYTHON not found. Create the venv first:" >&2
     echo "  python -m venv .venv && .venv/bin/pip install yt-dlp PyYAML" >&2
@@ -41,13 +35,16 @@ Environment=XDG_CACHE_HOME=$PROJECT_DIR/.cache
 ExecStart=$VENV_PYTHON main.py
 Restart=always
 RestartSec=10
-# Sandboxing: the service needs write access only to the project dir and
-# the download dir; everything else stays read-only.
+# Sandboxing: only the project dir needs a write hole (state, config,
+# logs, cookies, .cache). ProtectSystem=full covers /usr /boot /efi /etc
+# only, so the download dir under /srv stays writable without a hole —
+# and keeping it out of ReadWritePaths avoids systemd snapshotting the
+# NFS automount stub at unit start.
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=full
 ProtectHome=read-only
-ReadWritePaths=-$PROJECT_DIR -$DOWNLOAD_DIR
+ReadWritePaths=-$PROJECT_DIR
 
 [Install]
 WantedBy=multi-user.target

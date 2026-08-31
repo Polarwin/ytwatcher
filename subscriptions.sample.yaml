@@ -6,6 +6,17 @@ settings:
   check_interval_minutes: 30
   recent_videos_to_scan: 10
   api_port: 8791
+  # Where the API listens. Default 127.0.0.1, which is all you need when
+  # nginx proxies /ytwatcher/api/ on the same host.
+  # api_host: 127.0.0.1
+  # Extra Host-header names the API answers for, beyond the server's own
+  # addresses: exact hostnames, CIDR networks, or IP-prefix wildcards
+  # ("192.168.0.*" — IP literals only, see host_allowed). Guards against
+  # DNS-rebinding; it is NOT authentication — the API is unauthenticated
+  # by design ("network-trusted" posture).
+  # api_allowed_hosts:
+  #   - "192.168.0.0/24"
+  #   - "100.64.0.0/10"
   # Title of the generated index.html page (used for <title> and <h1>).
   site_title: Downloads
   # Skip videos uploaded more than this many days ago. Videos with unknown
