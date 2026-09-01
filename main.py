@@ -2387,8 +2387,13 @@ def local_host_names():
     connect sends no traffic).
     """
     names = {"127.0.0.1", "::1", "localhost"}
+    hostname = socket.gethostname()
+    # The mDNS name (<hostname>.local) is a common way to reach the
+    # server from laptops/phones; it never shows up in getaddrinfo.
+    names.add(hostname)
+    names.add(hostname + ".local")
     try:
-        for info in socket.getaddrinfo(socket.gethostname(), None):
+        for info in socket.getaddrinfo(hostname, None):
             names.add(info[4][0])
     except OSError:
         pass
