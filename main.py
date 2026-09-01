@@ -881,7 +881,7 @@ def scan_downloads(download_dir, files=None):
 # Bump when the index.html template changes: the fingerprint below only
 # covers the file listing, so without this an existing index.html would
 # keep the old template until some video is added or removed.
-INDEX_TEMPLATE_VERSION = 40
+INDEX_TEMPLATE_VERSION = 41
 
 
 def channel_speeds(config):
@@ -1089,7 +1089,7 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         '        <button type="button" id="pl-add-all" '
         'title="Queue every listed video in random order">Add all shuffled</button>',
         '        <button type="button" id="pl-add-latest" '
-        'title="Queue the Latest section in listed order">Add all latest</button>',
+        'title="Queue the Latest section in listed order (excluding watched)">Add all latest</button>',
         '        <button type="button" id="pl-add-espanol" '
         'title="Queue every Spanish video in listed order">Add all Spanish</button>',
         '        <label><input type="checkbox" id="pl-repeat"> Repeat</label>',
@@ -1641,7 +1641,8 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "    plQueueFrom(\"li[data-id]\", true);",
         "  });",
         "  document.getElementById(\"pl-add-latest\").addEventListener(\"click\", function () {",
-        "    plQueueFrom(\"section.latest li[data-id]\", false);",
+        "    // :not(.watched) — the watched class is kept current by applyAll().",
+        "    plQueueFrom(\"section.latest li[data-id]:not(.watched)\", false);",
         "  });",
         "  document.getElementById(\"pl-add-espanol\").addEventListener(\"click\", function () {",
         "    plQueueFrom(\"section[data-channel='Espanol'] li[data-id]\", false);",
