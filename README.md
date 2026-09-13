@@ -99,7 +99,10 @@ Each library item with a YouTube ID has a **⇩ Subtitles** button alongside
 **⇩ Video**. It fetches published subtitles, falling back to auto-generated
 captions for each requested language, and saves WebVTT files next to the media.
 It uses the subscription's `subtitles` setting (for example `es.*` or
-`[es, en]`), defaulting to `en.*` when none is configured. The button shows
+`[es, en]`). Without that setting, it prefers YouTube's original-language
+captions, using published subtitles before automatic captions in that language.
+If the original language is unknown, it selects an available published track,
+then English automatic captions or another available automatic track. The button shows
 progress/errors; the library and active player's subtitle tracks refresh when
 the job completes. The media itself is not downloaded again.
 

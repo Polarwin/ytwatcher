@@ -911,7 +911,7 @@ def scan_downloads(download_dir, files=None):
 # Bump when the index.html template changes: the fingerprint below only
 # covers the file listing, so without this an existing index.html would
 # keep the old template until some video is added or removed.
-INDEX_TEMPLATE_VERSION = 53
+INDEX_TEMPLATE_VERSION = 54
 
 
 def channel_speeds(config):
@@ -1175,9 +1175,13 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         )
         subtitle_btn = None
         if VIDEO_ID_RE.search(entry["name"]):
+            subtitle_attrs = (
+                'disabled title="Already has subtitles"' if entry.get("subs") else
+                'title="Download subtitles, with auto-generated captions as fallback"'
+            )
             subtitle_btn = (
                 '          <button class="watch-btn subtitle-download" type="button" '
-                'title="Download subtitles, with auto-generated captions as fallback">⇩ Subtitles</button>'
+                f'{subtitle_attrs}>⇩ Subtitles</button>'
             )
         # Real YouTube IDs can be upgraded. Files that already have a video
         # stream get a disabled button as a visual hint.
@@ -2496,7 +2500,7 @@ class ApiHandler(BaseHTTPRequestHandler):
             if codecs["video"]:
                 self._json(400, {"error": "file already has a video stream"})
                 return
-        langs = "en.*"
+        langs = None
         if subtitles:
             channel = path.relative_to(download_dir).parts[0]
             for sub in config.get("subscriptions", []):
@@ -3056,13 +3060,50 @@ def merge_video_audio(video_file, audio_path):
     return final_path
 
 
+def original_subtitle_language(info):
+    """Prefer the original language, with published captions before auto."""
+    published = info.get("subtitles") or {}
+    automatic = info.get("automatic_captions") or {}
+    available = {**automatic, **published}
+    originals = [lang[:-5] for lang in automatic if lang.endswith("-orig")]
+    language = info.get("language")
+    candidates = originals + ([language] if language else [])
+    for lang in candidates:
+        # The plain track may be published, while -orig is auto-generated.
+        if lang in published:
+            return lang
+        if lang + "-orig" in automatic:
+            return lang + "-orig"
+        if lang in automatic:
+            return lang
+    # No original-language signal: prefer an available published track,
+    # then English auto captions, then any available non-live auto track.
+    for lang in [*published, "en", *automatic]:
+        if lang != "live_chat" and available.get(lang):
+            return lang
+    raise RuntimeError("No published or auto-generated subtitles available")
+
+
 def run_subtitle_download_job(job_id, path, video_id, settings, langs):
     """Fetch sidecars only; yt-dlp prefers manual captions per language."""
     error = None
     try:
+        if not langs:
+            metadata = run_yt_dlp([
+                YT_DLP, "--skip-download", "--no-playlist", "--dump-single-json",
+                f"https://www.youtube.com/watch?v={video_id}",
+            ], context=f"subtitle language job {job_id}")
+            if metadata.returncode:
+                raise RuntimeError("Could not determine subtitle language (see service log)")
+            language = original_subtitle_language(json.loads(metadata.stdout))
+            langs = re.escape(language)
+            log.info("subtitle-download job %s: selected language %s", job_id, language)
         with tempfile.TemporaryDirectory(prefix="ytwatcher-subs-") as folder:
             result = run_yt_dlp([
                 YT_DLP, "--skip-download", "--no-playlist",
+                # A failing translated/regional track must not prevent
+                # downloading the remaining matching caption tracks.
+                "--ignore-errors",
                 "--write-subs", "--write-auto-subs", "--sub-langs", langs,
                 "--sub-format", "vtt/best", "--convert-subs", "vtt",
                 "-o", str(Path(folder) / (video_id + ".%(ext)s")),
@@ -3070,8 +3111,13 @@ def run_subtitle_download_job(job_id, path, video_id, settings, langs):
             ], context=f"subtitle-download job {job_id}")
             sidecars = [p for p in Path(folder).iterdir()
                         if p.name.startswith(video_id + ".")
-                        and p.suffix == ".vtt" and p.stat().st_size > 0]
+                        and p.suffix == ".vtt" and p.stat().st_size > 0
+                        and p.read_text(encoding="utf-8-sig").startswith("WEBVTT")]
             if not sidecars:
+                if "429" in getattr(result, "stderr", ""):
+                    raise RuntimeError("YouTube rate-limited subtitle downloads (HTTP 429); try again later")
+                if "Unable to download video subtitles" in getattr(result, "stderr", ""):
+                    raise RuntimeError("YouTube subtitle tracks could not be downloaded (see service log)")
                 if result.returncode:
                     raise RuntimeError("Subtitle download failed (see service log)")
                 raise RuntimeError(f"No published or auto-generated subtitles available for {langs}")

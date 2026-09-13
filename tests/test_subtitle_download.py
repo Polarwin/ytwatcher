@@ -8,6 +8,23 @@ import main
 from yt_dlp import YoutubeDL
 
 
+@pytest.mark.parametrize("info,expected", [
+    ({"automatic_captions": {"en": [1], "de-orig": [1], "de": [1]}}, "de-orig"),
+    ({"subtitles": {"de": [1]}, "automatic_captions": {"de-orig": [1]}}, "de"),
+    ({"language": "de", "subtitles": {"en": [1], "de": [1]}}, "de"),
+    ({"subtitles": {"es": [1]}, "automatic_captions": {"en": [1]}}, "es"),
+    ({"automatic_captions": {"fr": [1], "en": [1]}}, "en"),
+    ({"automatic_captions": {"fr": [1]}}, "fr"),
+])
+def test_original_subtitle_language(info, expected):
+    assert main.original_subtitle_language(info) == expected
+
+
+def test_original_subtitle_language_missing():
+    with pytest.raises(RuntimeError, match="No published"):
+        main.original_subtitle_language({"subtitles": {"live_chat": [1]}})
+
+
 @pytest.mark.parametrize("published", [True, False])
 def test_published_captions_preferred_with_auto_fallback(published):
     normal = {"en": [{"ext": "vtt", "url": "https://example.com/manual"}]} if published else {}
@@ -27,6 +44,7 @@ def test_subtitle_worker(tmp_path, monkeypatch, available, returncode):
 
     def download(cmd, **kwargs):
         assert "--skip-download" in cmd
+        assert "--ignore-errors" in cmd
         assert "--write-subs" in cmd and "--write-auto-subs" in cmd
         assert cmd[cmd.index("--sub-langs") + 1] == "es.*"
         if available:
@@ -69,10 +87,37 @@ def test_subtitle_api_uses_config_and_rejects_escape(tmp_path, monkeypatch):
     assert handler._json.call_args.args[0] == 400
 
 
-def test_subtitle_button_in_both_sections():
+@pytest.mark.parametrize("has_subtitles", [False, True])
+def test_subtitle_button_in_both_sections(has_subtitles):
     entry = {"name": "Title [mabcdefghij].webm", "rel": "C/Title [mabcdefghij].webm",
-             "size": 1, "mtime": 1, "has_video": True, "channel": "C"}
+             "size": 1, "mtime": 1, "has_video": True, "channel": "C",
+             "subs": {"en": "C/Title [mabcdefghij].en.vtt"} if has_subtitles else {}}
     page = main.generate_index_html({"C": [entry]}, 1, 1, "now", "fp", latest=[entry])
     assert page.count('class="watch-btn subtitle-download"') == 2
     assert "⇩ Subtitles" in page
     assert '"/subtitle-download"' in page
+    assert page.count('disabled title="Already has subtitles"') == (2 if has_subtitles else 0)
+
+
+def test_failed_variant_does_not_block_primary_track(tmp_path, monkeypatch):
+    """Exercise yt-dlp's actual track loop with a failing first variant."""
+    from yt_dlp.utils import DownloadError
+    with YoutubeDL({"writesubtitles": True, "writeautomaticsub": True,
+                    "ignoreerrors": True, "quiet": True,
+                    "outtmpl": str(tmp_path / "%(id)s.%(ext)s")}) as ydl:
+        attempted = []
+
+        def download(filename, info, **kwargs):
+            attempted.append(info["url"])
+            if info["url"].endswith("variant"):
+                raise DownloadError("HTTP Error 429: Too Many Requests")
+            Path(filename).write_text("WEBVTT\n\n00:00.000 --> 00:01.000\nHola\n")
+
+        monkeypatch.setattr(ydl, "dl", download)
+        info = {"id": "abcdefghijk", "title": "Test", "ext": "webm", "requested_subtitles": {
+            "es-en-US": {"ext": "vtt", "url": "https://example.com/variant"},
+            "es": {"ext": "vtt", "url": "https://example.com/primary"}}}
+        result = ydl._write_subtitles(info, str(tmp_path / "abcdefghijk.webm"))
+    assert len(attempted) == 2
+    assert len(result) == 1
+    assert (tmp_path / "abcdefghijk.es.vtt").read_text().startswith("WEBVTT")
