@@ -95,6 +95,14 @@ invalid):
 
 ## Manual downloads
 
+Each library item with a YouTube ID has a **⇩ Subtitles** button alongside
+**⇩ Video**. It fetches published subtitles, falling back to auto-generated
+captions for each requested language, and saves WebVTT files next to the media.
+It uses the subscription's `subtitles` setting (for example `es.*` or
+`[es, en]`), defaulting to `en.*` when none is configured. The button shows
+progress/errors; the library and active player's subtitle tracks refresh when
+the job completes. The media itself is not downloaded again.
+
 The index page has a download form at the top: paste a video URL, pick a
 quality (720p / Best / Audio only), and click **Download**. The page polls
 the API for the job status and reloads once the file appears.

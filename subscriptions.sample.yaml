@@ -58,6 +58,12 @@ settings:
 #                              as watched, move them into a 'watched'
 #                              subdirectory of the channel folder (default
 #                              false)
+#
+#   subtitles: ["es.*"]        optional; download sidecar subtitles in these
+#                              languages (yt-dlp --sub-langs syntax). Real
+#                              subtitles first, auto-generated when a
+#                              language has none; stored as .vtt next to the
+#                              video and shown by the web player.
 
 subscriptions:
   - name: Veritasium

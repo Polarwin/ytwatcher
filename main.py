@@ -253,6 +253,15 @@ def validate_config(config):
         if not (isinstance(exclude, list)
                 and all(isinstance(kw, str) for kw in exclude)):
             problems.append(f"{label}: 'exclude' must be a list of keywords")
+        subtitles = sub.get("subtitles")
+        if subtitles is not None and not (
+            (isinstance(subtitles, str) and subtitles.strip())
+            or (isinstance(subtitles, list) and subtitles
+                and all(isinstance(l, str) and l.strip() for l in subtitles))
+        ):
+            problems.append(
+                f"{label}: 'subtitles' must be a language code or a list of them"
+            )
         if "shorts_max_duration" in sub and not isinstance(
             sub["shorts_max_duration"], (int, float)
         ):
@@ -815,7 +824,12 @@ def scan_downloads(download_dir, files=None):
     channel/subfolder name to a list of entries sorted newest-first by
     file creation time. Each entry is a dict with keys: rel, name, size,
     mtime, channel, duration (seconds, or None if not in the cache),
-    has_video.
+    has_video, subs.
+
+    subs maps subtitle language -> download_dir-relative .vtt path for
+    sidecar files next to the video ("Name [id].es.vtt" belongs to
+    "Name [id].webm"); empty when there are none. The web player shows
+    them as subtitle tracks.
 
     Durations come from durations.json (recorded at download time from
     yt-dlp's after_move printout), validated by size+mtime; files without
@@ -836,6 +850,9 @@ def scan_downloads(download_dir, files=None):
         files = walk_video_files(root)
     durations = load_durations()
     groups = {}
+    # .vtt sidecar lookup, cached per directory: one readdir per folder
+    # instead of one glob per video file (the tree lives on NFS).
+    vtt_cache = {}
     for path in files:
         rel = path.relative_to(root)
         if "watched" in rel.parts[:-1]:
@@ -859,6 +876,18 @@ def scan_downloads(download_dir, files=None):
             has_video = cached.get("has_video")
         if has_video is None:
             has_video = _has_video_stream(path)
+        if path.parent not in vtt_cache:
+            try:
+                vtt_cache[path.parent] = [
+                    f for f in os.listdir(path.parent) if f.endswith(".vtt")
+                ]
+            except OSError:
+                vtt_cache[path.parent] = []
+        subs = {}
+        for f in vtt_cache[path.parent]:
+            if f.startswith(path.stem + "."):
+                lang = f[len(path.stem) + 1:-len(".vtt")]
+                subs[lang] = (rel.parent / f).as_posix()
         groups.setdefault(channel, []).append({
             "rel": rel_posix,
             "name": path.name,
@@ -867,6 +896,7 @@ def scan_downloads(download_dir, files=None):
             "channel": channel,
             "duration": duration,
             "has_video": has_video,
+            "subs": subs,
         })
     # Drop cache entries for files that no longer exist.
     seen_rels = {e["rel"] for entries in groups.values() for e in entries}
@@ -881,7 +911,7 @@ def scan_downloads(download_dir, files=None):
 # Bump when the index.html template changes: the fingerprint below only
 # covers the file listing, so without this an existing index.html would
 # keep the old template until some video is added or removed.
-INDEX_TEMPLATE_VERSION = 41
+INDEX_TEMPLATE_VERSION = 53
 
 
 def channel_speeds(config):
@@ -902,7 +932,10 @@ def fingerprint(groups, site_title="", speeds=None):
         data.append({
             "channel": channel,
             "entries": [
-                {"rel": e["rel"], "size": e["size"], "mtime": e["mtime"]}
+                {"rel": e["rel"], "size": e["size"], "mtime": e["mtime"],
+                 # Subtitle sidecars influence the page (data-subs), so a
+                 # newly added .vtt must also regenerate it.
+                 "subs": sorted(e.get("subs", {}).values())}
                 for e in entries
             ],
         })
@@ -1014,6 +1047,14 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "    .pl-controls label { color: #bbb; font-size: .9rem; }",
         "    #pl-empty { color: #999; font-size: .9rem; }",
         "    #pl-video { width: 100%; max-height: 70vh; margin-top: .75rem; background: #000; }",
+        "    #pl-video::cue { background: rgba(0, 0, 0, .75); text-shadow: 0 0 4px #000; }",
+        # Custom subtitle line for audio-only playback: native cue
+        # rendering misplaces and oversizes text on small/mobile players,
+        # so audio-only items render subtitles in this div instead.
+        "    #pl-video.audio-only { height: 5.5rem; }",
+        "    #pl-subs { margin-top: .4rem; padding: .35rem .6rem; min-height: 1.4em;",
+        "      text-align: center; font-size: 1.05rem; line-height: 1.3; color: #fff;",
+        "      background: #000; border-radius: 4px; }",
         "    #pl-now { color: #8ab4f8; margin-top: .5rem; font-size: .95rem; }",
         "    li.pl-current a { color: #7bd88a; }",
         "    li.pl-current-video .entry-row > a { color: #7bd88a; }",
@@ -1098,6 +1139,7 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         '      </div>',
         '      <div id="pl-player" hidden>',
         '        <video id="pl-video" controls playsinline></video>',
+        '        <div id="pl-subs" hidden></div>',
         '        <div id="pl-now"></div>',
         '      </div>',
         '    </section>',
@@ -1113,6 +1155,15 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         if show_channel:
             meta_parts.insert(0, html.escape(entry.get("channel", "")))
         data_attr = f' data-id="{entry_id(entry)}"'
+        # Subtitle sidecars (see scan_downloads): {lang: url} JSON for the
+        # playlist player's <track> elements.
+        subs_attr = ""
+        if entry.get("subs"):
+            subs_json = json.dumps({
+                lang: urllib.parse.quote(rel, safe="/")
+                for lang, rel in entry["subs"].items()
+            })
+            subs_attr = " data-subs='" + subs_json.replace("'", "&#39;") + "'"
         # "watch-toggle" is the unambiguous hook for the watched-mark JS:
         # both buttons carry "watch-btn" for styling, so a plain
         # querySelector(".watch-btn") would grab whichever comes first.
@@ -1122,6 +1173,12 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         pl_add_btn = (
             '          <button class="watch-btn pl-add" type="button">+ Playlist</button>'
         )
+        subtitle_btn = None
+        if VIDEO_ID_RE.search(entry["name"]):
+            subtitle_btn = (
+                '          <button class="watch-btn subtitle-download" type="button" '
+                'title="Download subtitles, with auto-generated captions as fallback">⇩ Subtitles</button>'
+            )
         # Real YouTube IDs can be upgraded. Files that already have a video
         # stream get a disabled button as a visual hint.
         eid = entry_id(entry)
@@ -1134,7 +1191,7 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
                 f'title="Download the video stream and merge it in"{disabled_attr}>⇩ Video</button>'
             )
         return [line for line in [
-            f"        <li{data_attr}>",
+            f"        <li{data_attr}{subs_attr}>",
             '          <div class="entry-row">',
             (
                 f'            <a href="{href}" title="{html.escape(entry["name"])}">'
@@ -1145,6 +1202,7 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
             pl_add_btn,
             watch_btn,
             video_upgrade_btn,
+            subtitle_btn,
             '              </span>',
             f'              <span class="entry-meta">{" &middot; ".join(meta_parts)}</span>',
             '            </div>',
@@ -1261,7 +1319,7 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "    btn.title = message;",
         "    setTimeout(function () {",
         "      btn.disabled = false;",
-        "      btn.textContent = \"\\u21e9 Video\";",
+        "      btn.textContent = btn.dataset.label || \"\\u21e9 Video\";",
         "    }, 5000);",
         "  }",
         "  function pollVideoUpgrade(btn, jobId) {",
@@ -1272,7 +1330,7 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "        setTimeout(function () { pollVideoUpgrade(btn, jobId); }, 3000);",
         "      } else if (job.status === \"done\") {",
         "        btn.disabled = false;",
-        "        btn.textContent = \"\\u21e9 Video\";",
+        "        btn.textContent = btn.dataset.label || \"\\u21e9 Video\";",
         "        refreshAvailableVideos();",
         "      } else {",
         "        vuFail(btn, job.error || \"unknown error\");",
@@ -1376,7 +1434,91 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "  var plPlayer = document.getElementById(\"pl-player\");",
         "  var plVideo = document.getElementById(\"pl-video\");",
         "  var plNow = document.getElementById(\"pl-now\");",
+        "  var plSubsEl = document.getElementById(\"pl-subs\");",
         "  var plRepeat = document.getElementById(\"pl-repeat\");",
+        "  // Attach subtitle tracks stored on the playlist item",
+        "  // (data-subs on the source li, see scan_downloads).",
+        "  function plApplyTracks(item) {",
+        '    plVideo.querySelectorAll("track").forEach(function (t) { t.remove(); });',
+        "    if (!item.subs) return;",
+        "    var subs;",
+        "    try { subs = JSON.parse(item.subs); } catch (e) { subs = null; }",
+        "    if (!subs) return;",
+        "    var first = true;",
+        "    Object.keys(subs).forEach(function (lang) {",
+        '      var tr = document.createElement("track");',
+        '      tr.kind = "subtitles";',
+        "      tr.srclang = lang;",
+        "      tr.label = lang;",
+        "      tr.src = subs[lang];",
+        "      if (first) { tr.default = true; first = false; }",
+        "      plVideo.appendChild(tr);",
+        "    });",
+        "  }",
+        "  // Custom subtitle overlay for audio-only playback (native cues",
+        "  // break on small/mobile players). YouTube auto-caption VTTs",
+        "  // repeat rolling context lines and mark the new line with '>>';",
+        "  // the parser keeps only that newest line per cue.",
+        "  var plSubCues = null;",
+        "  var plSubForHref = null;",
+        "  function plParseVtt(text) {",
+        "    var cues = [];",
+        "    text.split(/\\r?\\n\\r?\\n/).forEach(function (block) {",
+        "      var blines = block.split(/\\r?\\n/);",
+        "      var ti = -1;",
+        "      for (var i = 0; i < blines.length; i++) {",
+        '        if (blines[i].indexOf("-->") >= 0) { ti = i; break; }',
+        "      }",
+        "      if (ti < 0) return;",
+        "      var m = blines[ti].match(",
+        "        /(?:(\\d+):)?(\\d+):(\\d+)\\.(\\d+)\\s+-->\\s+(?:(\\d+):)?(\\d+):(\\d+)\\.(\\d+)/);",
+        "      if (!m) return;",
+        "      var start = (+(m[1] || 0)) * 3600 + (+m[2]) * 60 + (+m[3]) + (+m[4]) / 1000;",
+        "      var end = (+(m[5] || 0)) * 3600 + (+m[6]) * 60 + (+m[7]) + (+m[8]) / 1000;",
+        "      var lines = [];",
+        "      for (var j = ti + 1; j < blines.length; j++) {",
+        '        var l = blines[j].replace(/<[^>]+>/g, "").replace(/^>+\\s*/, "").trim();',
+        "        if (l) lines.push(l);",
+        "      }",
+        "      if (lines.length) cues.push({ start: start, end: end, text: lines[lines.length - 1] });",
+        "    });",
+        "    return cues;",
+        "  }",
+        "  function plLoadSubs(item) {",
+        "    plSubCues = null;",
+        "    plSubForHref = null;",
+        "    plSubsEl.hidden = true;",
+        '    plSubsEl.textContent = "";',
+        "    if (!item || !item.subs) return;",
+        "    var subs;",
+        "    try { subs = JSON.parse(item.subs); } catch (e) { subs = null; }",
+        "    if (!subs) return;",
+        "    var langs = Object.keys(subs);",
+        "    if (!langs.length) return;",
+        "    // Prefer the plain language code ('es', 'en') over variants",
+        "    // like 'es-orig' or 'es-419'.",
+        "    var plain = langs.filter(function (l) { return l.indexOf(\"-\") < 0; });",
+        "    var lang = plain.length ? plain[0] : langs[0];",
+        "    fetch(subs[lang]).then(function (r) {",
+        '      if (!r.ok) throw new Error("HTTP " + r.status);',
+        "      return r.text();",
+        "    }).then(function (text) {",
+        "      plSubCues = plParseVtt(text);",
+        "      plSubForHref = item.href;",
+        "      plSubsEl.hidden = false;",
+        "      plUpdateSubs();",
+        "    }).catch(function () {});",
+        "  }",
+        "  function plUpdateSubs() {",
+        "    if (!plSubCues || plIndex < 0 || !pl[plIndex]",
+        "        || plSubForHref !== pl[plIndex].href) return;",
+        "    var t = plVideo.currentTime;",
+        '    var text = "";',
+        "    for (var i = 0; i < plSubCues.length; i++) {",
+        "      if (plSubCues[i].start <= t && t < plSubCues[i].end) text = plSubCues[i].text;",
+        "    }",
+        "    plSubsEl.textContent = text;",
+        "  }",
         "  var plIndex = -1;",
         "  var plDragIndex = -1;",
         "  function plItemId(item) {",
@@ -1490,6 +1632,7 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "    plPlayer.hidden = false;",
         "    plNow.textContent = (i + 1) + \"/\" + pl.length + \" \\u2014 \" + pl[i].name;",
         "    plVideo.src = pl[i].href;",
+        "    plApplyTracks(pl[i]);",
         "    // Do not carry the previous item's speed into a new video.",
         "    plVideo.playbackRate = 1;",
         "    plVideo.play().catch(function () {});",
@@ -1557,6 +1700,8 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "    plSavePos();",
         "  });",
         "  plVideo.addEventListener(\"pause\", plSavePos);",
+        '  plVideo.addEventListener("timeupdate", plUpdateSubs);',
+        '  plVideo.addEventListener("seeked", plUpdateSubs);',
         "  window.addEventListener(\"beforeunload\", plSavePos);",
         "  // Playback speed comes from each subscription's playback_speed",
         "  // in subscriptions.yaml (SPEED_BY_CHANNEL). Channels without a",
@@ -1567,12 +1712,23 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "    if (plIndex < 0 || !pl[plIndex]) return;",
         "    var href = pl[plIndex].href.split(/[?#]/)[0];",
         "    var channel = decodeURIComponent(href.split(\"/\")[0] || \"\");",
+        "    var audioExtension = /\\.(m4a|mp3|opus|ogg|aac|wav|flac)$/i.test(href);",
+        "    var isAudio = audioExtension || plVideo.videoWidth === 0;",
+        "    plVideo.classList.toggle(\"audio-only\", isAudio);",
+        '    plVideo.setAttribute("controls", "");',
+        "    if (isAudio) {",
+        "      // Custom overlay instead of native <track> cues (those break",
+        "      // on small/mobile players); the native control bar stays.",
+        '      plVideo.querySelectorAll("track").forEach(function (t) { t.remove(); });',
+        "      plLoadSubs(pl[plIndex]);",
+        "    } else {",
+        "      plSubCues = null;",
+        "      plSubsEl.hidden = true;",
+        "    }",
         "    if (SPEED_BY_CHANNEL[channel]) {",
         "      plVideo.playbackRate = SPEED_BY_CHANNEL[channel];",
         "      return;",
         "    }",
-        "    var audioExtension = /\\.(m4a|mp3|opus|ogg|aac|wav|flac)$/i.test(href);",
-        "    var isAudio = audioExtension || plVideo.videoWidth === 0;",
         "    if (!isAudio) { plVideo.playbackRate = 1; return; }",
         "    plVideo.playbackRate = /[\\u3400-\\u4dbf\\u4e00-\\u9fff]/.test(pl[plIndex].name) ? 2 : 1.5;",
         "  });",
@@ -1590,6 +1746,7 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "    plPlayer.hidden = false;",
         "    plNow.textContent = (idx + 1) + \"/\" + pl.length + \" \\u2014 \" + pl[idx].name;",
         "    plVideo.src = pl[idx].href;",
+        "    plApplyTracks(pl[idx]);",
         "    plVideo.playbackRate = 1;",
         "    plVideo.addEventListener(\"loadedmetadata\", function seek() {",
         "      plVideo.removeEventListener(\"loadedmetadata\", seek);",
@@ -1618,7 +1775,7 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "      var href = a.getAttribute(\"href\");",
         "      if (!have[href]) {",
         "        have[href] = true;",
-        "        fresh.push({ href: href, name: a.textContent, id: li.dataset.id });",
+        "        fresh.push({ href: href, name: a.textContent, id: li.dataset.id, subs: li.dataset.subs || \"\" });",
         "      }",
         "    });",
         "    if (shuffle) {",
@@ -1710,7 +1867,7 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         '        var href = a.getAttribute("href");',
         "        var idx = pl.findIndex(function (item) { return item.href === href; });",
         "        if (idx >= 0) { plRemoveAt(idx, false); return; }",
-        "        pl.push({ href: href, name: a.textContent, id: li.dataset.id });",
+        "        pl.push( { href: href, name: a.textContent, id: li.dataset.id, subs: li.dataset.subs || \"\" });",
         "        plSave();",
         "        // First item added to an empty playlist: start playing it.",
         "        if (pl.length === 1) { plPlayAt(0); return; }",
@@ -1724,14 +1881,15 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "        report(id, isWatched);",
         "        applyAll();",
         "      });",
-        "      var vuBtn = li.querySelector(\".video-upgrade\");",
-        "      if (vuBtn) vuBtn.addEventListener(\"click\", function () {",
-        "        var btn = vuBtn;",
+        "      li.querySelectorAll(\".video-upgrade, .subtitle-download\").forEach(function (btn) {",
+        "      btn.dataset.label = btn.textContent;",
+        "      btn.addEventListener(\"click\", function () {",
+        "        var endpoint = btn.classList.contains(\"subtitle-download\") ? \"/subtitle-download\" : \"/video-upgrade\";",
         "        var rel = decodeURIComponent(",
         "          li.querySelector(\"a\").getAttribute(\"href\").split(/[?#]/)[0]);",
         "        btn.disabled = true;",
         "        btn.textContent = \"\\u2026\";",
-        "        fetch(API + \"/video-upgrade\", {",
+        "        fetch(API + endpoint, {",
         "          method: \"POST\",",
         "          headers: { \"Content-Type\": \"application/json\" },",
         "          body: JSON.stringify({ rel: rel }),",
@@ -1743,6 +1901,7 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "        }).catch(function (e) {",
         "          vuFail(btn, e.message);",
         "        });",
+        "      });",
         "      });",
         "    });",
         "    });",
@@ -1775,14 +1934,21 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "        // a video upgrade can change the file extension, so keep the",
         "        // playlist pointing at the current file by matching data-id.",
         "        var hrefById = {};",
+        "        var subsById = {};",
         '        document.querySelectorAll("#video-sections li[data-id]").forEach(function (li) {',
         '          var a = li.querySelector("a");',
         '          if (a) hrefById[li.dataset.id] = a.getAttribute("href");',
+        '          subsById[li.dataset.id] = li.dataset.subs || "";',
         "        });",
         "        var plChanged = false;",
         "        pl.forEach(function (item) {",
         "          var newHref = hrefById[item.id];",
         "          if (newHref && newHref !== item.href) { item.href = newHref; plChanged = true; }",
+        "          var newSubs = subsById[item.id];",
+        "          if (newSubs !== undefined && newSubs !== (item.subs || \"\")) {",
+        "            item.subs = newSubs; plChanged = true;",
+        "            if (pl[plIndex] === item) { plApplyTracks(item); plLoadSubs(item); }",
+        "          }",
         "        });",
         "        if (plChanged) { plSave(); plRender(); }",
         "      })",
@@ -1809,7 +1975,7 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "    var href = a.getAttribute(\"href\");",
         "    if (pl.some(function (item) { return item.href === href; })) return;",
         "    var insertAt = plIndex >= 0 ? plIndex + 1 : pl.length;",
-        "    pl.splice(insertAt, 0, { href: href, name: a.textContent, id: li.dataset.id });",
+        "    pl.splice(insertAt, 0, { href: href, name: a.textContent, id: li.dataset.id, subs: li.dataset.subs || \"\" });",
         "    plSave();",
         "    plRender();",
         "  })();",
@@ -1934,14 +2100,26 @@ def delete_watched_videos(download_dir, watched_ids, keep_channels=(), files=Non
             continue
         channel = rel.parts[0] if len(rel.parts) > 1 else None
         try:
+            # Subtitle sidecars ("Name [id].es.vtt") follow their video.
+            try:
+                sidecars = [
+                    p for p in path.parent.iterdir()
+                    if p.suffix == ".vtt" and p.name.startswith(path.stem + ".")
+                ]
+            except OSError:
+                sidecars = []
             if channel in keep_channels:
                 dest_dir = root / channel / "watched"
                 dest_dir.mkdir(exist_ok=True)
                 path.replace(dest_dir / path.name)
+                for sidecar in sidecars:
+                    sidecar.replace(dest_dir / sidecar.name)
                 removed.append(path)
                 log.info("moved watched video to %s: %s", dest_dir.name, path.name)
             else:
                 path.unlink()
+                for sidecar in sidecars:
+                    sidecar.unlink(missing_ok=True)
                 removed.append(path)
                 log.info("deleted watched video: %s", path.name)
         except OSError as e:
@@ -2009,6 +2187,8 @@ class ApiHandler(BaseHTTPRequestHandler):
     POST /video-upgrade {"rel": "<path relative to download_dir>"} starts
                     a job that downloads the video stream for an audio-only
                     file and merges it in; 202 with {"job_id": "..."}.
+    POST /subtitle-download {"rel": "<path relative to download_dir>"}
+                    fetches published/automatic subtitles as VTT sidecars.
     GET  /cookies   returns whether cookies.txt is set (never its content).
     POST /cookies   replaces cookies.txt (raw Netscape export body); an
                     empty body removes it.
@@ -2132,6 +2312,8 @@ class ApiHandler(BaseHTTPRequestHandler):
             self._post_download()
         elif self.path == "/video-upgrade":
             self._post_video_upgrade()
+        elif self.path == "/subtitle-download":
+            self._post_video_upgrade(subtitles=True)
         elif self.path == "/cookies":
             self._post_cookies()
         else:
@@ -2275,40 +2457,60 @@ class ApiHandler(BaseHTTPRequestHandler):
         log.info("manual download job %s started: %s (%s)", job_id, url, quality)
         self._json(202, {"job_id": job_id})
 
-    def _post_video_upgrade(self):
+    def _post_video_upgrade(self, subtitles=False):
+        kind = "subtitle-download" if subtitles else "video-upgrade"
         body = self._read_body()
         if body is None:
             return
         try:
             data = json.loads(body or b"{}")
-        except json.JSONDecodeError as e:
+            if not isinstance(data, dict):
+                raise ValueError("request must be a JSON object")
+        except ValueError as e:
             self._json(400, {"error": str(e)})
             return
         try:
-            settings = load_config().get("settings", {})
+            config = load_config()
+            settings = config.get("settings", {})
         except Exception as e:
             log.error("video-upgrade: could not load config: %s", e)
             self._json(500, {"error": "could not load server configuration"})
             return
         download_dir = settings.get("download_dir", "/srv/files")
         path = resolve_download_rel(download_dir, str(data.get("rel", "")))
-        if path is None or not path.is_file():
+        if (path is None or not path.is_file()
+                or Path(download_dir).resolve() not in path.resolve().parents
+                or not is_video_file(path)):
             self._json(400, {"error": "path is not a file under download_dir"})
             return
         match = VIDEO_ID_RE.search(path.name)
         if not match:
             self._json(400, {"error": "no YouTube ID in filename"})
             return
-        try:
-            codecs = probe_codecs(path)
-        except Exception as e:
-            self._json(400, {"error": f"could not probe file: {e}"})
-            return
-        if codecs["video"]:
-            self._json(400, {"error": "file already has a video stream"})
-            return
+        if not subtitles:
+            try:
+                codecs = probe_codecs(path)
+            except Exception as e:
+                self._json(400, {"error": f"could not probe file: {e}"})
+                return
+            if codecs["video"]:
+                self._json(400, {"error": "file already has a video stream"})
+                return
+        langs = "en.*"
+        if subtitles:
+            channel = path.relative_to(download_dir).parts[0]
+            for sub in config.get("subscriptions", []):
+                if sub.get("name") == channel and sub.get("subtitles"):
+                    langs = sub["subtitles"]
+                    if isinstance(langs, list):
+                        langs = ",".join(langs)
+                    break
         job_id = uuid.uuid4().hex[:8]
         with _download_jobs_lock:
+            if any(j.get("kind") == kind and j.get("source") == str(path)
+                   and j["status"] == "running" for j in _download_jobs.values()):
+                self._json(409, {"error": "this download is already in progress"})
+                return
             running = sum(
                 1 for job in _download_jobs.values()
                 if job["status"] == "running"
@@ -2319,7 +2521,7 @@ class ApiHandler(BaseHTTPRequestHandler):
                 })
                 return
             _download_jobs[job_id] = {
-                "id": job_id, "kind": "video-upgrade", "rel": path.name,
+                "id": job_id, "kind": kind, "rel": path.name, "source": str(path),
                 "status": "running", "error": None, "created": time.time(),
             }
             # Cap the job history; never evict a still-running job.
@@ -2330,8 +2532,9 @@ class ApiHandler(BaseHTTPRequestHandler):
                     break
                 del _download_jobs[oldest]
         thread = threading.Thread(
-            target=run_video_upgrade_job,
-            args=(job_id, path, match.group(1), settings),
+            target=run_subtitle_download_job if subtitles else run_video_upgrade_job,
+            args=(job_id, path, match.group(1), settings, langs) if subtitles else
+                 (job_id, path, match.group(1), settings),
             daemon=True,
         )
         thread.start()
@@ -2608,8 +2811,22 @@ def download_video(sub, video, download_dir):
         "-o", str(out_dir / "%(title).200B [%(id)s].%(ext)s"),
         "--no-playlist",
         "--print", "after_move:%(filepath)s\t%(duration)s",
-        f"https://www.youtube.com/watch?v={video['id']}",
     ]
+    sub_langs = sub.get("subtitles")
+    if sub_langs:
+        if isinstance(sub_langs, str):
+            sub_langs = [sub_langs]
+        cmd += [
+            "--write-subs",
+            # Auto-generated captions fill in for languages that have no
+            # real subtitles (yt-dlp skips auto subs that duplicate real
+            # ones).
+            "--write-auto-subs",
+            "--sub-langs", ",".join(sub_langs),
+            # The web player needs WebVTT; YouTube also serves srv*/json3.
+            "--convert-subs", "vtt",
+        ]
+    cmd.append(f"https://www.youtube.com/watch?v={video['id']}")
     result = run_yt_dlp(cmd)
     if result.returncode != 0:
         if is_members_only_error(result.stderr):
@@ -2837,6 +3054,57 @@ def merge_video_audio(video_file, audio_path):
     if final_path != audio_path:
         audio_path.unlink()
     return final_path
+
+
+def run_subtitle_download_job(job_id, path, video_id, settings, langs):
+    """Fetch sidecars only; yt-dlp prefers manual captions per language."""
+    error = None
+    try:
+        with tempfile.TemporaryDirectory(prefix="ytwatcher-subs-") as folder:
+            result = run_yt_dlp([
+                YT_DLP, "--skip-download", "--no-playlist",
+                "--write-subs", "--write-auto-subs", "--sub-langs", langs,
+                "--sub-format", "vtt/best", "--convert-subs", "vtt",
+                "-o", str(Path(folder) / (video_id + ".%(ext)s")),
+                f"https://www.youtube.com/watch?v={video_id}",
+            ], context=f"subtitle-download job {job_id}")
+            sidecars = [p for p in Path(folder).iterdir()
+                        if p.name.startswith(video_id + ".")
+                        and p.suffix == ".vtt" and p.stat().st_size > 0]
+            if not sidecars:
+                if result.returncode:
+                    raise RuntimeError("Subtitle download failed (see service log)")
+                raise RuntimeError(f"No published or auto-generated subtitles available for {langs}")
+            if not path.is_file():
+                raise RuntimeError("The original media file is no longer available")
+            for sidecar in sidecars:
+                target = path.parent / (path.stem + sidecar.name[len(video_id):])
+                temporary = _tmp_path(target)
+                try:
+                    shutil.copyfile(sidecar, temporary)
+                    temporary.replace(target)
+                finally:
+                    temporary.unlink(missing_ok=True)
+            if result.returncode:
+                log.warning("subtitle-download job %s: some caption tracks failed", job_id)
+        # Publish the refreshed page before signalling completion to the browser.
+        update_index_html(
+            settings.get("download_dir", "/srv/files"),
+            api_port=settings.get("api_port", DEFAULT_API_PORT),
+            site_title=settings.get("site_title", DEFAULT_SITE_TITLE),
+            max_age_days=settings.get("watchlist_max_age_days"),
+            latest_max_age_days=settings.get("latest_max_age_days"),
+        )
+    except Exception as exc:
+        error = str(exc)
+        log.error("subtitle-download job %s failed: %s", job_id, exc)
+    with _download_jobs_lock:
+        job = _download_jobs.get(job_id)
+        if job is not None:
+            job["status"] = "failed" if error else "done"
+            job["error"] = error
+            if not error:
+                job["video_id"] = video_id
 
 
 def run_video_upgrade_job(job_id, audio_path, video_id, settings):

@@ -232,3 +232,34 @@ def test_file_creation_time(tmp_path):
     assert ctime > 0
     # binding is cached after first use
     assert main._statx_binding is not None
+
+
+# subtitles: validation + sidecar discovery
+# ---------------------------------------------------------------------------
+
+def test_validate_subtitles_option():
+    def cfg(subtitles):
+        return {"settings": {}, "subscriptions": [
+            {"name": "X", "url": "https://x/@A", "quality": "best",
+             "subtitles": subtitles}]}
+    assert not main.validate_config(cfg("es"))
+    assert not main.validate_config(cfg(["es.*", "en"]))
+    assert main.validate_config(cfg([""]))
+    assert main.validate_config(cfg(123))
+    assert main.validate_config(cfg([]))
+
+
+def test_scan_downloads_attaches_subtitle_sidecars(tmp_path):
+    chan = tmp_path / "Chan"
+    chan.mkdir()
+    (chan / "Title [abcdefghijk].webm").write_bytes(b"x")
+    (chan / "Title [abcdefghijk].es.vtt").write_text("WEBVTT\n")
+    (chan / "Title [abcdefghijk].es-419.vtt").write_text("WEBVTT\n")
+    (chan / "Other [bcdefghijkl].webm").write_bytes(b"x")
+    groups = main.scan_downloads(tmp_path)
+    entries = {e["name"]: e for e in groups["Chan"]}
+    assert entries["Title [abcdefghijk].webm"]["subs"] == {
+        "es": "Chan/Title [abcdefghijk].es.vtt",
+        "es-419": "Chan/Title [abcdefghijk].es-419.vtt",
+    }
+    assert entries["Other [bcdefghijkl].webm"]["subs"] == {}
