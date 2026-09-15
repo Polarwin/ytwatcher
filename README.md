@@ -61,6 +61,27 @@ the real file is gitignored):
 
 ## Usage
 
+Static folder links are configured separately from subscriptions:
+
+```yaml
+static:
+  - name: ReinforceLearning
+    path: /srv/files/static/ReinforceLearning
+    url: /ytwatcher/static/ReinforceLearning/
+```
+
+The index renders these links under **Static** in configuration order. Changes
+are picked up during the next index rebuild, including when the media listing
+has not changed. Use `static: []` or omit the section to hide it. If `url` is
+omitted, folders under `/srv/files/static/` use their relative path under
+`/ytwatcher/static/`. One shared nginx route serves this entire static root;
+additional subfolders need no nginx changes. Folders elsewhere require an
+explicit existing route or a symlink inside the static root. Only put folders
+you want web-accessible inside that root, including symlink targets.
+Run `sudo python3 install_static_route.py --apply` once to migrate the original
+ReinforceLearning folder and replace its individual route with the shared route.
+Static folders are not scanned, downloaded, or included in watched-file cleanup.
+
 Single test round:
 
 ```bash

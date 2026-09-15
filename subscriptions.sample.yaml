@@ -65,6 +65,26 @@ settings:
 #                              language has none; stored as .vtt next to the
 #                              video and shown by the web player.
 
+# Static links only: these folders are never scanned or cleaned by the watcher.
+# The shared nginx route serves every folder under /srv/files/static/.
+# Create/move folders there as your normal user (not sudo on an NFS share).
+# Then add entries with a display name and filesystem path, for example:
+#   - name: Courses
+#     path: /srv/files/static/Courses
+#   - name: ML Lectures
+#     path: /srv/files/static/Courses/ML Lectures
+# url is optional; it is derived from the path relative to /srv/files/static/.
+# Symlinks to existing folders also work; their contents become web-accessible.
+# Save and refresh after the next scan, or rebuild immediately with:
+#   .venv/bin/python main.py --generate-index
+# No nginx changes or service restart are needed for additional entries.
+# Removing an entry hides the link, not the folder or its web access.
+# Omit this section (or use static: []) to hide it.
+static:
+  - name: ReinforceLearning
+    path: /srv/files/static/ReinforceLearning
+    url: /ytwatcher/static/ReinforceLearning/
+
 subscriptions:
   - name: Veritasium
     url: https://www.youtube.com/@veritasium

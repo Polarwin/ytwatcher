@@ -201,6 +201,27 @@ def validate_config(config):
                     f"under {DOWNLOAD_DIR_ROOT}"
                 )
 
+    static = config.get("static", [])
+    if not isinstance(static, list):
+        problems.append("static: must be a list")
+    else:
+        for i, item in enumerate(static):
+            if not isinstance(item, dict):
+                problems.append(f"static[{i}]: must be a mapping")
+                continue
+            if not isinstance(item.get("name"), str) or not item["name"].strip():
+                problems.append(f"static[{i}].name: must be a non-empty string")
+            path = item.get("path")
+            if (not isinstance(path, str) or not path.startswith("/srv/files/")
+                    or os.path.normpath(path) == "/srv/files"
+                    or not os.path.normpath(path).startswith("/srv/files/")):
+                problems.append(f"static[{i}].path: must be a folder under /srv/files")
+            url = item.get("url")
+            if url is not None and (not isinstance(url, str) or not url.startswith("/")
+                                    or url.startswith("//") or "\\" in url
+                                    or any(ord(c) < 32 for c in url)):
+                problems.append(f"static[{i}].url: must be a local URL starting with one slash")
+
     subs = config.get("subscriptions", [])
     if not isinstance(subs, list):
         problems.append("subscriptions: must be a list")
@@ -911,7 +932,7 @@ def scan_downloads(download_dir, files=None):
 # Bump when the index.html template changes: the fingerprint below only
 # covers the file listing, so without this an existing index.html would
 # keep the old template until some video is added or removed.
-INDEX_TEMPLATE_VERSION = 54
+INDEX_TEMPLATE_VERSION = 57
 
 
 def channel_speeds(config):
@@ -925,8 +946,8 @@ def channel_speeds(config):
     return speeds
 
 
-def fingerprint(groups, site_title="", speeds=None):
-    """Return a stable hash of the current download listing and page title."""
+def fingerprint(groups, site_title="", speeds=None, static=None):
+    """Hash the media listing, page title, speeds and static links."""
     data = []
     for channel, entries in groups.items():
         data.append({
@@ -941,8 +962,10 @@ def fingerprint(groups, site_title="", speeds=None):
         })
     canonical = json.dumps(data, sort_keys=True, ensure_ascii=True, separators=(",", ":"))
     speeds_json = json.dumps(speeds or {}, sort_keys=True, separators=(",", ":"))
+    static_json = json.dumps(static or [], sort_keys=True, separators=(",", ":"))
     return hashlib.sha1(
-        (f"{INDEX_TEMPLATE_VERSION}\n" + site_title + "\n" + canonical + "\n" + speeds_json).encode("utf-8")
+        (f"{INDEX_TEMPLATE_VERSION}\n" + site_title + "\n" + canonical
+         + "\n" + speeds_json + "\n" + static_json).encode("utf-8")
     ).hexdigest()
 
 
@@ -958,7 +981,7 @@ def read_existing_fingerprint(index_path):
     return match.group(1) if match else None
 
 
-def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_port=DEFAULT_API_PORT, site_title=DEFAULT_SITE_TITLE, speeds=None):
+def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_port=DEFAULT_API_PORT, site_title=DEFAULT_SITE_TITLE, speeds=None, static=None):
     """Build the index.html page."""
     latest = latest or []
     escaped_title = html.escape(site_title)
@@ -1085,6 +1108,17 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         '      <p class="tool-status" id="watch-status"></p>',
         "    </header>",
     ]
+    if static:
+        lines.extend(['    <section class="static-links" aria-label="Static files">',
+                      '      <h2>Static</h2>'])
+        for item in static:
+            folder = Path(item["path"])
+            relative = (folder.relative_to("/srv/files/static").as_posix()
+                        if folder.is_relative_to("/srv/files/static") else folder.name)
+            url = item.get("url") or (
+                "/ytwatcher/static/" + urllib.parse.quote(relative, safe="/") + "/")
+            lines.append(f'      <p><a href="{html.escape(url, quote=True)}">{html.escape(item["name"])}</a></p>')
+        lines.append('    </section>')
 
     lines.extend([
         '    <section class="tools">',
@@ -2019,9 +2053,14 @@ def update_index_html(download_dir, api_port=DEFAULT_API_PORT,
     optional precomputed walk_video_files list (NFS walk dedup).
     """
     with _index_lock:
+        try:
+            config = load_config()
+        except Exception:
+            config = {}
+        static = config.get("static", [])
         if speeds is None:
             try:
-                speeds = channel_speeds(load_config())
+                speeds = channel_speeds(config)
             except Exception:
                 speeds = {}
         groups = scan_downloads(download_dir, files=files)
@@ -2038,7 +2077,7 @@ def update_index_html(download_dir, api_port=DEFAULT_API_PORT,
             groups = {c: es for c, es in groups.items() if es}
         total = sum(len(entries) for entries in groups.values())
         channels = len(groups)
-        fp = fingerprint(groups, site_title, speeds)
+        fp = fingerprint(groups, site_title, speeds, static=static)
         index_path = Path(download_dir) / "index.html"
         if read_existing_fingerprint(index_path) == fp:
             return False, total, channels
@@ -2052,7 +2091,7 @@ def update_index_html(download_dir, api_port=DEFAULT_API_PORT,
             cutoff = time.time() - latest_max_age_days * 86400
             latest = [e for e in latest if e["mtime"] >= cutoff]
         now_str = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
-        html_content = generate_index_html(groups, total, channels, now_str, fp, latest=latest, api_port=api_port, site_title=site_title, speeds=speeds)
+        html_content = generate_index_html(groups, total, channels, now_str, fp, latest=latest, api_port=api_port, site_title=site_title, speeds=speeds, static=static)
         tmp = _tmp_path(index_path)
         tmp.write_text(html_content, encoding="utf-8")
         tmp.replace(index_path)
