@@ -954,7 +954,7 @@ def scan_downloads(download_dir, files=None):
 # Bump when the index.html template changes: the fingerprint below only
 # covers the file listing, so without this an existing index.html would
 # keep the old template until some video is added or removed.
-INDEX_TEMPLATE_VERSION = 60
+INDEX_TEMPLATE_VERSION = 61
 
 
 def static_folder_url(item):
@@ -1250,9 +1250,9 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         '        <button type="button" id="pl-add-all" '
         'title="Shuffle the current playlist (keeps the playing item first)">Shuffle all</button>',
         '        <button type="button" id="pl-add-latest" '
-        'title="Queue the Latest section in listed order (excluding watched)">Add all latest</button>',
+        'title="Queue the Latest section in listed order (excluding watched)">Add latest</button>',
         '        <button type="button" id="pl-add-espanol" '
-        'title="Queue every Spanish video in listed order">Add all Spanish</button>',
+        'title="Queue every Spanish video in listed order">Add Spanish</button>',
         '        <label><input type="checkbox" id="pl-repeat"> Repeat</label>',
         '        <button type="button" id="pl-clear">Clear</button>',
         '        <button type="button" id="pl-download" title="Download every playlist file to this device">Download playlist</button>',
