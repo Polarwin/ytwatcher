@@ -234,6 +234,54 @@ def test_file_creation_time(tmp_path):
     assert main._statx_binding is not None
 
 
+# ---------------------------------------------------------------------------
+# channel_subdir_name
+# ---------------------------------------------------------------------------
+
+def test_channel_subdir_name_handle():
+    assert main.channel_subdir_name(
+        "https://www.youtube.com/@SpanishTalksCafe") == "SpanishTalksCafe"
+    # trailing slash and percent-encoding
+    assert main.channel_subdir_name(
+        "https://www.youtube.com/@EasyEspa%C3%B1ol-b8b/") == "EasyEspañol-b8b"
+    # /c/-style URLs
+    assert main.channel_subdir_name(
+        "https://www.youtube.com/c/SomeChannel") == "SomeChannel"
+
+
+def test_channel_subdir_name_rejects_unsafe():
+    assert main.channel_subdir_name("https://www.youtube.com/") is None
+    assert main.channel_subdir_name("https://www.youtube.com/..") is None
+    # a percent-encoded slash must not survive into a path segment
+    assert main.channel_subdir_name("https://www.youtube.com/@a%2Fb") is None
+
+
+# ---------------------------------------------------------------------------
+# validate_config: url entries with 'dir'
+# ---------------------------------------------------------------------------
+
+def _sub(url):
+    return {"settings": {},
+            "subscriptions": [{"name": "X", "url": url, "quality": "best"}]}
+
+
+def test_validate_url_mapping_entries():
+    assert not main.validate_config(_sub([
+        "https://www.youtube.com/@A",
+        {"url": "https://www.youtube.com/@B", "dir": "shared"},
+        {"url": "https://www.youtube.com/@C", "dir": "shared"},
+    ]))
+
+
+def test_validate_url_mapping_rejects_bad_dir():
+    assert main.validate_config(_sub([{"url": "https://x/@B", "dir": "../evil"}]))
+    assert main.validate_config(_sub([{"url": "https://x/@B", "dir": "a/b"}]))
+    assert main.validate_config(_sub([{"url": "", "dir": "shared"}]))
+    assert main.validate_config(_sub([{"dir": "shared"}]))
+    assert main.validate_config(_sub([123]))
+
+
+# ---------------------------------------------------------------------------
 # subtitles: validation + sidecar discovery
 # ---------------------------------------------------------------------------
 

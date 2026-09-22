@@ -247,10 +247,32 @@ def validate_config(config):
         if isinstance(url, str):
             if not url.strip():
                 problems.append(f"{label}: missing or empty 'url'")
-        elif not (
-            isinstance(url, list) and url
-            and all(isinstance(u, str) and u.strip() for u in url)
-        ):
+        elif isinstance(url, list) and url:
+            # Entries are either plain URL strings or mappings
+            # {url: ..., dir: ...}; 'dir' groups several channels into
+            # the same subdirectory of the subscription folder.
+            for u in url:
+                if isinstance(u, str):
+                    if not u.strip():
+                        problems.append(f"{label}: empty 'url' entry")
+                elif isinstance(u, dict):
+                    if not isinstance(u.get("url"), str) or not u.get("url", "").strip():
+                        problems.append(f"{label}: url entry missing 'url'")
+                    d = u.get("dir")
+                    if d is not None and not (
+                        isinstance(d, str) and d.strip()
+                        and d.strip() not in (".", "..")
+                        and "/" not in d and "\\" not in d
+                    ):
+                        problems.append(
+                            f"{label}: 'dir' must be a non-empty folder name "
+                            "without '/' or '\\'"
+                        )
+                else:
+                    problems.append(
+                        f"{label}: 'url' entries must be strings or mappings"
+                    )
+        else:
             problems.append(
                 f"{label}: 'url' must be a non-empty string or a list of URLs"
             )
@@ -932,7 +954,50 @@ def scan_downloads(download_dir, files=None):
 # Bump when the index.html template changes: the fingerprint below only
 # covers the file listing, so without this an existing index.html would
 # keep the old template until some video is added or removed.
-INDEX_TEMPLATE_VERSION = 57
+INDEX_TEMPLATE_VERSION = 60
+
+
+def static_folder_url(item):
+    folder = Path(item["path"])
+    relative = (folder.relative_to("/srv/files/static").as_posix()
+                if folder.is_relative_to("/srv/files/static") else folder.name)
+    return (item.get("url") or "/ytwatcher/static/" + urllib.parse.quote(relative, safe="/")).rstrip("/") + "/"
+
+
+def scan_static_media(items):
+    """Read-only listing, independent of download state and cleanup."""
+    groups = []
+    for item in items:
+        root = Path(item["path"])
+        base = static_folder_url(item)
+        entries = []
+        visited = set()
+        for directory, dirs, files in os.walk(root, followlinks=True):
+            resolved = Path(directory).resolve()
+            if resolved in visited:
+                dirs[:] = []
+                continue
+            visited.add(resolved)
+            dirs[:] = sorted(d for d in dirs if not d.startswith("."))
+            for name in sorted(files):
+                path = Path(directory) / name
+                if name.startswith(".") or not is_video_file(path):
+                    continue
+                try:
+                    stat = path.stat()
+                    rel = path.relative_to(root).as_posix()
+                    subs = {}
+                    for candidate in files:
+                        if candidate.startswith(path.stem + ".") and candidate.endswith(".vtt"):
+                            lang = candidate[len(path.stem) + 1:-4]
+                            sub = (path.parent / candidate).relative_to(root).as_posix()
+                            subs[lang] = base + urllib.parse.quote(sub, safe="/")
+                    entries.append({"name": rel, "href": base + urllib.parse.quote(rel, safe="/"),
+                                    "size": stat.st_size, "mtime": stat.st_mtime_ns, "subs": subs})
+                except OSError:
+                    continue
+        groups.append({**item, "media": entries})
+    return groups
 
 
 def channel_speeds(config):
@@ -946,8 +1011,13 @@ def channel_speeds(config):
     return speeds
 
 
-def fingerprint(groups, site_title="", speeds=None, static=None):
-    """Hash the media listing, page title, speeds and static links."""
+def fingerprint(groups, site_title="", speeds=None, watched=None, static=None):
+    """Return a stable hash of the current download listing and page title.
+
+    The watched set is part of the hash so that marking a video as
+    watched regenerates the page: the "Latest" section filters watched
+    entries out even before their files are deleted or archived.
+    """
     data = []
     for channel, entries in groups.items():
         data.append({
@@ -962,10 +1032,11 @@ def fingerprint(groups, site_title="", speeds=None, static=None):
         })
     canonical = json.dumps(data, sort_keys=True, ensure_ascii=True, separators=(",", ":"))
     speeds_json = json.dumps(speeds or {}, sort_keys=True, separators=(",", ":"))
+    watched_json = json.dumps(sorted(watched or ()), separators=(",", ":"))
     static_json = json.dumps(static or [], sort_keys=True, separators=(",", ":"))
     return hashlib.sha1(
         (f"{INDEX_TEMPLATE_VERSION}\n" + site_title + "\n" + canonical
-         + "\n" + speeds_json + "\n" + static_json).encode("utf-8")
+         + "\n" + speeds_json + "\n" + watched_json + "\n" + static_json).encode("utf-8")
     ).hexdigest()
 
 
@@ -1039,6 +1110,8 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "    }",
         "    .watch-btn:hover { background: #3a3a3a; color: #fff; }",
         "    .watch-btn:disabled { opacity: .5; cursor: default; }",
+        "    .sec-actions { margin-left: .4rem; }",
+        "    .sec-actions .watch-btn { font-size: .72rem; padding: .1rem .45rem; }",
         "    .tools { margin-bottom: 2rem; }",
         "    .tools form { display: flex; gap: .5rem; flex-wrap: wrap; align-items: center; }",
         "    .tools input[type=url] {",
@@ -1108,17 +1181,30 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         '      <p class="tool-status" id="watch-status"></p>',
         "    </header>",
     ]
+    lines.append('    <div id="static-sections">')
     if static:
         lines.extend(['    <section class="static-links" aria-label="Static files">',
                       '      <h2>Static</h2>'])
         for item in static:
-            folder = Path(item["path"])
-            relative = (folder.relative_to("/srv/files/static").as_posix()
-                        if folder.is_relative_to("/srv/files/static") else folder.name)
-            url = item.get("url") or (
-                "/ytwatcher/static/" + urllib.parse.quote(relative, safe="/") + "/")
-            lines.append(f'      <p><a href="{html.escape(url, quote=True)}">{html.escape(item["name"])}</a></p>')
+            url = static_folder_url(item)
+            lines.append(f'      <div data-static-folder="{html.escape(url, quote=True)}">')
+            lines.append(f'      <p><a href="{html.escape(url, quote=True)}">{html.escape(item["name"])}</a> '
+                         '<button class="watch-btn static-fold" type="button" aria-expanded="true">Hide</button></p>')
+            lines.append('      <ul>')
+            for media in item.get("media", []):
+                subs = html.escape(json.dumps(media["subs"]), quote=True)
+                lines.extend([
+                    f'        <li data-static="true" data-subs="{subs}">',
+                    '          <div class="entry-row">',
+                    f'            <a href="{html.escape(media["href"], quote=True)}">{html.escape(media["name"])}</a>',
+                    '            <button class="watch-btn pl-add" type="button">+ Playlist</button>',
+                    '          </div>',
+                    '        </li>',
+                ])
+            lines.append('      </ul>')
+            lines.append('      </div>')
         lines.append('    </section>')
+    lines.append('    </div>')
 
     lines.extend([
         '    <section class="tools">',
@@ -1162,7 +1248,7 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         '      <div class="pl-controls">',
         '        <button type="button" id="pl-play">Play</button>',
         '        <button type="button" id="pl-add-all" '
-        'title="Queue every listed video in random order">Add all shuffled</button>',
+        'title="Shuffle the current playlist (keeps the playing item first)">Shuffle all</button>',
         '        <button type="button" id="pl-add-latest" '
         'title="Queue the Latest section in listed order (excluding watched)">Add all latest</button>',
         '        <button type="button" id="pl-add-espanol" '
@@ -1189,6 +1275,14 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         if show_channel:
             meta_parts.insert(0, html.escape(entry.get("channel", "")))
         data_attr = f' data-id="{entry_id(entry)}"'
+        # Latest entries carry their channel so collapsing a section can
+        # also hide them there (see applyLatestVisibility in the page JS).
+        if show_channel:
+            data_attr += f' data-channel="{html.escape(entry.get("channel", ""))}"'
+        # Entries older than settings.watchlist_max_age_days are tagged
+        # "old" and start hidden; the section's "Show all" button (JS)
+        # reveals them.
+        old_attr = ' class="old" hidden' if entry.get("old") else ""
         # Subtitle sidecars (see scan_downloads): {lang: url} JSON for the
         # playlist player's <track> elements.
         subs_attr = ""
@@ -1229,7 +1323,7 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
                 f'title="Download the video stream and merge it in"{disabled_attr}>⇩ Video</button>'
             )
         return [line for line in [
-            f"        <li{data_attr}{subs_attr}>",
+            f"        <li{data_attr}{old_attr}{subs_attr}>",
             '          <div class="entry-row">',
             (
                 f'            <a href="{href}" title="{html.escape(entry["name"])}">'
@@ -1260,7 +1354,21 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
 
     for channel, entries in groups.items():
         lines.append(f'    <section class="channel" data-channel="{html.escape(channel)}">')
-        lines.append(f"      <h2>{html.escape(channel)}</h2>")
+        # Per-section controls (wired up in JS): Hide/Show collapses the
+        # whole list; Show all reveals entries tagged "old" (older than
+        # settings.watchlist_max_age_days), rendered only when the
+        # section actually has any.
+        old_btn = (
+            '<button class="watch-btn sec-old" type="button" '
+            'title="Also list files older than the configured watchlist window">'
+            'Show all</button>'
+        ) if any(e.get("old") for e in entries) else ""
+        lines.append(
+            f'      <h2>{html.escape(channel)} '
+            f'<span class="sec-actions">'
+            f'<button class="watch-btn sec-fold" type="button">Hide</button>'
+            f'{old_btn}</span></h2>'
+        )
         lines.append("      <ul>")
         for entry in entries:
             lines.extend(entry_lines(entry))
@@ -1282,6 +1390,25 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "  }",
         "  function save(s) { localStorage.setItem(KEY, JSON.stringify(Array.from(s))); }",
         "  var watched = load();",
+        "  // Per-section UI state (collapsed / show-old), keyed by channel",
+        "  // name and persisted across reloads and library refreshes.",
+        '  var SEC_KEY = "ytwatcher:section-state";',
+        "  var secState = {};",
+        "  try { secState = JSON.parse(localStorage.getItem(SEC_KEY) || '{}') || {}; }",
+        "  catch (e) { secState = {}; }",
+        "  function secStateSave() {",
+        "    localStorage.setItem(SEC_KEY, JSON.stringify(secState));",
+        "  }",
+        "  // Collapsing a section also hides its entries in Latest, and",
+        "  // watched-marked entries drop out of Latest immediately",
+        "  // (the server omits them at the next index rebuild; this",
+        "  // covers the time in between).",
+        "  function applyLatestVisibility() {",
+        '    document.querySelectorAll("section.latest li[data-channel]").forEach(function (li) {',
+        "      var st = secState[li.dataset.channel] || {};",
+        "      li.hidden = !!st.collapsed || watched.has(li.dataset.id);",
+        "    });",
+        "  }",
         '  var watchStatus = document.getElementById("watch-status");',
         "  // The server (watched.json) is the source of truth: replace the",
         "  // local set with its IDs so marks sync across browsers, un-marks",
@@ -1560,6 +1687,7 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "  var plIndex = -1;",
         "  var plDragIndex = -1;",
         "  function plItemId(item) {",
+        "    if (item.static) return null; // Static media never receives watched marks.",
         "    // Items store the entry ID (a real YouTube ID, or a pseudo-ID",
         "    // for files without one in the name). Items stored by older",
         "    // versions only have the name, from which a real YouTube ID",
@@ -1656,7 +1784,7 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "      rm.className = \"pl-remove\";",
         "      rm.type = \"button\";",
         "      rm.textContent = \"\\u2715\";",
-        '      rm.title = "Remove and mark watched";',
+        '      rm.title = item.static ? "Remove from playlist" : "Remove and mark watched";',
         "      rm.addEventListener(\"click\", function () { plRemoveAt(i, true); });",
         "      li.appendChild(a);",
         "      li.appendChild(rm);",
@@ -1805,10 +1933,14 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "  });",
         "  function plQueueFrom(selector, shuffle) {",
         "    // Queue every matching listed video that isn't queued yet.",
+        "    // Hidden entries are skipped: 'old' files, entries of a",
+        "    // collapsed section, and watched/hidden Latest items — the",
+        "    // bulk buttons queue exactly what is visible.",
         "    var have = {};",
         "    pl.forEach(function (item) { have[item.href] = true; });",
         "    var fresh = [];",
         "    document.querySelectorAll(selector).forEach(function (li) {",
+        "      if (li.hidden || li.closest(\"ul\").hidden) return;",
         "      var a = li.querySelector(\"a\");",
         "      var href = a.getAttribute(\"href\");",
         "      if (!have[href]) {",
@@ -1833,7 +1965,15 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "    plRender();",
         "  }",
         "  document.getElementById(\"pl-add-all\").addEventListener(\"click\", function () {",
-        "    plQueueFrom(\"li[data-id]\", true);",
+        "    if (pl.length < 2) return;",
+        "    var current = plIndex >= 0 ? pl.splice(plIndex, 1)[0] : null;",
+        "    for (var i = pl.length - 1; i > 0; i--) {",
+        "      var j = Math.floor(Math.random() * (i + 1));",
+        "      var t = pl[i]; pl[i] = pl[j]; pl[j] = t;",
+        "    }",
+        "    if (current) { pl.unshift(current); plIndex = 0; }",
+        "    plSave();",
+        "    plRender();",
         "  });",
         "  document.getElementById(\"pl-add-latest\").addEventListener(\"click\", function () {",
         "    // :not(.watched) — the watched class is kept current by applyAll().",
@@ -1881,6 +2021,42 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "  plRender();",
         "  plTryResume();",
         "  var applyFns = [];",
+        '  function applyStaticVisibility() {',
+        '    document.querySelectorAll("[data-static-folder]").forEach(function (folder) {',
+        '      var hidden = false;',
+        '      try { hidden = localStorage.getItem("ytwatcher:static-hidden:" + folder.dataset.staticFolder) === "1"; } catch (e) {}',
+        '      folder.querySelector("ul").hidden = hidden;',
+        '      var button = folder.querySelector(".static-fold");',
+        '      button.textContent = hidden ? "Show" : "Hide";',
+        '      button.setAttribute("aria-expanded", String(!hidden));',
+        '    });',
+        '  }',
+        '  applyStaticVisibility();',
+        '  document.getElementById("static-sections").addEventListener("click", function (ev) {',
+        '    var fold = ev.target.closest(".static-fold");',
+        '    if (fold) {',
+        '      var folder = fold.closest("[data-static-folder]");',
+        '      var list = folder.querySelector("ul");',
+        '      list.hidden = !list.hidden;',
+        '      fold.textContent = list.hidden ? "Show" : "Hide";',
+        '      fold.setAttribute("aria-expanded", String(!list.hidden));',
+        '      try { localStorage.setItem("ytwatcher:static-hidden:" + folder.dataset.staticFolder, list.hidden ? "1" : "0"); } catch (e) {}',
+        '      return;',
+        '    }',
+        '    var btn = ev.target.closest(".pl-add");',
+        '    if (!btn) return;',
+        '    var li = btn.closest("li[data-static]");',
+        '    if (!li) return;',
+        '    var a = li.querySelector("a");',
+        '    var href = a.getAttribute("href");',
+        '    var idx = pl.findIndex(function (item) { return item.href === href; });',
+        '    if (idx >= 0) { plRemoveAt(idx, false); return; }',
+        '    var insertAt = plIndex >= 0 ? plIndex + 1 : pl.length;',
+        '    pl.splice(insertAt, 0, {href: href, name: a.textContent, static: true, subs: li.dataset.subs || ""});',
+        '    plSave();',
+        '    if (pl.length === 1) plPlayAt(0);',
+        '    else plRender();',
+        '  });',
         "  function applyAll() { applyFns.forEach(function (fn) { fn(); }); }",
         "  function bindAvailableVideos() {",
         "    applyFns = [];",
@@ -1905,7 +2081,10 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         '        var href = a.getAttribute("href");',
         "        var idx = pl.findIndex(function (item) { return item.href === href; });",
         "        if (idx >= 0) { plRemoveAt(idx, false); return; }",
-        "        pl.push( { href: href, name: a.textContent, id: li.dataset.id, subs: li.dataset.subs || \"\" });",
+        "        // Insert right behind the currently playing item so it",
+        "        // plays next; with nothing playing, append at the end.",
+        "        var insertAt = plIndex >= 0 ? plIndex + 1 : pl.length;",
+        "        pl.splice(insertAt, 0, { href: href, name: a.textContent, id: li.dataset.id, subs: li.dataset.subs || \"\" });",
         "        plSave();",
         "        // First item added to an empty playlist: start playing it.",
         "        if (pl.length === 1) { plPlayAt(0); return; }",
@@ -1943,6 +2122,41 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "      });",
         "    });",
         "    });",
+        "    // Per-section controls: Hide/Show collapses the list,",
+        "    // Show all reveals files older than the watchlist window",
+        "    // (rendered hidden with class 'old'). State persists in",
+        "    // localStorage and is re-applied after every library refresh.",
+        '    document.querySelectorAll("#video-sections section[data-channel]").forEach(function (sec) {',
+        "      var channel = sec.dataset.channel;",
+        '      var foldBtn = sec.querySelector(".sec-fold");',
+        '      var oldBtn = sec.querySelector(".sec-old");',
+        "      function applySec() {",
+        "        var st = secState[channel] || {};",
+        '        sec.querySelector("ul").hidden = !!st.collapsed;',
+        '        if (foldBtn) foldBtn.textContent = st.collapsed ? "Show" : "Hide";',
+        '        sec.querySelectorAll("li.old").forEach(function (li) { li.hidden = !st.showAll; });',
+        '        if (oldBtn) oldBtn.textContent = st.showAll ? "Hide old" : "Show all";',
+        "        applyLatestVisibility();",
+        "      }",
+        "      if (foldBtn) foldBtn.addEventListener(\"click\", function () {",
+        "        var st = secState[channel] || {};",
+        "        st.collapsed = !st.collapsed;",
+        "        secState[channel] = st;",
+        "        secStateSave();",
+        "        applySec();",
+        "      });",
+        "      if (oldBtn) oldBtn.addEventListener(\"click\", function () {",
+        "        var st = secState[channel] || {};",
+        "        st.showAll = !st.showAll;",
+        "        secState[channel] = st;",
+        "        secStateSave();",
+        "        applySec();",
+        "      });",
+        "      applySec();",
+        "    });",
+        "    // Watched toggles run through applyAll(), so hook Latest",
+        "    // visibility into it (drops watched entries immediately).",
+        "    applyFns.push(applyLatestVisibility);",
         "    applyAll();",
         "    plUpdateButtons();",
         "  }",
@@ -1964,6 +2178,10 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         '        var current = document.getElementById("video-sections");',
         "        if (!incoming || !current) return;",
         "        current.innerHTML = incoming.innerHTML;",
+        '        var freshStatic = fresh.getElementById("static-sections");',
+        '        if (freshStatic) document.getElementById("static-sections").innerHTML = freshStatic.innerHTML;',
+        '        applyStaticVisibility();',
+        '        plUpdateButtons();',
         "        if (incomingFp) currentFingerprint = incomingFp;",
         '        var incomingStatus = fresh.getElementById("library-status");',
         '        if (incomingStatus) document.getElementById("library-status").innerHTML = incomingStatus.innerHTML;',
@@ -2041,13 +2259,15 @@ def update_index_html(download_dir, api_port=DEFAULT_API_PORT,
 
     The page is always built from a full recursive scan of download_dir, so
     deleted files disappear automatically. When max_age_days is set, files
-    whose mtime is older than that many days are left out of the listing
-    (they stay on disk); the "manually" folder is exempt. Watched files
-    are never listed regardless: they are deleted or archived into
-    'watched' subfolders.
+    whose mtime is older than that many days stay on the page but are
+    tagged "old" and hidden by default; each section gets a "show all"
+    button that reveals them (they stay on disk either way); the
+    "manually" folder is exempt. Watched files are never listed
+    regardless: they are deleted or archived into 'watched' subfolders.
 
     latest_max_age_days filters the "Latest" section to the most recent N
-    days (creation time). speeds maps channel folder -> playback speed
+    days (creation time); videos marked as watched never appear in it.
+    speeds maps channel folder -> playback speed
     (from subscriptions.yaml); when omitted it is derived from the current
     config, falling back to empty if the config cannot be read. files is an
     optional precomputed walk_video_files list (NFS walk dedup).
@@ -2057,7 +2277,7 @@ def update_index_html(download_dir, api_port=DEFAULT_API_PORT,
             config = load_config()
         except Exception:
             config = {}
-        static = config.get("static", [])
+        static = scan_static_media(config.get("static", []))
         if speeds is None:
             try:
                 speeds = channel_speeds(config)
@@ -2066,27 +2286,38 @@ def update_index_html(download_dir, api_port=DEFAULT_API_PORT,
         groups = scan_downloads(download_dir, files=files)
         if max_age_days:
             cutoff = time.time() - max_age_days * 86400
-            groups = {
-                # "manually" is exempt: those downloads are deliberate
-                # one-offs, and an old upload would otherwise vanish from
-                # the page the moment it is downloaded.
-                channel: ([e for e in entries if e["mtime"] >= cutoff]
-                          if channel != "manually" else entries)
-                for channel, entries in groups.items()
-            }
-            groups = {c: es for c, es in groups.items() if es}
-        total = sum(len(entries) for entries in groups.values())
+            # Don't drop old files from the page — tag them so the
+            # template can hide them by default and the per-section
+            # "show all" button can reveal them. "manually" is exempt:
+            # those downloads are deliberate one-offs, and an old upload
+            # would otherwise be hidden the moment it is downloaded.
+            for channel, entries in groups.items():
+                if channel == "manually":
+                    continue
+                for e in entries:
+                    if e["mtime"] < cutoff:
+                        e["old"] = True
+        # The displayed count covers only the files visible by default.
+        total = sum(
+            1 for entries in groups.values() for e in entries if not e.get("old")
+        )
         channels = len(groups)
-        fp = fingerprint(groups, site_title, speeds, static=static)
+        watched = load_watched()
+        fp = fingerprint(groups, site_title, speeds, watched, static)
         index_path = Path(download_dir) / "index.html"
         if read_existing_fingerprint(index_path) == fp:
             return False, total, channels
-        # Top 10 newest videos across all channels.
+        # Newest videos across all channels; the window is controlled by
+        # settings.latest_max_age_days (24h in the shipped config), not by
+        # a fixed entry count. Watched videos are excluded even before the
+        # next round deletes or archives their files.
         latest = sorted(
             (entry for entries in groups.values() for entry in entries),
             key=lambda e: e["mtime"],
             reverse=True,
-        )[:10]
+        )
+        if watched:
+            latest = [e for e in latest if entry_id(e) not in watched]
         if latest_max_age_days:
             cutoff = time.time() - latest_max_age_days * 86400
             latest = [e for e in latest if e["mtime"] >= cutoff]
@@ -2838,13 +3069,38 @@ def run_yt_dlp(cmd, context="download"):
     return result
 
 
-def download_video(sub, video, download_dir):
+def channel_subdir_name(url):
+    """Derive a filesystem-safe subdirectory name from a channel URL.
+
+    Subscriptions with several URLs download each channel into its own
+    subdirectory of the subscription folder. The name is the last URL
+    path segment, percent-decoded and without a leading '@'
+    ('https://www.youtube.com/@SpanishTalksCafe' -> 'SpanishTalksCafe').
+    Returns None when nothing safe can be derived (flat layout then).
+    """
+    segment = urllib.parse.unquote(
+        urllib.parse.urlsplit(url).path.rstrip("/").rsplit("/", 1)[-1]
+    ).strip().lstrip("@").strip()
+    if not segment or segment in (".", "..") or "/" in segment or "\\" in segment:
+        return None
+    return segment
+
+
+def download_video(sub, video, download_dir, subdir=None):
     """Download a subscription video.
 
-    Returns (status, file path, duration). status is "ok", "failed",
+    subdir: optional extra folder between the subscription folder and the
+    file (per-channel split for multi-URL subscriptions). When the
+    subscription sets 'subtitles' (language codes, yt-dlp --sub-langs
+    syntax like "es.*"), sidecar subtitles are downloaded too: real subs
+    first, auto-generated ones for languages without them
+    (--write-auto-subs), normalized to .vtt. Returns
+    (status, file path, duration). status is "ok", "failed",
     "members_only", or "live"; path and duration are None unless "ok".
     """
     out_dir = Path(download_dir) / sub["name"]
+    if subdir:
+        out_dir = out_dir / subdir
     out_dir.mkdir(parents=True, exist_ok=True)
     cmd = [
         YT_DLP,
@@ -3316,14 +3572,30 @@ def process_subscription(sub, settings, seen, failed, scan_only=False):
     urls = sub["url"]
     if isinstance(urls, str):
         urls = [urls]
+    # Normalize entries: a plain string uses the handle-derived subdir;
+    # a mapping {url, dir} uses the explicit subdir. Entries sharing the
+    # same dir download into the same folder. Subdirs only apply to
+    # multi-URL subscriptions (see channel_subdir_name).
+    url_entries = []
+    for entry in urls:
+        if isinstance(entry, dict):
+            url_entries.append((entry["url"], entry.get("dir")))
+        else:
+            url_entries.append((entry, None))
+    split_by_url = len(url_entries) > 1
     videos = []
     seen_ids = set()
-    for url in urls:
+    video_subdirs = {}
+    for url, subdir in url_entries:
         try:
             for video in fetch_recent_videos(url, limit):
                 if video["id"] not in seen_ids:
                     seen_ids.add(video["id"])
                     videos.append(video)
+                    if split_by_url:
+                        video_subdirs[video["id"]] = (
+                            subdir or channel_subdir_name(url)
+                        )
         except Exception as e:
             log.error("[%s] failed to list videos from %s: %s", name, url, e)
 
@@ -3341,6 +3613,17 @@ def process_subscription(sub, settings, seen, failed, scan_only=False):
             # the video permanently.
             log.info("[%s] still live, will retry: %s", name, video["title"])
             continue
+        if video.get("availability") in MEMBERS_ONLY_AVAILABILITY:
+            # Channel membership often only means early access — the
+            # video may become public later (e.g. Sabine Hossenfelder,
+            # bilibili donghua). Don't mark as seen: retry every round.
+            # In practice bounded by the recent-videos scan window,
+            # which the video eventually ages out of. Checked before the
+            # upload-time fetch below, which fails for members-only
+            # videos and would waste a metadata query per round.
+            log.info("[%s] members only (for now), will retry: %s",
+                     name, video["title"])
+            continue
         # Flat-playlist entries carry no upload time (yt-dlp prints NA), so
         # fetch it lazily for unseen videos; otherwise max_video_age_days
         # would silently never apply.
@@ -3349,11 +3632,6 @@ def process_subscription(sub, settings, seen, failed, scan_only=False):
         if is_too_old(video, settings, now):
             log.info("[%s] skipped (older than %s days): %s",
                      name, settings.get("max_video_age_days"), video["title"])
-            if not scan_only:
-                seen.add(video["id"])
-            continue
-        if video.get("availability") in MEMBERS_ONLY_AVAILABILITY:
-            log.info("[%s] skipped (members only): %s", name, video["title"])
             if not scan_only:
                 seen.add(video["id"])
             continue
@@ -3387,13 +3665,14 @@ def process_subscription(sub, settings, seen, failed, scan_only=False):
         # Mark as seen regardless of download outcome so we never
         # re-evaluate this video. Failures are un-marked below so the
         # next round retries them (up to MAX_DOWNLOAD_ATTEMPTS times;
-        # live streams retry without a cap).
+        # live streams and members-only videos retry without a cap).
         seen.add(video["id"])
         log.info("[%s] matched: %s", name, video["title"])
         log.info("[%s] downloading: %s", name, video["title"])
         try:
             status, downloaded, duration = download_video(
-                sub, video, settings["download_dir"])
+                sub, video, settings["download_dir"],
+                subdir=video_subdirs.get(video["id"]))
             if status == "ok":
                 failed.pop(video["id"], None)
                 if downloaded:

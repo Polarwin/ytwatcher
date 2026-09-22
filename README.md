@@ -80,7 +80,12 @@ explicit existing route or a symlink inside the static root. Only put folders
 you want web-accessible inside that root, including symlink targets.
 Run `sudo python3 install_static_route.py --apply` once to migrate the original
 ReinforceLearning folder and replace its individual route with the shared route.
-Static folders are not scanned, downloaded, or included in watched-file cleanup.
+Static folders are listed recursively for playable video/audio files, with
+**+ Playlist** buttons and support for matching WebVTT subtitle files. Incomplete
+downloads are omitted. Removing a static item from the playlist only removes
+the queue entry: it never marks the media watched or deletes it, even if its
+filename contains a YouTube ID. Static folders remain outside download state
+and watched-file cleanup. Folder links still provide access to other file types.
 
 Single test round:
 

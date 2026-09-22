@@ -65,7 +65,7 @@ settings:
 #                              language has none; stored as .vtt next to the
 #                              video and shown by the web player.
 
-# Static links only: these folders are never scanned or cleaned by the watcher.
+# Static media gets + Playlist buttons; these folders are never cleaned by the watcher.
 # The shared nginx route serves every folder under /srv/files/static/.
 # Create/move folders there as your normal user (not sudo on an NFS share).
 # Then add entries with a display name and filesystem path, for example:
@@ -101,7 +101,12 @@ subscriptions:
     quality: "bestvideo[height<=720]+bestaudio/best[height<=720]"
     skip_shorts: false
 
-  # url can also be a list: all channels are combined under one name.
+  # url can also be a list: all channels are combined under one name,
+  # and each channel downloads into its own subdirectory named after its
+  # handle (MultiChannel/ChannelA/, MultiChannel/ChannelB/). To group
+  # several channels into the same subdirectory, use the mapping form:
+  #   - url: https://www.youtube.com/@ChannelC
+  #     dir: ChannelA
   - name: MultiChannel
     url:
       - https://www.youtube.com/@ChannelA
