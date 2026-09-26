@@ -955,7 +955,7 @@ def scan_downloads(download_dir, files=None):
 # Bump when the index.html template changes: the fingerprint below only
 # covers the file listing, so without this an existing index.html would
 # keep the old template until some video is added or removed.
-INDEX_TEMPLATE_VERSION = 75
+INDEX_TEMPLATE_VERSION = 76
 
 
 def static_folder_url(item):
@@ -2210,6 +2210,7 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "  // cached on this device (media and the offline page copy).",
         "  document.getElementById(\"pl-clearcache\").addEventListener(\"click\", async function () {",
         "    if (!(\"caches\" in window)) return;",
+        "    if (!window.confirm(\"Clear all cached media and the offline page copy on this device?\")) return;",
         "    var btn = this;",
         "    var label = btn.textContent;",
         "    btn.disabled = true;",
