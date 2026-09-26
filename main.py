@@ -955,7 +955,7 @@ def scan_downloads(download_dir, files=None):
 # Bump when the index.html template changes: the fingerprint below only
 # covers the file listing, so without this an existing index.html would
 # keep the old template until some video is added or removed.
-INDEX_TEMPLATE_VERSION = 74
+INDEX_TEMPLATE_VERSION = 75
 
 
 def static_folder_url(item):
@@ -1279,11 +1279,12 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         '        <label><input type="checkbox" id="pl-autowatch" '
         'title="Mark playlist items as watched once they have played to the end"> Autowatch</label>',
         '        <button type="button" id="pl-clear">Clear</button>',
-        '        <button type="button" id="pl-download" title="Download every playlist file to this device">Download playlist</button>',
         '        <button type="button" id="pl-preload" '
         'title="Cache all playlist files on this device for offline playback">Preload offline</button>',
         '        <button type="button" id="pl-clearcache" '
         'title="Remove all cached media and the offline page copy from this device">Clear cache</button>',
+        '        <button type="button" id="pl-download" '
+        'title="Download every playlist file to this device">Download playlist</button>',
         '      </div>',
         '      <ul id="pl-items"></ul>',
         '    </section>',
