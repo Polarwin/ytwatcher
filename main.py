@@ -309,6 +309,9 @@ def validate_config(config):
             sub["shorts_max_duration"], (int, float)
         ):
             problems.append(f"{label}: 'shorts_max_duration' must be a number")
+        for key in ("recent_videos_to_scan", "max_video_age_days"):
+            if key in sub and not isinstance(sub[key], (int, float)):
+                problems.append(f"{label}: '{key}' must be a number")
         if "keep_watched" in sub and not isinstance(sub["keep_watched"], bool):
             problems.append(f"{label}: 'keep_watched' must be true or false")
         speed = sub.get("playback_speed")
@@ -3889,8 +3892,15 @@ def is_too_old(video, settings, now):
 def process_subscription(sub, settings, seen, failed, scan_only=False):
     name = sub["name"]
     completed = []
-    limit = settings.get("recent_videos_to_scan", 10)
+    limit = sub.get("recent_videos_to_scan",
+                   settings.get("recent_videos_to_scan", 10))
     now = time.time()
+    # Per-subscription override for the video-age filter: SanTi-style
+    # back catalogs need a much wider window than the global default.
+    eff_settings = settings
+    if "max_video_age_days" in sub:
+        eff_settings = dict(settings)
+        eff_settings["max_video_age_days"] = sub["max_video_age_days"]
     urls = sub["url"]
     if isinstance(urls, str):
         urls = [urls]
@@ -3949,11 +3959,11 @@ def process_subscription(sub, settings, seen, failed, scan_only=False):
         # Flat-playlist entries carry no upload time (yt-dlp prints NA), so
         # fetch it lazily for unseen videos; otherwise max_video_age_days
         # would silently never apply.
-        if video["timestamp"] is None and settings.get("max_video_age_days"):
+        if video["timestamp"] is None and eff_settings.get("max_video_age_days"):
             video["timestamp"] = fetch_upload_timestamp(video["id"])
-        if is_too_old(video, settings, now):
+        if is_too_old(video, eff_settings, now):
             log.info("[%s] skipped (older than %s days): %s",
-                     name, settings.get("max_video_age_days"), video["title"])
+                     name, eff_settings.get("max_video_age_days"), video["title"])
             if not scan_only:
                 seen.add(video["id"])
             continue
