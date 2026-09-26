@@ -954,7 +954,7 @@ def scan_downloads(download_dir, files=None):
 # Bump when the index.html template changes: the fingerprint below only
 # covers the file listing, so without this an existing index.html would
 # keep the old template until some video is added or removed.
-INDEX_TEMPLATE_VERSION = 61
+INDEX_TEMPLATE_VERSION = 66
 
 
 def static_folder_url(item):
@@ -1024,6 +1024,7 @@ def fingerprint(groups, site_title="", speeds=None, watched=None, static=None):
             "channel": channel,
             "entries": [
                 {"rel": e["rel"], "size": e["size"], "mtime": e["mtime"],
+                 "duration": e.get("duration"),
                  # Subtitle sidecars influence the page (data-subs), so a
                  # newly added .vtt must also regenerate it.
                  "subs": sorted(e.get("subs", {}).values())}
@@ -1057,6 +1058,15 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
     latest = latest or []
     escaped_title = html.escape(site_title)
     speeds_json = json.dumps(speeds or {}, ensure_ascii=False)
+    # href (without ?v=) -> duration seconds, so the playlist can show
+    # lengths even for items added before data-dur existed.
+    durations_map = {}
+    for entries in list(groups.values()) + [latest]:
+        for e in entries:
+            if e.get("duration"):
+                href = urllib.parse.quote(e["rel"], safe="/")
+                durations_map[href] = int(e["duration"])
+    durations_json = json.dumps(durations_map, sort_keys=True, separators=(",", ":"))
     lines = [
         "<!DOCTYPE html>",
         '<html lang="en">',
@@ -1139,7 +1149,9 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "      border-radius: 4px; color: #e0e0e0; cursor: pointer;",
         "    }",
         "    .playlist button:hover { background: #3a3a3a; color: #fff; }",
-        "    .pl-controls { display: flex; gap: .75rem; align-items: center; margin-top: .5rem; }",
+        "    .pl-controls { display: flex; gap: .75rem; align-items: center; margin-top: .5rem;",
+        "      flex-wrap: wrap; }",
+        "    .pl-controls button { white-space: nowrap; }",
         "    .pl-controls label { color: #bbb; font-size: .9rem; }",
         "    #pl-empty { color: #999; font-size: .9rem; }",
         "    #pl-video { width: 100%; max-height: 70vh; margin-top: .75rem; background: #000; }",
@@ -1157,6 +1169,7 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "    .pl-remove { flex-shrink: 0; }",
         "    #pl-items li { cursor: grab; }",
         "    #pl-items li.pl-drop-target { border-top: 2px solid #8ab4f8; }",
+        "    #pl-items .pl-dur { color: #999; font-size: .85rem; margin-left: .6rem; white-space: nowrap; }",
         # Queued-state cues: text/shape changes carry the meaning (color-
         # blind safe); the green tint is only a secondary hint.
         "    .watch-btn.pl-added { color: #7bd88a; border-color: #7bd88a; }",
@@ -1244,7 +1257,11 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         '    <section class="playlist">',
         '      <h2>Playlist</h2>',
         '      <p id="pl-empty">Empty &mdash; add videos with the + Playlist buttons below.</p>',
-        '      <ul id="pl-items"></ul>',
+        '      <div id="pl-player" hidden>',
+        '        <video id="pl-video" controls playsinline></video>',
+        '        <div id="pl-subs" hidden></div>',
+        '        <div id="pl-now"></div>',
+        '      </div>',
         '      <div class="pl-controls">',
         '        <button type="button" id="pl-play">Play</button>',
         '        <button type="button" id="pl-add-all" '
@@ -1254,14 +1271,12 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         '        <button type="button" id="pl-add-espanol" '
         'title="Queue every Spanish video in listed order">Add Spanish</button>',
         '        <label><input type="checkbox" id="pl-repeat"> Repeat</label>',
+        '        <label><input type="checkbox" id="pl-autowatch" '
+        'title="Mark playlist items as watched once they have played to the end"> Autowatch</label>',
         '        <button type="button" id="pl-clear">Clear</button>',
         '        <button type="button" id="pl-download" title="Download every playlist file to this device">Download playlist</button>',
         '      </div>',
-        '      <div id="pl-player" hidden>',
-        '        <video id="pl-video" controls playsinline></video>',
-        '        <div id="pl-subs" hidden></div>',
-        '        <div id="pl-now"></div>',
-        '      </div>',
+        '      <ul id="pl-items"></ul>',
         '    </section>',
     ])
 
@@ -1292,6 +1307,9 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
                 for lang, rel in entry["subs"].items()
             })
             subs_attr = " data-subs='" + subs_json.replace("'", "&#39;") + "'"
+        dur_attr = ""
+        if entry.get("duration"):
+            dur_attr = f' data-dur="{int(entry["duration"])}"'
         # "watch-toggle" is the unambiguous hook for the watched-mark JS:
         # both buttons carry "watch-btn" for styling, so a plain
         # querySelector(".watch-btn") would grab whichever comes first.
@@ -1323,7 +1341,7 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
                 f'title="Download the video stream and merge it in"{disabled_attr}>⇩ Video</button>'
             )
         return [line for line in [
-            f"        <li{data_attr}{old_attr}{subs_attr}>",
+            f"        <li{data_attr}{old_attr}{subs_attr}{dur_attr}>",
             '          <div class="entry-row">',
             (
                 f'            <a href="{href}" title="{html.escape(entry["name"])}">'
@@ -1588,6 +1606,7 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "  });",
         "  var PL_KEY = \"ytwatcher:playlist\";",
         "  var PL_REPEAT_KEY = \"ytwatcher:playlist-repeat\";",
+        "  var PL_AUTOWATCH_KEY = \"ytwatcher:playlist-autowatch\";",
         "  function plLoad() {",
         "    try { return JSON.parse(localStorage.getItem(PL_KEY) || \"[]\"); }",
         "    catch (e) { return []; }",
@@ -1601,6 +1620,7 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "  var plNow = document.getElementById(\"pl-now\");",
         "  var plSubsEl = document.getElementById(\"pl-subs\");",
         "  var plRepeat = document.getElementById(\"pl-repeat\");",
+        "  var plAutowatch = document.getElementById(\"pl-autowatch\");",
         "  // Attach subtitle tracks stored on the playlist item",
         "  // (data-subs on the source li, see scan_downloads).",
         "  function plApplyTracks(item) {",
@@ -1728,6 +1748,7 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "  }",
         "  function plMoveTo(from, to) {",
         "    if (from < 0 || from >= pl.length || from === to) return;",
+        "    if (from === plIndex) return; // the playing item stays first",
         "    var moved = pl.splice(from, 1)[0];",
         "    pl.splice(to, 0, moved);",
         "    // Keep plIndex on the playing item through the move.",
@@ -1738,6 +1759,11 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "    }",
         "    plSave();",
         "    plRender();",
+        "  }",
+        "  function plFmtDur(s) {",
+        "    s = Math.max(0, Math.floor(+s || 0));",
+        "    var h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60);",
+        '    return (h ? h + ":" + ("0" + m).slice(-2) : m) + ":" + ("0" + (s % 60)).slice(-2);',
         "  }",
         "  function plRender() {",
         "    plItems.innerHTML = \"\";",
@@ -1780,6 +1806,13 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "      a.textContent = item.name;",
         "      a.title = item.name;",
         "      a.addEventListener(\"click\", function (ev) { ev.preventDefault(); plPlayAt(i); });",
+        "      var dur = item.dur || DURATIONS[item.href.split(/[?#]/)[0]];",
+        "      if (dur) {",
+        "        var d = document.createElement(\"span\");",
+        "        d.className = \"pl-dur\";",
+        "        d.textContent = plFmtDur(dur);",
+        "        li.appendChild(d);",
+        "      }",
         "      var rm = document.createElement(\"button\");",
         "      rm.className = \"pl-remove\";",
         "      rm.type = \"button\";",
@@ -1794,6 +1827,14 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "  }",
         "  function plPlayAt(i) {",
         "    if (i < 0 || i >= pl.length) return;",
+        "    // Rotate the queue so the playing item is always the first",
+        "    // entry: finished items move to the end (or get removed when",
+        "    // watched), so the next one to play is always at index 0.",
+        "    if (i > 0) {",
+        "      pl = pl.slice(i).concat(pl.slice(0, i));",
+        "      plSave();",
+        "      i = 0;",
+        "    }",
         "    plIndex = i;",
         "    plPlayer.hidden = false;",
         "    plNow.textContent = (i + 1) + \"/\" + pl.length + \" \\u2014 \" + pl[i].name;",
@@ -1828,12 +1869,34 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "    // the transition to the next item, which would skip over it.",
         "    if (now - plLastAdvance < 800) return;",
         "    plLastAdvance = now;",
-        "    var next = plIndex + 1;",
-        "    if (next >= pl.length) {",
-        "      if (!plRepeat.checked) { plIndex = -1; plSavePos(); plRender(); return; }",
-        "      next = 0;",
+        "    // Autowatch: an item that played to the end is marked watched,",
+        "    // exactly like the watch-toggle button (server record + UI).",
+        "    if (plAutowatch.checked && plIndex >= 0 && pl[plIndex]) {",
+        "      var awId = plItemId(pl[plIndex]);",
+        "      if (awId && !watched.has(awId)) {",
+        "        watched.add(awId);",
+        "        save(watched);",
+        "        report(awId, true);",
+        "        applyAll();",
+        "      }",
         "    }",
-        "    plPlayAt(next);",
+        "    // The played item leaves the head of the queue: watched",
+        "    // items drop out entirely, everything else recycles to the",
+        "    // end. With Autowatch on the queue drains; otherwise it",
+        "    // keeps cycling.",
+        "    var played = pl[plIndex];",
+        "    pl.splice(plIndex, 1);",
+        "    var playedId = played ? plItemId(played) : null;",
+        "    if (played && (!playedId || !watched.has(playedId))) pl.push(played);",
+        "    plSave();",
+        "    if (!pl.length) {",
+        "      plIndex = -1;",
+        "      plSavePos();",
+        "      plPlayer.hidden = true;",
+        "      plRender();",
+        "      return;",
+        "    }",
+        "    plPlayAt(plIndex >= pl.length ? 0 : plIndex);",
         "  }",
         "  plVideo.addEventListener(\"ended\", plAdvance);",
         "  // A dead link (file deleted or moved to watched/ since the page",
@@ -1874,6 +1937,7 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "  // setting (e.g. manual downloads) fall back to a heuristic:",
         "  // audio-only Chinese 2x, other audio 1.5x, real videos 1x.",
         f"  var SPEED_BY_CHANNEL = {speeds_json};",
+        f"  var DURATIONS = {durations_json};",
         "  plVideo.addEventListener(\"loadedmetadata\", function () {",
         "    if (plIndex < 0 || !pl[plIndex]) return;",
         "    var href = pl[plIndex].href.split(/[?#]/)[0];",
@@ -1882,6 +1946,12 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "    var isAudio = audioExtension || plVideo.videoWidth === 0;",
         "    plVideo.classList.toggle(\"audio-only\", isAudio);",
         '    plVideo.setAttribute("controls", "");',
+        "    var cur = pl[plIndex];",
+        "    if (cur && !cur.dur && isFinite(plVideo.duration) && plVideo.duration > 0) {",
+        "      cur.dur = Math.round(plVideo.duration);",
+        "      DURATIONS[cur.href.split(/[?#]/)[0]] = cur.dur;",
+        "      plSave();",
+        "    }",
         "    if (isAudio) {",
         "      // Custom overlay instead of native <track> cues (those break",
         "      // on small/mobile players); the native control bar stays.",
@@ -1908,7 +1978,8 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "    if (!saved || !saved.href) return;",
         "    var idx = pl.findIndex(function (item) { return item.href === saved.href; });",
         "    if (idx < 0) { localStorage.removeItem(PL_POS_KEY); return; }",
-        "    plIndex = idx;",
+        "    if (idx > 0) { pl = pl.slice(idx).concat(pl.slice(0, idx)); plSave(); }",
+        "    plIndex = 0;",
         "    plPlayer.hidden = false;",
         "    plNow.textContent = (idx + 1) + \"/\" + pl.length + \" \\u2014 \" + pl[idx].name;",
         "    plVideo.src = pl[idx].href;",
@@ -1928,6 +1999,10 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "  plRepeat.addEventListener(\"change\", function () {",
         "    localStorage.setItem(PL_REPEAT_KEY, plRepeat.checked ? \"1\" : \"0\");",
         "  });",
+        "  plAutowatch.checked = localStorage.getItem(PL_AUTOWATCH_KEY) === \"1\";",
+        "  plAutowatch.addEventListener(\"change\", function () {",
+        "    localStorage.setItem(PL_AUTOWATCH_KEY, plAutowatch.checked ? \"1\" : \"0\");",
+        "  });",
         "  document.getElementById(\"pl-play\").addEventListener(\"click\", function () {",
         "    plPlayAt(plIndex >= 0 ? plIndex : 0);",
         "  });",
@@ -1945,7 +2020,7 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "      var href = a.getAttribute(\"href\");",
         "      if (!have[href]) {",
         "        have[href] = true;",
-        "        fresh.push({ href: href, name: a.textContent, id: li.dataset.id, subs: li.dataset.subs || \"\" });",
+        "        fresh.push({ href: href, name: a.textContent, id: li.dataset.id, subs: li.dataset.subs || \"\", dur: li.dataset.dur || \"\" });",
         "      }",
         "    });",
         "    if (shuffle) {",
@@ -2084,7 +2159,7 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "        // Insert right behind the currently playing item so it",
         "        // plays next; with nothing playing, append at the end.",
         "        var insertAt = plIndex >= 0 ? plIndex + 1 : pl.length;",
-        "        pl.splice(insertAt, 0, { href: href, name: a.textContent, id: li.dataset.id, subs: li.dataset.subs || \"\" });",
+        "        pl.splice(insertAt, 0, { href: href, name: a.textContent, id: li.dataset.id, subs: li.dataset.subs || \"\", dur: li.dataset.dur || \"\" });",
         "        plSave();",
         "        // First item added to an empty playlist: start playing it.",
         "        if (pl.length === 1) { plPlayAt(0); return; }",
