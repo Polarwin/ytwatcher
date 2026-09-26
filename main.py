@@ -432,6 +432,7 @@ _download_jobs = {}
 _download_jobs_lock = threading.Lock()
 
 
+
 def load_watched():
     """Return the set of video IDs the user marked as watched."""
     if WATCHED_FILE.exists():
@@ -954,7 +955,7 @@ def scan_downloads(download_dir, files=None):
 # Bump when the index.html template changes: the fingerprint below only
 # covers the file listing, so without this an existing index.html would
 # keep the old template until some video is added or removed.
-INDEX_TEMPLATE_VERSION = 66
+INDEX_TEMPLATE_VERSION = 74
 
 
 def static_folder_url(item):
@@ -1073,6 +1074,10 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "<head>",
         '  <meta charset="UTF-8">',
         '  <meta name="viewport" content="width=device-width, initial-scale=1.0">',
+        '  <meta name="mobile-web-app-capable" content="yes">',
+        '  <meta name="apple-mobile-web-app-capable" content="yes">',
+        '  <meta name="apple-mobile-web-app-status-bar-style" content="black">',
+        '  <link rel="manifest" href="manifest.json">',
         f"  <title>{escaped_title}</title>",
         "  <style>",
         "    :root { color-scheme: dark; }",
@@ -1275,6 +1280,10 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         'title="Mark playlist items as watched once they have played to the end"> Autowatch</label>',
         '        <button type="button" id="pl-clear">Clear</button>',
         '        <button type="button" id="pl-download" title="Download every playlist file to this device">Download playlist</button>',
+        '        <button type="button" id="pl-preload" '
+        'title="Cache all playlist files on this device for offline playback">Preload offline</button>',
+        '        <button type="button" id="pl-clearcache" '
+        'title="Remove all cached media and the offline page copy from this device">Clear cache</button>',
         '      </div>',
         '      <ul id="pl-items"></ul>',
         '    </section>',
@@ -1746,9 +1755,20 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "      }",
         "    }",
         "  }",
+        "  // A full new one-cycle pass: clear the played markers so",
+        "  // Repeat-off stops after every item has played again. Used by",
+        "  // the Play button after the queue stopped - item clicks just",
+        "  // continue the current cycle from the clicked entry.",
+        "  function plNewCycle() {",
+        "    pl.forEach(function (it) { delete it.cyclePlayed; });",
+        "    plSave();",
+        "  }",
         "  function plMoveTo(from, to) {",
         "    if (from < 0 || from >= pl.length || from === to) return;",
         "    if (from === plIndex) return; // the playing item stays first",
+        "    // Keep the playing item at the head: dropping a later item on",
+        "    // or before it inserts right behind the playing item instead.",
+        "    if (plIndex >= 0 && from > plIndex && to <= plIndex) to = plIndex + 1;",
         "    var moved = pl.splice(from, 1)[0];",
         "    pl.splice(to, 0, moved);",
         "    // Keep plIndex on the playing item through the move.",
@@ -1885,11 +1905,22 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "    // end. With Autowatch on the queue drains; otherwise it",
         "    // keeps cycling.",
         "    var played = pl[plIndex];",
+        "    if (played) played.cyclePlayed = true;",
         "    pl.splice(plIndex, 1);",
         "    var playedId = played ? plItemId(played) : null;",
         "    if (played && (!playedId || !watched.has(playedId))) pl.push(played);",
         "    plSave();",
         "    if (!pl.length) {",
+        "      plIndex = -1;",
+        "      plSavePos();",
+        "      plPlayer.hidden = true;",
+        "      plRender();",
+        "      return;",
+        "    }",
+        "    // Without Repeat the queue runs exactly one cycle: once every",
+        "    // item has played, stop instead of recycling forever. Clicking",
+        "    // an item (or Play after a stop) starts a new cycle.",
+        "    if (!plRepeat.checked && pl.every(function (it) { return it.cyclePlayed; })) {",
         "      plIndex = -1;",
         "      plSavePos();",
         "      plPlayer.hidden = true;",
@@ -1998,12 +2029,23 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "  plRepeat.checked = localStorage.getItem(PL_REPEAT_KEY) === \"1\";",
         "  plRepeat.addEventListener(\"change\", function () {",
         "    localStorage.setItem(PL_REPEAT_KEY, plRepeat.checked ? \"1\" : \"0\");",
+        "    // Mutually exclusive: recycling (Autowatch on) already loops,",
+        "    // so Repeat has no effect while Autowatch is active.",
+        "    if (plRepeat.checked && plAutowatch.checked) {",
+        "      plAutowatch.checked = false;",
+        "      localStorage.setItem(PL_AUTOWATCH_KEY, \"0\");",
+        "    }",
         "  });",
         "  plAutowatch.checked = localStorage.getItem(PL_AUTOWATCH_KEY) === \"1\";",
         "  plAutowatch.addEventListener(\"change\", function () {",
         "    localStorage.setItem(PL_AUTOWATCH_KEY, plAutowatch.checked ? \"1\" : \"0\");",
+        "    if (plAutowatch.checked && plRepeat.checked) {",
+        "      plRepeat.checked = false;",
+        "      localStorage.setItem(PL_REPEAT_KEY, \"0\");",
+        "    }",
         "  });",
         "  document.getElementById(\"pl-play\").addEventListener(\"click\", function () {",
+        "    if (plIndex < 0) plNewCycle();",
         "    plPlayAt(plIndex >= 0 ? plIndex : 0);",
         "  });",
         "  function plQueueFrom(selector, shuffle) {",
@@ -2066,8 +2108,11 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "    plSave();",
         "    plRender();",
         "  });",
-        "  document.getElementById(\"pl-download\").addEventListener(\"click\", function () {",
-        "    if (!pl.length) return;",
+        "  // Desktop: trigger one <a download> per file. iOS Safari blocks",
+        "  // the synthetic multi-click approach, so there we fetch every",
+        "  // file and hand them to the native share sheet as individual",
+        "  // files ('Save to Files') - no zip, no unzip.",
+        "  function plDownloadClicks() {",
         "    var base = location.href.replace(/\\?.*$/, \"\").replace(/\\/$/, \"\");",
         "    pl.forEach(function (item, i) {",
         "      setTimeout(function () {",
@@ -2080,6 +2125,101 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "        document.body.removeChild(a);",
         "      }, i * 300);",
         "    });",
+        "  }",
+        "  function plDownloadShare(btn) {",
+        "    var types = { mp4: \"video/mp4\", webm: \"video/webm\", mkv: \"video/x-matroska\",",
+        "      m4a: \"audio/mp4\", mp3: \"audio/mpeg\", opus: \"audio/ogg\", ogg: \"audio/ogg\",",
+        "      aac: \"audio/aac\", wav: \"audio/wav\", flac: \"audio/flac\" };",
+        "    var files = [];",
+        "    // Sequential fetch: only one file in flight at a time (phones).",
+        "    var chain = Promise.resolve();",
+        "    pl.forEach(function (item) {",
+        "      chain = chain.then(function () {",
+        "        return fetch(item.href).then(function (r) {",
+        "          if (!r.ok) throw new Error(\"HTTP \" + r.status);",
+        "          return r.blob();",
+        "        }).then(function (blob) {",
+        "          var ext = (item.name.split(\".\").pop() || \"\").toLowerCase();",
+        "          files.push(new File([blob], item.name,",
+        "            { type: types[ext] || blob.type || \"application/octet-stream\" }));",
+        "        });",
+        "      });",
+        "    });",
+        "    chain.then(function () {",
+        "      if (navigator.canShare && !navigator.canShare({ files: files })) {",
+        "        throw new Error(\"these file types cannot be shared on this device\");",
+        "      }",
+        "      return navigator.share({ files: files, title: \"ytwatcher playlist\" });",
+        "    }).catch(function (e) {",
+        "      if (e && e.name === \"AbortError\") return; // user cancelled",
+        "      window.alert(\"Playlist download failed: \" + (e.message || e));",
+        "    }).finally(function () {",
+        "      btn.disabled = false;",
+        "    });",
+        "  }",
+        "  document.getElementById(\"pl-download\").addEventListener(\"click\", function () {",
+        "    if (!pl.length) return;",
+        "    var ua = navigator.userAgent || \"\";",
+        "    var isIos = /iP(hone|ad)/.test(ua)",
+        "      || (/Macintosh/.test(ua) && navigator.maxTouchPoints > 1);",
+        "    if (isIos && navigator.share && window.File && window.fetch) {",
+        "      this.disabled = true;",
+        "      plDownloadShare(this);",
+        "    } else {",
+        "      plDownloadClicks();",
+        "    }",
+        "  });",
+        "  // Offline support: the service worker (sw.js, served next to",
+        "  // index.html) serves cached media and the page itself when the",
+        "  // network is gone. Registration needs a secure context (HTTPS).",
+        "  if (\"serviceWorker\" in navigator && location.protocol === \"https:\") {",
+        "    navigator.serviceWorker.register(\"sw.js\").catch(function () {});",
+        "  }",
+        "  // Cache every playlist file via the Cache Storage API so the",
+        "  // service worker can serve them offline. iOS only grants a",
+        "  // durable cache quota to home-screen apps, so for real offline",
+        "  // use add the page to the home screen first.",
+        "  document.getElementById(\"pl-preload\").addEventListener(\"click\", async function () {",
+        "    if (!(\"caches\" in window)) {",
+        "      window.alert(\"Caching is not supported by this browser\");",
+        "      return;",
+        "    }",
+        "    var btn = this;",
+        "    var label = btn.textContent;",
+        "    btn.disabled = true;",
+        "    try {",
+        "      var cache = await caches.open(\"ytwatcher-media-v1\");",
+        "      var done = 0, failed = 0;",
+        "      for (var i = 0; i < pl.length; i++) {",
+        "        btn.textContent = \"Caching \" + (i + 1) + \"/\" + pl.length + \"…\";",
+        "        try {",
+        "          var cached = await cache.match(pl[i].href, { ignoreSearch: true });",
+        "          if (!cached) await cache.add(pl[i].href);",
+        "          done++;",
+        "        } catch (e) { failed++; }",
+        "      }",
+        "      btn.textContent = \"✓ cached: \" + done + (failed ? \" (\" + failed + \" failed)\" : \"\");",
+        "    } catch (e) {",
+        "      window.alert(\"Preload failed: \" + (e.message || e));",
+        "      btn.textContent = label;",
+        "    }",
+        "    setTimeout(function () { btn.disabled = false; btn.textContent = label; }, 3000);",
+        "  });",
+        "  // Drop everything the preload button / the service worker",
+        "  // cached on this device (media and the offline page copy).",
+        "  document.getElementById(\"pl-clearcache\").addEventListener(\"click\", async function () {",
+        "    if (!(\"caches\" in window)) return;",
+        "    var btn = this;",
+        "    var label = btn.textContent;",
+        "    btn.disabled = true;",
+        "    try {",
+        "      await caches.delete(\"ytwatcher-media-v1\");",
+        "      await caches.delete(\"ytwatcher-page-v1\");",
+        "      btn.textContent = \"✓ cache cleared\";",
+        "    } catch (e) {",
+        "      btn.textContent = label;",
+        "    }",
+        "    setTimeout(function () { btn.disabled = false; btn.textContent = label; }, 2000);",
         "  });",
         "  function plUpdateButtons() {",
         "    var playingHref = plIndex >= 0 && pl[plIndex] ? pl[plIndex].href : null;",
@@ -2327,6 +2467,81 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
 _index_lock = threading.Lock()
 
 
+# Service worker for offline playback, served by nginx next to index.html.
+# The "Preload offline" button fills MEDIA_CACHE via the Cache Storage
+# API; the fetch handler serves cached media when the network is gone
+# and answers Range requests on cached entries with a proper 206 so
+# seeking keeps working offline. Needs HTTPS (secure context).
+SERVICE_WORKER_JS = r"""
+var PAGE_CACHE = "ytwatcher-page-v1";
+var MEDIA_CACHE = "ytwatcher-media-v1";
+var MEDIA_RE = /\.(webm|mp4|m4a|mp3|opus|ogg|aac|wav|flac|mkv|vtt)(\?|$)/i;
+
+self.addEventListener("install", function (e) { e.waitUntil(self.skipWaiting()); });
+self.addEventListener("activate", function (e) { e.waitUntil(self.clients.claim()); });
+
+self.addEventListener("fetch", function (event) {
+  var req = event.request;
+  if (req.method !== "GET") return;
+  var url = new URL(req.url);
+  if (url.origin !== self.location.origin) return;
+  // Page navigations: network first, cached copy as offline fallback.
+  if (req.mode === "navigate") {
+    event.respondWith(fetch(req).then(function (resp) {
+      var copy = resp.clone();
+      caches.open(PAGE_CACHE).then(function (c) { c.put(self.registration.scope, copy); });
+      return resp;
+    }).catch(function () {
+      return caches.match(self.registration.scope).then(function (hit) {
+        return hit || Response.error();
+      });
+    }));
+    return;
+  }
+  if (!MEDIA_RE.test(url.pathname)) return;
+  event.respondWith((async function () {
+    var cache = await caches.open(MEDIA_CACHE);
+    var cached = await cache.match(req, { ignoreSearch: true });
+    if (cached) {
+      var range = req.headers.get("range");
+      var m = range && /^bytes=(\d+)-(\d*)$/.exec(range);
+      if (m) {
+        var buf = await cached.arrayBuffer();
+        var start = +m[1];
+        var end = m[2] ? Math.min(+m[2], buf.byteLength - 1) : buf.byteLength - 1;
+        return new Response(buf.slice(start, end + 1), {
+          status: 206,
+          headers: {
+            "Content-Range": "bytes " + start + "-" + end + "/" + buf.byteLength,
+            "Accept-Ranges": "bytes",
+            "Content-Type": cached.headers.get("Content-Type") || "application/octet-stream",
+          },
+        });
+      }
+      return cached;
+    }
+    var resp = await fetch(req);
+    if (resp.ok) cache.put(req, resp.clone());
+    return resp;
+  })());
+});
+""".lstrip()
+
+# Minimal PWA manifest so "Add to Home Screen" installs the page as a
+# standalone app (better offline behavior and cache quota on iOS).
+PWA_MANIFEST = r"""
+{
+  "name": "ytwatcher",
+  "short_name": "ytwatcher",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#000000",
+  "theme_color": "#000000"
+}
+""".lstrip()
+
+
 def update_index_html(download_dir, api_port=DEFAULT_API_PORT,
                       site_title=DEFAULT_SITE_TITLE, max_age_days=None,
                       latest_max_age_days=None, speeds=None, files=None):
@@ -2380,6 +2595,17 @@ def update_index_html(download_dir, api_port=DEFAULT_API_PORT,
         watched = load_watched()
         fp = fingerprint(groups, site_title, speeds, watched, static)
         index_path = Path(download_dir) / "index.html"
+        for name, content in (("sw.js", SERVICE_WORKER_JS),
+                              ("manifest.json", PWA_MANIFEST)):
+            sidecar = Path(download_dir) / name
+            try:
+                stale = sidecar.read_text(encoding="utf-8") != content
+            except OSError:
+                stale = True
+            if stale:
+                tmp = _tmp_path(sidecar)
+                tmp.write_text(content, encoding="utf-8")
+                tmp.replace(sidecar)
         if read_existing_fingerprint(index_path) == fp:
             return False, total, channels
         # Newest videos across all channels; the window is controlled by
