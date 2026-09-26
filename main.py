@@ -955,7 +955,7 @@ def scan_downloads(download_dir, files=None):
 # Bump when the index.html template changes: the fingerprint below only
 # covers the file listing, so without this an existing index.html would
 # keep the old template until some video is added or removed.
-INDEX_TEMPLATE_VERSION = 76
+INDEX_TEMPLATE_VERSION = 77
 
 
 def static_folder_url(item):
@@ -1278,6 +1278,8 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         '        <label><input type="checkbox" id="pl-repeat"> Repeat</label>',
         '        <label><input type="checkbox" id="pl-autowatch" '
         'title="Mark playlist items as watched once they have played to the end"> Autowatch</label>',
+        '        <label><input type="checkbox" id="pl-autolatest" '
+        'title="Automatically queue new Latest videos as they appear"> Auto-add latest</label>',
         '        <button type="button" id="pl-clear">Clear</button>',
         '        <button type="button" id="pl-preload" '
         'title="Cache all playlist files on this device for offline playback">Preload offline</button>',
@@ -1617,6 +1619,7 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "  var PL_KEY = \"ytwatcher:playlist\";",
         "  var PL_REPEAT_KEY = \"ytwatcher:playlist-repeat\";",
         "  var PL_AUTOWATCH_KEY = \"ytwatcher:playlist-autowatch\";",
+        "  var PL_AUTOLATEST_KEY = \"ytwatcher:playlist-autolatest\";",
         "  function plLoad() {",
         "    try { return JSON.parse(localStorage.getItem(PL_KEY) || \"[]\"); }",
         "    catch (e) { return []; }",
@@ -1631,6 +1634,7 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "  var plSubsEl = document.getElementById(\"pl-subs\");",
         "  var plRepeat = document.getElementById(\"pl-repeat\");",
         "  var plAutowatch = document.getElementById(\"pl-autowatch\");",
+        "  var plAutolatest = document.getElementById(\"pl-autolatest\");",
         "  // Attach subtitle tracks stored on the playlist item",
         "  // (data-subs on the source li, see scan_downloads).",
         "  function plApplyTracks(item) {",
@@ -2045,11 +2049,16 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "      localStorage.setItem(PL_REPEAT_KEY, \"0\");",
         "    }",
         "  });",
+        "  plAutolatest.checked = localStorage.getItem(PL_AUTOLATEST_KEY) === \"1\";",
+        "  plAutolatest.addEventListener(\"change\", function () {",
+        "    localStorage.setItem(PL_AUTOLATEST_KEY, plAutolatest.checked ? \"1\" : \"0\");",
+        "    if (plAutolatest.checked) plAutoAddLatest();",
+        "  });",
         "  document.getElementById(\"pl-play\").addEventListener(\"click\", function () {",
         "    if (plIndex < 0) plNewCycle();",
         "    plPlayAt(plIndex >= 0 ? plIndex : 0);",
         "  });",
-        "  function plQueueFrom(selector, shuffle) {",
+        "  function plQueueFrom(selector, shuffle, autoplay) {",
         "    // Queue every matching listed video that isn't queued yet.",
         "    // Hidden entries are skipped: 'old' files, entries of a",
         "    // collapsed section, and watched/hidden Latest items — the",
@@ -2075,8 +2084,9 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "    }",
         "    pl = pl.concat(fresh);",
         "    plSave();",
-        "    // Queue was empty: start playing right away.",
-        "    if (plIndex < 0 && pl.length === fresh.length && pl.length) {",
+        "    // Queue was empty: start playing right away (manual bulk",
+        "    // buttons only; the automatic pass never starts playback).",
+        "    if (autoplay !== false && plIndex < 0 && pl.length === fresh.length && pl.length) {",
         "      plPlayAt(0);",
         "      return;",
         "    }",
@@ -2223,6 +2233,13 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "    }",
         "    setTimeout(function () { btn.disabled = false; btn.textContent = label; }, 2000);",
         "  });",
+        "  // Auto-add latest: queue whatever the Latest section lists and",
+        "  // is not queued yet. Runs on startup and after every library",
+        "  // refresh; never starts playback by itself.",
+        "  function plAutoAddLatest() {",
+        "    if (!plAutolatest.checked) return;",
+        "    plQueueFrom(\"section.latest li[data-id]:not(.watched)\", false, false);",
+        "  }",
         "  function plUpdateButtons() {",
         "    var playingHref = plIndex >= 0 && pl[plIndex] ? pl[plIndex].href : null;",
         "    document.querySelectorAll(\".pl-add\").forEach(function (btn) {",
@@ -2403,6 +2420,7 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         '        var incomingStatus = fresh.getElementById("library-status");',
         '        if (incomingStatus) document.getElementById("library-status").innerHTML = incomingStatus.innerHTML;',
         "        bindAvailableVideos();",
+        "        plAutoAddLatest();",
         "        // Reconcile stored playlist hrefs with the refreshed library:",
         "        // a video upgrade can change the file extension, so keep the",
         "        // playlist pointing at the current file by matching data-id.",
@@ -2429,6 +2447,7 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "      .then(function () { libraryRefreshBusy = false; });",
         "  }",
         "  bindAvailableVideos();",
+        "  plAutoAddLatest();",
         "  // A manual download just finished (marker set before the reload):",
         "  // insert the new file right behind the currently playing item",
         "  // so it plays next. With nothing playing, it lands at the end.",
