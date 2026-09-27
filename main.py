@@ -420,9 +420,16 @@ _state_lock = threading.Lock()
 # Quality presets for the manual-download API endpoint. Raw format strings
 # are not accepted over the network — the endpoint is unauthenticated, so
 # keep the surface to these fixed choices.
+# Video presets prefer H.264 (avc1) + AAC (mp4a): iPhone Safari cannot play
+# VP9/AV1 muxed into mp4, so a plain "bestvideo" pick often yielded files
+# Safari refused to play. avc1+mp4a merges to plain mp4, which Safari plays.
 MANUAL_QUALITY_PRESETS = {
-    "720": "bestvideo[height<=720]+bestaudio/best[height<=720]",
-    "best": "bestvideo+bestaudio/best",
+    "720": "bestvideo[vcodec^=avc1][height<=720]+bestaudio[acodec^=mp4a]"
+           "/bestvideo[vcodec^=avc1][height<=720]+bestaudio"
+           "/best[vcodec^=avc1][height<=720]/best[height<=720]",
+    "best": "bestvideo[vcodec^=avc1]+bestaudio[acodec^=mp4a]"
+            "/bestvideo[vcodec^=avc1]+bestaudio"
+            "/best[vcodec^=avc1]/best",
     "audio": "bestaudio",
 }
 
