@@ -965,7 +965,7 @@ def scan_downloads(download_dir, files=None):
 # Bump when the index.html template changes: the fingerprint below only
 # covers the file listing, so without this an existing index.html would
 # keep the old template until some video is added or removed.
-INDEX_TEMPLATE_VERSION = 77
+INDEX_TEMPLATE_VERSION = 78
 
 
 def static_folder_url(item):
@@ -1168,6 +1168,8 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "      flex-wrap: wrap; }",
         "    .pl-controls button { white-space: nowrap; }",
         "    .pl-controls label { color: #bbb; font-size: .9rem; }",
+        "    .pl-opts { display: flex; gap: .75rem; align-items: center;",
+        "      margin-left: auto; flex-wrap: nowrap; }",
         "    #pl-empty { color: #999; font-size: .9rem; }",
         "    #pl-video { width: 100%; max-height: 70vh; margin-top: .75rem; background: #000; }",
         "    #pl-video::cue { background: rgba(0, 0, 0, .75); text-shadow: 0 0 4px #000; }",
@@ -1285,11 +1287,6 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         'title="Queue the Latest section in listed order (excluding watched)">Add latest</button>',
         '        <button type="button" id="pl-add-espanol" '
         'title="Queue every Spanish video in listed order">Add Spanish</button>',
-        '        <label><input type="checkbox" id="pl-repeat"> Repeat</label>',
-        '        <label><input type="checkbox" id="pl-autowatch" '
-        'title="Mark playlist items as watched once they have played to the end"> Autowatch</label>',
-        '        <label><input type="checkbox" id="pl-autolatest" '
-        'title="Automatically queue new Latest videos as they appear"> Auto-add latest</label>',
         '        <button type="button" id="pl-clear">Clear</button>',
         '        <button type="button" id="pl-preload" '
         'title="Cache all playlist files on this device for offline playback">Preload offline</button>',
@@ -1297,6 +1294,13 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         'title="Remove all cached media and the offline page copy from this device">Clear cache</button>',
         '        <button type="button" id="pl-download" '
         'title="Download every playlist file to this device">Download playlist</button>',
+        '        <span class="pl-opts">',
+        '        <label><input type="checkbox" id="pl-repeat"> Repeat</label>',
+        '        <label><input type="checkbox" id="pl-autowatch" '
+        'title="Mark playlist items as watched once they have played to the end"> Autowatch</label>',
+        '        <label><input type="checkbox" id="pl-autolatest" '
+        'title="Automatically queue new Latest videos as they appear"> Auto-add latest</label>',
+        '        </span>',
         '      </div>',
         '      <ul id="pl-items"></ul>',
         '    </section>',
