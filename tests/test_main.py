@@ -130,14 +130,12 @@ def test_delete_watched_both_pseudo_formats(tmp_path):
     assert all(not f.exists() for f in files.values())
 
 
-def test_delete_watched_keep_channel_archives(tmp_path):
+def test_delete_watched_keep_channel_keeps_file(tmp_path):
     files = _make_library(tmp_path)
     removed = main.delete_watched_videos(
         tmp_path, {"mAbCdEfGhIj"}, keep_channels={"Chan"})
-    assert len(removed) == 1
-    archived = tmp_path / "Chan" / "watched" / "Video A [mAbCdEfGhIj].webm"
-    assert archived.exists()
-    assert not files["Video A [mAbCdEfGhIj].webm"].exists()
+    assert removed == []
+    assert files["Video A [mAbCdEfGhIj].webm"].exists()
 
 
 def test_scan_downloads_skips_vanished_files(tmp_path):

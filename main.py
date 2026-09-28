@@ -314,6 +314,10 @@ def validate_config(config):
                 problems.append(f"{label}: '{key}' must be a number")
         if "keep_watched" in sub and not isinstance(sub["keep_watched"], bool):
             problems.append(f"{label}: 'keep_watched' must be true or false")
+        if "exclude_from_latest" in sub and not isinstance(
+                sub["exclude_from_latest"], bool):
+            problems.append(
+                f"{label}: 'exclude_from_latest' must be true or false")
         speed = sub.get("playback_speed")
         if speed is not None and not (
             isinstance(speed, (int, float)) and not isinstance(speed, bool) and speed > 0
@@ -873,8 +877,8 @@ def _has_video_stream(path):
 def scan_downloads(download_dir, files=None):
     """Scan download_dir recursively and group video files by top-level subfolder.
 
-    Files under 'watched' subdirectories (archived by subscriptions with
-    keep_watched: true) are not listed. Returns an ordered dict mapping
+    Files under 'watched' subdirectories (legacy archives from before
+    keep_watched became a log-only mark) are not listed. Returns an ordered dict mapping
     channel/subfolder name to a list of entries sorted newest-first by
     file creation time. Each entry is a dict with keys: rel, name, size,
     mtime, channel, duration (seconds, or None if not in the cache),
@@ -965,7 +969,7 @@ def scan_downloads(download_dir, files=None):
 # Bump when the index.html template changes: the fingerprint below only
 # covers the file listing, so without this an existing index.html would
 # keep the old template until some video is added or removed.
-INDEX_TEMPLATE_VERSION = 83
+INDEX_TEMPLATE_VERSION = 86
 
 
 def static_folder_url(item):
@@ -1022,12 +1026,15 @@ def channel_speeds(config):
     return speeds
 
 
-def fingerprint(groups, site_title="", speeds=None, watched=None, static=None):
+def fingerprint(groups, site_title="", speeds=None, watched=None, static=None,
+                latest_excluded=None):
     """Return a stable hash of the current download listing and page title.
 
     The watched set is part of the hash so that marking a video as
     watched regenerates the page: the "Latest" section filters watched
-    entries out even before their files are deleted or archived.
+    entries out even before their files are deleted or archived. The
+    latest_excluded channel set is hashed for the same reason: toggling
+    a subscription's exclude_from_latest must rebuild the page.
     """
     data = []
     for channel, entries in groups.items():
@@ -1046,9 +1053,11 @@ def fingerprint(groups, site_title="", speeds=None, watched=None, static=None):
     speeds_json = json.dumps(speeds or {}, sort_keys=True, separators=(",", ":"))
     watched_json = json.dumps(sorted(watched or ()), separators=(",", ":"))
     static_json = json.dumps(static or [], sort_keys=True, separators=(",", ":"))
+    excluded_json = json.dumps(sorted(latest_excluded or ()), separators=(",", ":"))
     return hashlib.sha1(
         (f"{INDEX_TEMPLATE_VERSION}\n" + site_title + "\n" + canonical
-         + "\n" + speeds_json + "\n" + watched_json + "\n" + static_json).encode("utf-8")
+         + "\n" + speeds_json + "\n" + watched_json + "\n" + static_json
+         + "\n" + excluded_json).encode("utf-8")
     ).hexdigest()
 
 
@@ -1137,6 +1146,10 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "    .watch-btn:disabled { opacity: .5; cursor: default; }",
         "    .sec-actions { margin-left: .4rem; }",
         "    .sec-actions .watch-btn { font-size: .72rem; padding: .1rem .45rem; }",
+        "    .subgroup h3 { margin: .9rem 0 .3rem; font-size: 1rem;"
+        "      color: #cfd8dc; }",
+        "    .sub-actions { margin-left: .4rem; }",
+        "    .sub-actions .watch-btn { font-size: .72rem; padding: .1rem .45rem; }",
         "    .tools { margin-bottom: 2rem; }",
         "    .tools form { display: flex; gap: .5rem; flex-wrap: wrap; align-items: center; }",
         "    .tools input[type=url] {",
@@ -1419,10 +1432,52 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
             f'<button class="watch-btn sec-fold" type="button">Hide</button>'
             f'{old_btn}</span></h2>'
         )
-        lines.append("      <ul>")
+        # Channels whose files live in sub-folders are split into
+        # sub-groups (one per folder, each with its own Hide/Show all
+        # controls, wired up in JS); flat channels keep a single list.
+        # The .chan-body wrapper is what the section's Hide collapses.
+        subgroups = []
+        sub_index = {}
         for entry in entries:
-            lines.extend(entry_lines(entry))
-        lines.append("      </ul>")
+            parts = entry["rel"].split("/")
+            key = "/".join(parts[1:-1]) if len(parts) > 2 else ""
+            if key not in sub_index:
+                sub_index[key] = len(subgroups)
+                subgroups.append((key, []))
+            subgroups[sub_index[key]][1].append(entry)
+        lines.append('      <div class="chan-body">')
+        if len(subgroups) > 1:
+            for key, sub_entries in subgroups:
+                title = key.replace("/", " / ") if key else "(top level)"
+                sub_old_btn = (
+                    '<button class="watch-btn sub-old" type="button" '
+                    'title="Also list this folder\'s files older than the '
+                    'watchlist window">Show all</button>'
+                ) if any(e.get("old") for e in sub_entries) else ""
+                lines.append(
+                    f'      <div class="subgroup" data-sub="{html.escape(key)}">'
+                )
+                lines.append(
+                    f'        <h3>{html.escape(title)} '
+                    f'<span class="sub-actions">'
+                    f'<button class="watch-btn sub-queue" type="button" '
+                    f'title="Queue every video of this folder (including '
+                    f'folded and old entries, excluding watched)">'
+                    f'+ Playlist</button>'
+                    f'<button class="watch-btn sub-fold" type="button">Hide</button>'
+                    f'{sub_old_btn}</span></h3>'
+                )
+                lines.append("      <ul>")
+                for entry in sub_entries:
+                    lines.extend(entry_lines(entry))
+                lines.append("      </ul>")
+                lines.append("      </div>")
+        else:
+            lines.append("      <ul>")
+            for entry in entries:
+                lines.extend(entry_lines(entry))
+            lines.append("      </ul>")
+        lines.append("      </div>")
         lines.append("    </section>")
     lines.append("    </div>")
     lines.extend([
@@ -1448,6 +1503,15 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "  catch (e) { secState = {}; }",
         "  function secStateSave() {",
         "    localStorage.setItem(SEC_KEY, JSON.stringify(secState));",
+        "  }",
+        "  // Per-subgroup UI state (collapsed / show-old) for channels with",
+        "  // sub-folders, keyed by \"channel|folder\".",
+        '  var SUB_KEY = "ytwatcher:subgroup-state";',
+        "  var subState = {};",
+        "  try { subState = JSON.parse(localStorage.getItem(SUB_KEY) || '{}') || {}; }",
+        "  catch (e) { subState = {}; }",
+        "  function subStateSave() {",
+        "    localStorage.setItem(SUB_KEY, JSON.stringify(subState));",
         "  }",
         "  // Collapsing a section also hides its entries in Latest, and",
         "  // watched-marked entries drop out of Latest immediately",
@@ -2093,7 +2157,11 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "    var fresh = [];",
         "    document.querySelectorAll(selector).forEach(function (li) {",
         "      if (li.hidden) return;",
-        "      if (!includeHidden && li.closest(\"ul\").hidden) return;",
+        "      if (!includeHidden) {",
+        '        var ul = li.closest("ul");',
+        '        var body = li.closest(".chan-body");',
+        "        if ((ul && ul.hidden) || (body && body.hidden)) return;",
+        "      }",
         "      var a = li.querySelector(\"a\");",
         "      var href = a.getAttribute(\"href\");",
         "      if (!have[href]) {",
@@ -2108,6 +2176,9 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "        var t = fresh[i]; fresh[i] = fresh[j]; fresh[j] = t;",
         "      }",
         "    }",
+        "    plQueueItems(fresh, autoplay);",
+        "  }",
+        "  function plQueueItems(fresh, autoplay) {",
         "    pl = pl.concat(fresh);",
         "    plSave();",
         "    // Queue was empty: start playing right away (manual bulk",
@@ -2161,7 +2232,7 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "      if (!skipQueue) {",
         "        pl = [];",
         "        plIndex = -1;",
-        "        plQueueFrom(\"section[data-channel='Espanol'] li[data-id]\", false, undefined, true);",
+        "        plQueueFrom(\"section[data-channel='Espanol'] li[data-id]:not(.watched)\", false, undefined, true);",
         "      }",
         "    } else {",
         "      var prev = null;",
@@ -2432,17 +2503,37 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "    });",
         "    // Per-section controls: Hide/Show collapses the list,",
         "    // Show all reveals files older than the watchlist window",
-        "    // (rendered hidden with class 'old'). State persists in",
-        "    // localStorage and is re-applied after every library refresh.",
+        "    // (rendered hidden with class 'old'). Channels with sub-",
+        "    // folders additionally get per-subgroup Hide/Show all; the",
+        "    // section's Show all overrides every subgroup. State persists",
+        "    // in localStorage and is re-applied after every library",
+        "    // refresh.",
         '    document.querySelectorAll("#video-sections section[data-channel]").forEach(function (sec) {',
         "      var channel = sec.dataset.channel;",
         '      var foldBtn = sec.querySelector(".sec-fold");',
         '      var oldBtn = sec.querySelector(".sec-old");',
+        "      function applySub(sub) {",
+        '        var key = channel + "|" + (sub.dataset.sub || "");',
+        "        var st = subState[key] || {};",
+        '        sub.querySelector("ul").hidden = !!st.collapsed;',
+        '        var fb = sub.querySelector(".sub-fold");',
+        '        if (fb) fb.textContent = st.collapsed ? "Show" : "Hide";',
+        "        var showAll = !!st.showAll || !!(secState[channel] || {}).showAll;",
+        '        sub.querySelectorAll("li.old").forEach(function (li) { li.hidden = !showAll; });',
+        '        var ob = sub.querySelector(".sub-old");',
+        '        if (ob) ob.textContent = showAll ? "Hide old" : "Show all";',
+        "      }",
         "      function applySec() {",
         "        var st = secState[channel] || {};",
-        '        sec.querySelector("ul").hidden = !!st.collapsed;',
+        '        var body = sec.querySelector(".chan-body");',
+        "        if (body) body.hidden = !!st.collapsed;",
         '        if (foldBtn) foldBtn.textContent = st.collapsed ? "Show" : "Hide";',
-        '        sec.querySelectorAll("li.old").forEach(function (li) { li.hidden = !st.showAll; });',
+        '        var subs = sec.querySelectorAll(".subgroup");',
+        "        if (subs.length) {",
+        "          subs.forEach(applySub);",
+        "        } else {",
+        '          sec.querySelectorAll("li.old").forEach(function (li) { li.hidden = !st.showAll; });',
+        "        }",
         '        if (oldBtn) oldBtn.textContent = st.showAll ? "Hide old" : "Show all";',
         "        applyLatestVisibility();",
         "      }",
@@ -2459,6 +2550,43 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "        secState[channel] = st;",
         "        secStateSave();",
         "        applySec();",
+        "      });",
+        '      sec.querySelectorAll(".subgroup").forEach(function (sub) {',
+        '        var key = channel + "|" + (sub.dataset.sub || "");',
+        '        var qb = sub.querySelector(".sub-queue");',
+        '        var fb = sub.querySelector(".sub-fold");',
+        '        var ob = sub.querySelector(".sub-old");',
+        '        if (qb) qb.addEventListener("click", function () {',
+        "          // Queue every non-watched video of this folder — unlike",
+        "          // the section bulk buttons this includes folded and",
+        "          // 'old' entries (course folders are mostly old).",
+        "          var have = {};",
+        "          pl.forEach(function (item) { have[item.href] = true; });",
+        "          var fresh = [];",
+        '          sub.querySelectorAll("li[data-id]:not(.watched)").forEach(function (li) {',
+        '            var a = li.querySelector("a");',
+        '            var href = a.getAttribute("href");',
+        "            if (!have[href]) {",
+        "              have[href] = true;",
+        '              fresh.push({ href: href, name: a.textContent, id: li.dataset.id, subs: li.dataset.subs || "", dur: li.dataset.dur || "" });',
+        "            }",
+        "          });",
+        "          plQueueItems(fresh);",
+        "        });",
+        '        if (fb) fb.addEventListener("click", function () {',
+        "          var st = subState[key] || {};",
+        "          st.collapsed = !st.collapsed;",
+        "          subState[key] = st;",
+        "          subStateSave();",
+        "          applySub(sub);",
+        "        });",
+        '        if (ob) ob.addEventListener("click", function () {',
+        "          var st = subState[key] || {};",
+        "          st.showAll = !st.showAll;",
+        "          subState[key] = st;",
+        "          subStateSave();",
+        "          applySub(sub);",
+        "        });",
         "      });",
         "      applySec();",
         "    });",
@@ -2647,11 +2775,14 @@ def update_index_html(download_dir, api_port=DEFAULT_API_PORT,
     whose mtime is older than that many days stay on the page but are
     tagged "old" and hidden by default; each section gets a "show all"
     button that reveals them (they stay on disk either way); the
-    "manually" folder is exempt. Watched files are never listed
-    regardless: they are deleted or archived into 'watched' subfolders.
+    "manually" folder is exempt. Watched files are deleted from disk
+    except for keep_watched subscriptions, whose files stay in place
+    and are listed dimmed (watched.json is the log).
 
     latest_max_age_days filters the "Latest" section to the most recent N
-    days (creation time); videos marked as watched never appear in it.
+    days (creation time); videos marked as watched never appear in it,
+    and neither do channels of subscriptions with exclude_from_latest:
+    true.
     speeds maps channel folder -> playback speed
     (from subscriptions.yaml); when omitted it is derived from the current
     config, falling back to empty if the config cannot be read. files is an
@@ -2669,6 +2800,12 @@ def update_index_html(download_dir, api_port=DEFAULT_API_PORT,
             except Exception:
                 speeds = {}
         groups = scan_downloads(download_dir, files=files)
+        # Subscriptions with exclude_from_latest: true keep their channel
+        # out of the "Latest" section (their section listing is
+        # unaffected).
+        latest_excluded = {s["name"] for s in config.get("subscriptions", [])
+                           if isinstance(s, dict) and s.get("exclude_from_latest")
+                           and "name" in s}
         if max_age_days:
             cutoff = time.time() - max_age_days * 86400
             # Don't drop old files from the page — tag them so the
@@ -2688,7 +2825,8 @@ def update_index_html(download_dir, api_port=DEFAULT_API_PORT,
         )
         channels = len(groups)
         watched = load_watched()
-        fp = fingerprint(groups, site_title, speeds, watched, static)
+        fp = fingerprint(groups, site_title, speeds, watched, static,
+                         latest_excluded=latest_excluded)
         index_path = Path(download_dir) / "index.html"
         for name, content in (("sw.js", SERVICE_WORKER_JS),
                               ("manifest.json", PWA_MANIFEST)):
@@ -2706,12 +2844,15 @@ def update_index_html(download_dir, api_port=DEFAULT_API_PORT,
         # Newest videos across all channels; the window is controlled by
         # settings.latest_max_age_days (24h in the shipped config), not by
         # a fixed entry count. Watched videos are excluded even before the
-        # next round deletes or archives their files.
+        # next round deletes their files, and channels of subscriptions
+        # with exclude_from_latest: true never appear here.
         latest = sorted(
             (entry for entries in groups.values() for entry in entries),
             key=lambda e: e["mtime"],
             reverse=True,
         )
+        if latest_excluded:
+            latest = [e for e in latest if e.get("channel") not in latest_excluded]
         if watched:
             latest = [e for e in latest if entry_id(e) not in watched]
         if latest_max_age_days:
@@ -2734,10 +2875,11 @@ def update_index_html(download_dir, api_port=DEFAULT_API_PORT,
 def delete_watched_videos(download_dir, watched_ids, keep_channels=(), files=None):
     """Delete downloaded files whose video ID is in watched_ids.
 
-    Files under a channel named in keep_channels are moved into a
-    'watched' subdirectory of the channel folder instead of being
-    deleted. Returns the list of paths removed from the listing (deleted
-    or moved away). The index page is rebuilt from a full scan, so they
+    Files under a channel named in keep_channels are left untouched:
+    those subscriptions treat the watched mark as a log entry only
+    (watched.json), keeping the file in place so its folder structure
+    survives; the index shows the entry dimmed. Returns the list of
+    deleted paths; the index page is rebuilt from a full scan, so they
     disappear from it automatically.
 
     files: optional precomputed list from walk_video_files, to avoid a
@@ -2769,6 +2911,11 @@ def delete_watched_videos(download_dir, watched_ids, keep_channels=(), files=Non
         if not any(vid in watched_ids for vid in candidate_ids):
             continue
         channel = rel.parts[0] if len(rel.parts) > 1 else None
+        if channel in keep_channels:
+            # keep_watched subscriptions keep their files: the watched
+            # mark is only a log entry (watched.json); the file stays in
+            # its folder and shows dimmed on the index page.
+            continue
         try:
             # Subtitle sidecars ("Name [id].es.vtt") follow their video.
             try:
@@ -2778,20 +2925,11 @@ def delete_watched_videos(download_dir, watched_ids, keep_channels=(), files=Non
                 ]
             except OSError:
                 sidecars = []
-            if channel in keep_channels:
-                dest_dir = root / channel / "watched"
-                dest_dir.mkdir(exist_ok=True)
-                path.replace(dest_dir / path.name)
-                for sidecar in sidecars:
-                    sidecar.replace(dest_dir / sidecar.name)
-                removed.append(path)
-                log.info("moved watched video to %s: %s", dest_dir.name, path.name)
-            else:
-                path.unlink()
-                for sidecar in sidecars:
-                    sidecar.unlink(missing_ok=True)
-                removed.append(path)
-                log.info("deleted watched video: %s", path.name)
+            path.unlink()
+            for sidecar in sidecars:
+                sidecar.unlink(missing_ok=True)
+            removed.append(path)
+            log.info("deleted watched video: %s", path.name)
         except OSError as e:
             log.error("failed to remove %s: %s", path, e)
     return removed
@@ -4122,8 +4260,9 @@ def run_round(config, seen, scan_only=False, telegram_token=None, telegram_chat_
     completed = []
     failed = load_failed()
     if not scan_only:
-        # Delete (or archive, for keep_watched subscriptions) files the
-        # user marked as watched since the last round. One NFS tree walk
+        # Delete files the user marked as watched since the last round
+        # (keep_watched subscriptions keep theirs; the mark is a log
+        # entry only). One NFS tree walk
         # is shared by the deletion, the index rebuild, and the watched
         # mark pruning below (the walk is the slow part on NFS).
         download_dir = settings.get("download_dir", "/srv/files")
