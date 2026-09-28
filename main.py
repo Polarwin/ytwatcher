@@ -969,7 +969,7 @@ def scan_downloads(download_dir, files=None):
 # Bump when the index.html template changes: the fingerprint below only
 # covers the file listing, so without this an existing index.html would
 # keep the old template until some video is added or removed.
-INDEX_TEMPLATE_VERSION = 86
+INDEX_TEMPLATE_VERSION = 87
 
 
 def static_folder_url(item):
@@ -1372,18 +1372,27 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
             )
             subtitle_btn = (
                 '          <button class="watch-btn subtitle-download" type="button" '
+                'data-action="/subtitle-download" '
                 f'{subtitle_attrs}>⇩ Subtitles</button>'
             )
-        # Real YouTube IDs can be upgraded. Files that already have a video
-        # stream get a disabled button as a visual hint.
+        # One toggle button per entry: a file with a video stream can be
+        # stripped to audio-only (local ffmpeg), an audio-only file with a
+        # real YouTube ID can be upgraded by downloading the video stream.
+        # Audio-only files without an ID offer neither.
         eid = entry_id(entry)
-        if eid.startswith("m"):
-            video_upgrade_btn = None
+        if entry.get("has_video"):
+            media_toggle_btn = (
+                '          <button class="watch-btn media-toggle" type="button" '
+                'data-action="/audio-convert" '
+                'title="Strip the video stream, keep audio only (local ffmpeg)">⇩ Audio</button>'
+            )
+        elif eid.startswith("m"):
+            media_toggle_btn = None
         else:
-            disabled_attr = ' disabled title="Already has video"' if entry.get("has_video") else ''
-            video_upgrade_btn = (
-                '          <button class="watch-btn video-upgrade" type="button" '
-                f'title="Download the video stream and merge it in"{disabled_attr}>⇩ Video</button>'
+            media_toggle_btn = (
+                '          <button class="watch-btn media-toggle" type="button" '
+                'data-action="/video-upgrade" '
+                'title="Download the video stream and merge it in">⇩ Video</button>'
             )
         return [line for line in [
             f"        <li{data_attr}{old_attr}{subs_attr}{dur_attr}>",
@@ -1396,7 +1405,7 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
             '              <span class="entry-actions">',
             pl_add_btn,
             watch_btn,
-            video_upgrade_btn,
+            media_toggle_btn,
             subtitle_btn,
             '              </span>',
             f'              <span class="entry-meta">{" &middot; ".join(meta_parts)}</span>',
@@ -2477,10 +2486,10 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "        report(id, isWatched);",
         "        applyAll();",
         "      });",
-        "      li.querySelectorAll(\".video-upgrade, .subtitle-download\").forEach(function (btn) {",
+        "      li.querySelectorAll(\".media-toggle, .subtitle-download\").forEach(function (btn) {",
         "      btn.dataset.label = btn.textContent;",
         "      btn.addEventListener(\"click\", function () {",
-        "        var endpoint = btn.classList.contains(\"subtitle-download\") ? \"/subtitle-download\" : \"/video-upgrade\";",
+        "        var endpoint = btn.dataset.action;",
         "        var rel = decodeURIComponent(",
         "          li.querySelector(\"a\").getAttribute(\"href\").split(/[?#]/)[0]);",
         "        btn.disabled = true;",
@@ -2997,6 +3006,9 @@ class ApiHandler(BaseHTTPRequestHandler):
                     file and merges it in; 202 with {"job_id": "..."}.
     POST /subtitle-download {"rel": "<path relative to download_dir>"}
                     fetches published/automatic subtitles as VTT sidecars.
+    POST /audio-convert {"rel": "<path relative to download_dir>"} starts
+                    a job that strips the video stream of a file, keeping
+                    audio only (local ffmpeg); 202 with {"job_id": "..."}.
     GET  /cookies   returns whether cookies.txt is set (never its content).
     POST /cookies   replaces cookies.txt (raw Netscape export body); an
                     empty body removes it.
@@ -3122,6 +3134,8 @@ class ApiHandler(BaseHTTPRequestHandler):
             self._post_video_upgrade()
         elif self.path == "/subtitle-download":
             self._post_video_upgrade(subtitles=True)
+        elif self.path == "/audio-convert":
+            self._post_audio_convert()
         elif self.path == "/cookies":
             self._post_cookies()
         else:
@@ -3348,6 +3362,80 @@ class ApiHandler(BaseHTTPRequestHandler):
         thread.start()
         log.info("video-upgrade job %s started: %s (%s)",
                  job_id, match.group(1), path.name)
+        self._json(202, {"job_id": job_id})
+
+    def _post_audio_convert(self):
+        body = self._read_body()
+        if body is None:
+            return
+        try:
+            data = json.loads(body or b"{}")
+            if not isinstance(data, dict):
+                raise ValueError("request must be a JSON object")
+        except ValueError as e:
+            self._json(400, {"error": str(e)})
+            return
+        try:
+            config = load_config()
+            settings = config.get("settings", {})
+        except Exception as e:
+            log.error("audio-convert: could not load config: %s", e)
+            self._json(500, {"error": "could not load server configuration"})
+            return
+        download_dir = settings.get("download_dir", "/srv/files")
+        path = resolve_download_rel(download_dir, str(data.get("rel", "")))
+        if (path is None or not path.is_file()
+                or Path(download_dir).resolve() not in path.resolve().parents
+                or not is_video_file(path)):
+            self._json(400, {"error": "path is not a file under download_dir"})
+            return
+        # Local ffmpeg conversion — no YouTube ID needed, unlike the
+        # video-upgrade/subtitle endpoints.
+        try:
+            codecs = probe_codecs(path)
+        except Exception as e:
+            self._json(400, {"error": f"could not probe file: {e}"})
+            return
+        if not codecs["video"]:
+            self._json(400, {"error": "file is already audio-only"})
+            return
+        if not codecs["audio"]:
+            self._json(400, {"error": "file has no audio stream"})
+            return
+        job_id = uuid.uuid4().hex[:8]
+        with _download_jobs_lock:
+            if any(j.get("kind") == "audio-convert" and j.get("source") == str(path)
+                   and j["status"] == "running" for j in _download_jobs.values()):
+                self._json(409, {"error": "this conversion is already in progress"})
+                return
+            running = sum(
+                1 for job in _download_jobs.values()
+                if job["status"] == "running"
+            )
+            if running >= MAX_CONCURRENT_DOWNLOADS:
+                self._json(429, {
+                    "error": "too many downloads in progress, try again later",
+                })
+                return
+            _download_jobs[job_id] = {
+                "id": job_id, "kind": "audio-convert", "rel": path.name,
+                "source": str(path),
+                "status": "running", "error": None, "created": time.time(),
+            }
+            # Cap the job history; never evict a still-running job.
+            while len(_download_jobs) > MAX_DOWNLOAD_JOBS:
+                oldest = min(_download_jobs,
+                             key=lambda k: _download_jobs[k]["created"])
+                if _download_jobs[oldest]["status"] == "running":
+                    break
+                del _download_jobs[oldest]
+        thread = threading.Thread(
+            target=run_audio_convert_job,
+            args=(job_id, path, settings),
+            daemon=True,
+        )
+        thread.start()
+        log.info("audio-convert job %s started: %s", job_id, path.name)
         self._json(202, {"job_id": job_id})
 
     def log_message(self, fmt, *args):
@@ -3851,6 +3939,16 @@ def merged_container(audio_codec, video_codec):
 # because the merge target is a ".tmp" file, so ffmpeg can't guess.
 CONTAINER_FORMATS = {".webm": "webm", ".mp4": "mp4", ".mkv": "matroska"}
 
+# Plain audio containers per codec for extract_audio_only: stream-copy
+# when the audio codec fits one of them, otherwise re-encode to AAC/m4a.
+AUDIO_COPY_CONTAINERS = {
+    "aac": (".m4a", "ipod"),
+    "mp3": (".mp3", "mp3"),
+    "opus": (".webm", "webm"),
+    "vorbis": (".webm", "webm"),
+    "flac": (".flac", "flac"),
+}
+
 
 def merge_video_audio(video_file, audio_path):
     """Mux a video-only file with an audio-only file (-c copy).
@@ -3886,6 +3984,48 @@ def merge_video_audio(video_file, audio_path):
         merged_tmp.unlink(missing_ok=True)
     if final_path != audio_path:
         audio_path.unlink()
+    return final_path
+
+
+def extract_audio_only(path):
+    """Strip the video stream, returning the new audio-only file path.
+
+    The audio stream is stream-copied into a matching plain audio
+    container when one exists (aac->m4a, opus/vorbis->webm, ...),
+    otherwise re-encoded to AAC (.m4a). The new file takes
+    <stem>.<new-ext> and keeps the original mtime (the YouTube upload
+    time), so it keeps its place in the index listing; the original
+    file is deleted only after a successful conversion. Subtitle
+    sidecars keep matching since only the extension changes.
+    """
+    path = Path(path)
+    audio_codec = probe_codecs(path)["audio"]
+    if not audio_codec:
+        raise RuntimeError(f"{path.name} has no audio stream")
+    target = AUDIO_COPY_CONTAINERS.get(audio_codec)
+    ext, muxer = target if target else (".m4a", "ipod")
+    final_path = path.with_suffix(ext)
+    tmp = _tmp_path(final_path)
+    args = ["ffmpeg", "-y", "-i", str(path), "-vn", "-sn", "-dn"]
+    if target:
+        args += ["-acodec", "copy"]
+    else:
+        args += ["-acodec", "aac", "-b:a", "128k"]
+    args += ["-f", muxer, str(tmp)]
+    try:
+        result = subprocess.run(
+            args, capture_output=True, text=True, timeout=3600)
+        if result.returncode != 0:
+            raise RuntimeError(
+                "ffmpeg audio extraction failed: "
+                + result.stderr.strip()[-300:])
+        stat = path.stat()
+        tmp.replace(final_path)
+        os.utime(final_path, (stat.st_atime, stat.st_mtime))
+    finally:
+        tmp.unlink(missing_ok=True)
+    if final_path != path:
+        path.unlink()
     return final_path
 
 
@@ -4035,6 +4175,50 @@ def run_video_upgrade_job(job_id, audio_path, video_id, settings):
                       job_id, e)
         log.info("video-upgrade job %s done: %s -> %s",
                  job_id, video_id, merged.name)
+
+
+def run_audio_convert_job(job_id, path, settings):
+    """Run an audio-convert job from the API in a background thread."""
+    error = None
+    new_path = None
+    log.info("audio-convert job %s: started file=%s", job_id, path)
+    try:
+        new_path = extract_audio_only(path)
+    except Exception as e:
+        error = str(e)
+        log.error("audio-convert job %s errored: %s", job_id, e)
+    with _download_jobs_lock:
+        job = _download_jobs.get(job_id)
+        if job is not None:
+            if error is None:
+                job["status"] = "done"
+            else:
+                job["status"] = "failed"
+                job["error"] = error
+    if error is None:
+        try:
+            # The extension may have changed: carry the cached duration
+            # over to the new rel path; record_duration refreshes
+            # size/mtime and re-probes has_video.
+            download_dir = Path(settings.get("download_dir", "/srv/files"))
+            durations = load_durations()
+            entry = durations.pop(path.relative_to(download_dir).as_posix(), None)
+            save_durations(durations)
+            record_duration(download_dir, new_path,
+                            entry.get("duration") if entry else None)
+            update_index_html(
+                str(download_dir),
+                api_port=settings.get("api_port", DEFAULT_API_PORT),
+                site_title=settings.get("site_title", DEFAULT_SITE_TITLE),
+                max_age_days=settings.get("watchlist_max_age_days"),
+                latest_max_age_days=settings.get("latest_max_age_days"),
+            )
+        except Exception as e:
+            # The job is already marked done; only the index rebuild failed.
+            log.error("audio-convert job %s: index rebuild failed: %s",
+                      job_id, e)
+        log.info("audio-convert job %s done: %s -> %s",
+                 job_id, path.name, new_path.name)
 
 
 def save_config_text(text):
