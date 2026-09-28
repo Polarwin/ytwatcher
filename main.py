@@ -969,7 +969,7 @@ def scan_downloads(download_dir, files=None):
 # Bump when the index.html template changes: the fingerprint below only
 # covers the file listing, so without this an existing index.html would
 # keep the old template until some video is added or removed.
-INDEX_TEMPLATE_VERSION = 87
+INDEX_TEMPLATE_VERSION = 88
 
 
 def static_folder_url(item):
@@ -1339,6 +1339,12 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         # also hide them there (see applyLatestVisibility in the page JS).
         if show_channel:
             data_attr += f' data-channel="{html.escape(entry.get("channel", ""))}"'
+            # Latest must carry the same subfolder key used by the channel
+            # subgroup controls so folding a subgroup can hide its duplicate
+            # entry here without folding the whole channel.
+            parts = entry["rel"].split("/")
+            subfolder = "/".join(parts[1:-1]) if len(parts) > 2 else ""
+            data_attr += f' data-sub="{html.escape(subfolder, quote=True)}"'
         # Entries older than settings.watchlist_max_age_days are tagged
         # "old" and start hidden; the section's "Show all" button (JS)
         # reveals them.
@@ -1522,14 +1528,23 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "  function subStateSave() {",
         "    localStorage.setItem(SUB_KEY, JSON.stringify(subState));",
         "  }",
-        "  // Collapsing a section also hides its entries in Latest, and",
-        "  // watched-marked entries drop out of Latest immediately",
+        "  // Collapsing a section or one of its subfolders also hides its",
+        "  // entries in Latest. Watched entries drop out immediately",
         "  // (the server omits them at the next index rebuild; this",
         "  // covers the time in between).",
         "  function applyLatestVisibility() {",
         '    document.querySelectorAll("section.latest li[data-channel]").forEach(function (li) {',
         "      var st = secState[li.dataset.channel] || {};",
-        "      li.hidden = !!st.collapsed || watched.has(li.dataset.id);",
+        "      var subCollapsed = false;",
+        '      document.querySelectorAll("#video-sections section[data-channel]").forEach(function (sec) {',
+        "        if (sec.dataset.channel !== li.dataset.channel) return;",
+        '        sec.querySelectorAll(".subgroup").forEach(function (sub) {',
+        "          if ((sub.dataset.sub || \"\") !== (li.dataset.sub || \"\")) return;",
+        '          var key = li.dataset.channel + "|" + (li.dataset.sub || "");',
+        "          subCollapsed = !!(subState[key] || {}).collapsed;",
+        "        });",
+        "      });",
+        "      li.hidden = !!st.collapsed || subCollapsed || watched.has(li.dataset.id);",
         "    });",
         "  }",
         '  var watchStatus = document.getElementById("watch-status");',
@@ -2588,6 +2603,7 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "          subState[key] = st;",
         "          subStateSave();",
         "          applySub(sub);",
+        "          applyLatestVisibility();",
         "        });",
         '        if (ob) ob.addEventListener("click", function () {',
         "          var st = subState[key] || {};",
