@@ -969,7 +969,7 @@ def scan_downloads(download_dir, files=None):
 # Bump when the index.html template changes: the fingerprint below only
 # covers the file listing, so without this an existing index.html would
 # keep the old template until some video is added or removed.
-INDEX_TEMPLATE_VERSION = 88
+INDEX_TEMPLATE_VERSION = 89
 
 
 def static_folder_url(item):
@@ -1224,7 +1224,11 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         '  <div class="container">',
         "    <header>",
         f"      <h1>{escaped_title}</h1>",
-        f'      <p id="library-status">Last updated: {html.escape(now_str)} &mdash; {total} video(s) across {channels} channel(s)</p>',
+        f'      <p id="library-status">Last updated: {html.escape(now_str)} &mdash; {total} video(s) across {channels} channel(s) '
+        '<button class="watch-btn" type="button" id="rebuild-btn" '
+        'title="Rescan the download folders and regenerate this page '
+        '(takes a moment on large libraries)">Rebuild index</button> '
+        '<span class="tool-status" id="rebuild-status"></span></p>',
         '      <p class="tool-status" id="watch-status"></p>',
         "    </header>",
     ]
@@ -1660,6 +1664,25 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "      pollDownloads(d.job_id);",
         "    }).catch(function (e) {",
         "      dlStatus.textContent = \"failed: \" + e.message;",
+        "    });",
+        "  });",
+        "  document.getElementById(\"rebuild-btn\").addEventListener(\"click\", function () {",
+        "    var btn = this;",
+        "    var status = document.getElementById(\"rebuild-status\");",
+        "    btn.disabled = true;",
+        "    status.textContent = \"rebuilding\u2026\";",
+        "    fetch(API + \"/rebuild-index\", { method: \"POST\" }).then(function (r) {",
+        "      return r.json().then(function (d) {",
+        "        if (!r.ok) throw new Error(d.error || (\"HTTP \" + r.status));",
+        "        return d;",
+        "      });",
+        "    }).then(function (d) {",
+        "      status.textContent = \"done: \" + d.videos + \" videos, \" + d.channels + \" channels\" + (d.changed ? \"\" : \" (unchanged)\");",
+        "      refreshAvailableVideos();",
+        "    }).catch(function (e) {",
+        "      status.textContent = \"failed: \" + (e.message || e);",
+        "    }).finally(function () {",
+        "      btn.disabled = false;",
         "    });",
         "  });",
         "  var configEditor = document.getElementById(\"config-editor\");",
@@ -3025,6 +3048,9 @@ class ApiHandler(BaseHTTPRequestHandler):
     POST /audio-convert {"rel": "<path relative to download_dir>"} starts
                     a job that strips the video stream of a file, keeping
                     audio only (local ffmpeg); 202 with {"job_id": "..."}.
+    POST /rebuild-index rescans the download folders and regenerates
+                    index.html synchronously; 200 with {"changed": bool,
+                    "videos": int, "channels": int}.
     GET  /cookies   returns whether cookies.txt is set (never its content).
     POST /cookies   replaces cookies.txt (raw Netscape export body); an
                     empty body removes it.
@@ -3152,6 +3178,8 @@ class ApiHandler(BaseHTTPRequestHandler):
             self._post_video_upgrade(subtitles=True)
         elif self.path == "/audio-convert":
             self._post_audio_convert()
+        elif self.path == "/rebuild-index":
+            self._post_rebuild_index()
         elif self.path == "/cookies":
             self._post_cookies()
         else:
@@ -3453,6 +3481,31 @@ class ApiHandler(BaseHTTPRequestHandler):
         thread.start()
         log.info("audio-convert job %s started: %s", job_id, path.name)
         self._json(202, {"job_id": job_id})
+
+    def _post_rebuild_index(self):
+        try:
+            config = load_config()
+            settings = config.get("settings", {})
+        except Exception as e:
+            log.error("rebuild-index: could not load config: %s", e)
+            self._json(500, {"error": "could not load server configuration"})
+            return
+        try:
+            changed, total, channels = update_index_html(
+                settings.get("download_dir", "/srv/files"),
+                api_port=settings.get("api_port", DEFAULT_API_PORT),
+                site_title=settings.get("site_title", DEFAULT_SITE_TITLE),
+                max_age_days=settings.get("watchlist_max_age_days"),
+                latest_max_age_days=settings.get("latest_max_age_days"),
+            )
+        except Exception as e:
+            log.error("rebuild-index failed: %s", e)
+            self._json(500, {"error": str(e)})
+            return
+        log.info("rebuild-index via api: changed=%s videos=%d channels=%d",
+                 changed, total, channels)
+        self._json(200, {"changed": changed, "videos": total,
+                         "channels": channels})
 
     def log_message(self, fmt, *args):
         log.debug("api: " + fmt, *args)
