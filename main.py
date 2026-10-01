@@ -309,7 +309,8 @@ def validate_config(config):
             sub["shorts_max_duration"], (int, float)
         ):
             problems.append(f"{label}: 'shorts_max_duration' must be a number")
-        for key in ("recent_videos_to_scan", "max_video_age_days"):
+        for key in ("recent_videos_to_scan", "max_video_age_days",
+                    "max_duration"):
             if key in sub and not isinstance(sub[key], (int, float)):
                 problems.append(f"{label}: '{key}' must be a number")
         if "keep_watched" in sub and not isinstance(sub["keep_watched"], bool):
@@ -672,6 +673,22 @@ def is_short(video, sub):
     if duration is None:
         return False
     return duration <= sub.get("shorts_max_duration", 60)
+
+
+def is_too_long(video, sub):
+    """Return True if the video exceeds the subscription's max_duration.
+
+    max_duration is in seconds; when unset there is no upper limit.
+    Unknown durations are not treated as too long, to avoid skipping
+    videos on missing metadata.
+    """
+    max_duration = sub.get("max_duration")
+    if not max_duration:
+        return False
+    duration = video.get("duration")
+    if duration is None:
+        return False
+    return duration > max_duration
 
 
 def is_video_file(path):
@@ -4431,6 +4448,12 @@ def process_subscription(sub, settings, seen, failed, scan_only=False):
             continue
         if is_short(video, sub):
             log.info("[%s] skipped (short): %s", name, video["title"])
+            if not scan_only:
+                seen.add(video["id"])
+            continue
+        if is_too_long(video, sub):
+            log.info("[%s] skipped (longer than %ss): %s",
+                     name, sub.get("max_duration"), video["title"])
             if not scan_only:
                 seen.add(video["id"])
             continue

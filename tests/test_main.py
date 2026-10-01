@@ -191,6 +191,17 @@ def test_matches_include_exclude():
     assert main.matches({"match": "all"}, "anything")
 
 
+def test_is_too_long():
+    sub = {"max_duration": 5400}
+    assert main.is_too_long({"duration": 5401}, sub)
+    assert not main.is_too_long({"duration": 5400}, sub)
+    assert not main.is_too_long({"duration": 60}, sub)
+    # Unknown duration: don't skip on missing metadata.
+    assert not main.is_too_long({"duration": None}, sub)
+    # No limit configured: never too long.
+    assert not main.is_too_long({"duration": 99999}, {})
+
+
 def test_resolve_download_rel(tmp_path):
     good = main.resolve_download_rel(tmp_path, "Chan/file.webm")
     assert good is not None and str(good).startswith(str(tmp_path))
