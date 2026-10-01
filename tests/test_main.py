@@ -3,6 +3,7 @@
 Run with: .venv/bin/python -m pytest tests/ -q
 """
 import hashlib
+import json
 import sys
 from pathlib import Path
 
@@ -320,6 +321,18 @@ def test_scan_downloads_attaches_subtitle_sidecars(tmp_path):
         "es-419": "Chan/Title [abcdefghijk].es-419.vtt",
     }
     assert entries["Other [bcdefghijkl].webm"]["subs"] == {}
+
+
+def test_record_manual_download_clears_watched(monkeypatch, tmp_path):
+    state_file = tmp_path / "state.json"
+    watched_file = tmp_path / "watched.json"
+    watched_file.write_text(json.dumps(["abcdefghijk", "bcdefghijkl"]))
+    monkeypatch.setattr(main, "STATE_FILE", state_file)
+    monkeypatch.setattr(main, "WATCHED_FILE", watched_file)
+    monkeypatch.setattr(main, "update_index_html", lambda *a, **kw: None)
+    main.record_manual_download("abcdefghijk", {"download_dir": str(tmp_path)})
+    assert json.loads(watched_file.read_text()) == ["bcdefghijkl"]
+    assert "abcdefghijk" in json.loads(state_file.read_text())
 
 
 def test_run_download_job_records_before_done(monkeypatch, tmp_path):

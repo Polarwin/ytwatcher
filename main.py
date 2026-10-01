@@ -3923,12 +3923,21 @@ def record_manual_download(video_id, settings):
     """Record a manually downloaded video: mark it seen and rebuild the index.
 
     The ID goes into state.json so the watcher never re-downloads the
-    video, even after the file is deleted via a watched mark.
+    video, even after the file is deleted via a watched mark. Any watched
+    mark is removed as well: manually (re-)downloading a video is an
+    explicit request to have it back — a stale mark would hide it and
+    let it be deleted again as watched.
     """
     with _state_lock, state_file_lock():
         seen = load_state()
         seen.add(video_id)
         save_state(seen)
+    with _watched_lock:
+        watched = load_watched()
+        if video_id in watched:
+            watched.discard(video_id)
+            save_watched(watched)
+            log.info("manual download: removed watched mark for %s", video_id)
     update_index_html(
         settings.get("download_dir", "/srv/files"),
         api_port=settings.get("api_port", DEFAULT_API_PORT),
