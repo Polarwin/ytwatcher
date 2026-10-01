@@ -320,3 +320,29 @@ def test_scan_downloads_attaches_subtitle_sidecars(tmp_path):
         "es-419": "Chan/Title [abcdefghijk].es-419.vtt",
     }
     assert entries["Other [bcdefghijkl].webm"]["subs"] == {}
+
+
+def test_run_download_job_records_before_done(monkeypatch, tmp_path):
+    # The web UI reloads as soon as the job flips to done; the index
+    # rebuild (record_manual_download) must happen before that, or the
+    # queue-next lookup misses and a wrong file gets queued.
+    monkeypatch.setattr(main, "download_manually",
+                        lambda url, out_dir, fmt=None, job_id=None:
+                        ("abcdefghijk", tmp_path / "f.webm"))
+    statuses_at_record = []
+
+    def fake_record(video_id, settings):
+        with main._download_jobs_lock:
+            statuses_at_record.append(main._download_jobs["j1"]["status"])
+
+    monkeypatch.setattr(main, "record_manual_download", fake_record)
+    main._download_jobs["j1"] = {"id": "j1", "status": "running"}
+    try:
+        main.run_download_job("j1", "https://x", "720",
+                              {"download_dir": str(tmp_path)})
+        job = main._download_jobs["j1"]
+        assert statuses_at_record == ["running"]
+        assert job["status"] == "done"
+        assert job["video_id"] == "abcdefghijk"
+    finally:
+        main._download_jobs.pop("j1", None)

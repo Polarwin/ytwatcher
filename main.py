@@ -3950,6 +3950,19 @@ def run_download_job(job_id, url, quality, settings):
         result = None
         error = str(e)
         log.error("manual download job %s errored: %s", job_id, e)
+    if result is not None:
+        try:
+            # Record (state + index rebuild) BEFORE flipping the job to
+            # done: the web UI reloads as soon as it sees done, and the
+            # reloaded page must already list the new file — otherwise
+            # its queue-next lookup misses and the fallback queues the
+            # first file in the manually section instead.
+            record_manual_download(result[0], settings)
+        except Exception as e:
+            # Only the state.json record and index rebuild failed.
+            log.error("manual download job %s: could not record %s: %s",
+                      job_id, result[0], e)
+        log.info("manual download job %s done: %s", job_id, result[0])
     with _download_jobs_lock:
         job = _download_jobs.get(job_id)
         if job is not None:
@@ -3960,15 +3973,6 @@ def run_download_job(job_id, url, quality, settings):
             else:
                 job["status"] = "done"
                 job["video_id"] = result[0]
-    if result is not None:
-        try:
-            record_manual_download(result[0], settings)
-        except Exception as e:
-            # The job is already marked done; only the state.json record
-            # and index rebuild failed.
-            log.error("manual download job %s: could not record %s: %s",
-                      job_id, result[0], e)
-        log.info("manual download job %s done: %s", job_id, result[0])
 
 
 def resolve_download_rel(download_dir, rel):
