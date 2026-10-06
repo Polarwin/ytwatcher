@@ -4484,6 +4484,35 @@ def fetch_description(video_id):
     return result.stdout
 
 
+def fetch_original_title(video_id):
+    """Return the video's original-language title, or None on failure.
+
+    Channel listings sometimes serve a translated title (YouTube
+    localizes metadata per client language), which original-language
+    exclude keywords can't match. The single-video metadata query
+    returns the original title — the same one the download uses for the
+    filename. One extra metadata query per call.
+    """
+    cmd = [
+        YT_DLP,
+        "--skip-download",
+        "--print", "%(title)s",
+        f"https://www.youtube.com/watch?v={video_id}",
+    ]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+    except Exception as e:
+        log.warning("could not fetch title for %s: %s", video_id, e)
+        return None
+    if result.returncode != 0:
+        log.warning(
+            "could not fetch title for %s: %s",
+            video_id, result.stderr.strip()[:200],
+        )
+        return None
+    return result.stdout.strip()
+
+
 def is_too_old(video, settings, now):
     """Return True if the video is older than settings.max_video_age_days.
 
@@ -4604,6 +4633,20 @@ def process_subscription(sub, settings, seen, failed, scan_only=False):
                     log.info("[%s] matched in description: %s", name, video["title"])
             if not description_matched:
                 log.info("[%s] new, no match: %s", name, video["title"])
+                if not scan_only:
+                    seen.add(video["id"])
+                continue
+        if sub.get("exclude"):
+            # The listing may serve a translated title that original-
+            # language exclude keywords can't match; re-check candidates
+            # against the video's original title (one extra metadata
+            # query, only for subscriptions with exclude rules).
+            original_title = fetch_original_title(video["id"])
+            if original_title and original_title != video["title"] and any(
+                    kw.lower() in original_title.lower()
+                    for kw in sub["exclude"]):
+                log.info("[%s] excluded by original title: %s (%s)",
+                         name, video["title"], original_title)
                 if not scan_only:
                     seen.add(video["id"])
                 continue
