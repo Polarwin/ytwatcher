@@ -331,8 +331,29 @@ def test_record_manual_download_clears_watched(monkeypatch, tmp_path):
     monkeypatch.setattr(main, "WATCHED_FILE", watched_file)
     monkeypatch.setattr(main, "update_index_html", lambda *a, **kw: None)
     main.record_manual_download("abcdefghijk", {"download_dir": str(tmp_path)})
-    assert json.loads(watched_file.read_text()) == ["bcdefghijkl"]
+    # Legacy list entries migrate to marks with timestamp 0.
+    assert json.loads(watched_file.read_text()) == {"bcdefghijkl": 0}
     assert "abcdefghijk" in json.loads(state_file.read_text())
+
+
+def test_watched_marks_roundtrip_and_migration(monkeypatch, tmp_path):
+    watched_file = tmp_path / "watched.json"
+    monkeypatch.setattr(main, "WATCHED_FILE", watched_file)
+    main.save_watched_marks({"b": 123.0, "a": 456.0})
+    assert main.load_watched_marks() == {"a": 456.0, "b": 123.0}
+    assert main.load_watched() == {"a", "b"}
+    # Legacy list format migrates to marks due immediately (ts 0).
+    watched_file.write_text(json.dumps(["abcdefghijk"]))
+    assert main.load_watched_marks() == {"abcdefghijk": 0}
+    assert main.load_watched() == {"abcdefghijk"}
+
+
+def test_watched_marks_due():
+    now = 10000.0
+    marks = {"fresh": now - 60, "old": now - 7200, "legacy": 0}
+    assert main.watched_marks_due(marks, 90, now=now) == {"old", "legacy"}
+    assert main.watched_marks_due(marks, 0, now=now) == set(marks)
+    assert main.watched_marks_due(marks, None, now=now) == set(marks)
 
 
 def test_run_download_job_records_before_done(monkeypatch, tmp_path):

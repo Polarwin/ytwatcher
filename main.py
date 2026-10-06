@@ -77,6 +77,9 @@ MAX_DOWNLOAD_ATTEMPTS = 5
 # subscriptions.yaml.
 DEFAULT_API_PORT = 8791
 
+# Default grace period before watched-marked files are deleted (minutes).
+DEFAULT_WATCHED_GRACE_MINUTES = 90
+
 # Title shown on the generated index.html page (<title> and <h1>).
 # Overridable via settings.site_title in subscriptions.yaml.
 DEFAULT_SITE_TITLE = "Downloads"
@@ -178,7 +181,7 @@ def validate_config(config):
     else:
         for key in ("check_interval_minutes", "recent_videos_to_scan",
                     "api_port", "max_video_age_days", "watchlist_max_age_days",
-                    "latest_max_age_days"):
+                    "latest_max_age_days", "watched_grace_minutes"):
             if key in settings and not isinstance(settings[key], (int, float)):
                 problems.append(f"settings.{key}: must be a number")
         if "api_host" in settings and not isinstance(settings["api_host"], str):
@@ -448,22 +451,59 @@ _download_jobs_lock = threading.Lock()
 
 
 
-def load_watched():
-    """Return the set of video IDs the user marked as watched."""
+def load_watched_marks():
+    """Return {video_id: marked_at_epoch} for watched-marked videos.
+
+    File format is a JSON object mapping ID to mark time. The legacy
+    format (a plain list of IDs) is migrated transparently: those marks
+    get timestamp 0, i.e. they are immediately due for deletion.
+    """
     if WATCHED_FILE.exists():
         try:
             with open(WATCHED_FILE, "r", encoding="utf-8") as f:
-                return set(json.load(f))
+                data = json.load(f)
         except (json.JSONDecodeError, OSError) as e:
             log.warning("Could not read watched.json (%s); starting fresh", e)
-    return set()
+            return {}
+        if isinstance(data, list):
+            return {vid: 0 for vid in data if isinstance(vid, str)}
+        if isinstance(data, dict):
+            marks = {}
+            for vid, ts in data.items():
+                if not isinstance(vid, str):
+                    continue
+                try:
+                    marks[vid] = float(ts)
+                except (TypeError, ValueError):
+                    marks[vid] = 0
+            return marks
+    return {}
 
 
-def save_watched(watched):
+def save_watched_marks(marks):
     tmp = _tmp_path(WATCHED_FILE)
     with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(sorted(watched), f, indent=1)
+        json.dump({vid: marks[vid] for vid in sorted(marks)}, f, indent=1)
     tmp.replace(WATCHED_FILE)
+
+
+def load_watched():
+    """Return the set of video IDs the user marked as watched."""
+    return set(load_watched_marks())
+
+
+def watched_marks_due(marks, grace_minutes, now=None):
+    """IDs whose watched mark is older than grace_minutes.
+
+    A grace of 0/None means every mark is due immediately. Marks with
+    timestamp 0 (migrated from the legacy format) are always due.
+    """
+    if not grace_minutes:
+        return set(marks)
+    if now is None:
+        now = time.time()
+    grace_seconds = grace_minutes * 60
+    return {vid for vid, ts in marks.items() if now - ts >= grace_seconds}
 
 
 def fetch_recent_videos(channel_url, limit):
@@ -986,7 +1026,7 @@ def scan_downloads(download_dir, files=None):
 # Bump when the index.html template changes: the fingerprint below only
 # covers the file listing, so without this an existing index.html would
 # keep the old template until some video is added or removed.
-INDEX_TEMPLATE_VERSION = 89
+INDEX_TEMPLATE_VERSION = 90
 
 
 def static_folder_url(item):
@@ -1213,7 +1253,8 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "    #pl-video.audio-only { height: 5.5rem; }",
         "    #pl-subs { margin-top: .4rem; padding: .35rem .6rem; min-height: 1.4em;",
         "      text-align: center; font-size: 1.05rem; line-height: 1.3; color: #fff;",
-        "      background: #000; border-radius: 4px; }",
+        "      background: #000; border-radius: 4px; white-space: pre-line;",
+        "      user-select: text; -webkit-user-select: text; cursor: text; }",
         "    #pl-now { color: #8ab4f8; margin-top: .5rem; font-size: .95rem; }",
         "    li.pl-current a { color: #7bd88a; }",
         "    li.pl-current-video .entry-row > a { color: #7bd88a; }",
@@ -1315,6 +1356,8 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         '      <div id="pl-player" hidden>',
         '        <video id="pl-video" controls playsinline></video>',
         '        <div id="pl-subs" hidden></div>',
+        '        <button id="pl-copy-subs" type="button" hidden>Copy subtitles</button>',
+        '        <span id="pl-copy-status" role="status"></span>',
         '        <div id="pl-now"></div>',
         '      </div>',
         '      <div class="pl-controls">',
@@ -1782,12 +1825,46 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "  var plVideo = document.getElementById(\"pl-video\");",
         "  var plNow = document.getElementById(\"pl-now\");",
         "  var plSubsEl = document.getElementById(\"pl-subs\");",
+        '  var plCopySubs = document.getElementById("pl-copy-subs");',
+        '  var plCopyStatus = document.getElementById("pl-copy-status");',
+        "  function plSetSubtitleText(text) {",
+        "    // Keep the text node intact between cue changes so selection survives.",
+        "    if (plSubsEl.textContent !== text) {",
+        "      plSubsEl.textContent = text;",
+        '      plCopyStatus.textContent = "";',
+        "    }",
+        "    plSubsEl.hidden = !text;",
+        "    plCopySubs.hidden = !text;",
+        "  }",
+        '  plSubsEl.addEventListener("pointerdown", function () { plVideo.pause(); });',
+        '  plCopySubs.addEventListener("click", function () {',
+        "    plVideo.pause();",
+        "    var text = plSubsEl.textContent;",
+        "    if (!text) return;",
+        "    function selectText() {",
+        "      var range = document.createRange();",
+        "      range.selectNodeContents(plSubsEl);",
+        "      var selection = window.getSelection();",
+        "      selection.removeAllRanges();",
+        "      selection.addRange(range);",
+        '      plCopyStatus.textContent = "Text selected — use Copy from your browser menu.";',
+        "    }",
+        "    if (!navigator.clipboard || !navigator.clipboard.writeText) { selectText(); return; }",
+        "    navigator.clipboard.writeText(text).then(function () {",
+        '      plCopyStatus.textContent = "Copied";',
+        "    }).catch(selectText);",
+        "  });",
         "  var plRepeat = document.getElementById(\"pl-repeat\");",
         "  var plAutowatch = document.getElementById(\"pl-autowatch\");",
         "  var plAutolatest = document.getElementById(\"pl-autolatest\");",
         "  // Attach subtitle tracks stored on the playlist item",
         "  // (data-subs on the source li, see scan_downloads).",
         "  function plApplyTracks(item) {",
+        "    ++plSubRequest;",
+        "    plSubCues = null;",
+        "    plSubForHref = null;",
+        '    plSetSubtitleText("");',
+        '    plVideo.classList.remove("audio-only");',
         '    plVideo.querySelectorAll("track").forEach(function (t) { t.remove(); });',
         "    if (!item.subs) return;",
         "    var subs;",
@@ -1802,6 +1879,7 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "      tr.src = subs[lang];",
         "      if (first) { tr.default = true; first = false; }",
         "      plVideo.appendChild(tr);",
+        '      tr.track.addEventListener("cuechange", plUpdateSubs);',
         "    });",
         "  }",
         "  // Custom subtitle overlay for audio-only playback (native cues",
@@ -1834,10 +1912,10 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "    return cues;",
         "  }",
         "  function plLoadSubs(item) {",
+        "    var request = ++plSubRequest;",
         "    plSubCues = null;",
         "    plSubForHref = null;",
-        "    plSubsEl.hidden = true;",
-        '    plSubsEl.textContent = "";',
+        '    plSetSubtitleText("");',
         "    if (!item || !item.subs) return;",
         "    var subs;",
         "    try { subs = JSON.parse(item.subs); } catch (e) { subs = null; }",
@@ -1852,6 +1930,7 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         '      if (!r.ok) throw new Error("HTTP " + r.status);',
         "      return r.text();",
         "    }).then(function (text) {",
+        "      if (request !== plSubRequest || plIndex < 0 || pl[plIndex] !== item) return;",
         "      plSubCues = plParseVtt(text);",
         "      plSubForHref = item.href;",
         "      plSubsEl.hidden = false;",
@@ -1859,6 +1938,17 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "    }).catch(function () {});",
         "  }",
         "  function plUpdateSubs() {",
+        '    if (!plVideo.classList.contains("audio-only")) {',
+        "      var lines = [];",
+        "      Array.from(plVideo.textTracks).forEach(function (track) {",
+        '        if (track.mode !== "showing") return;',
+        "        Array.from(track.activeCues || []).forEach(function (cue) {",
+        "          lines.push(cue.getCueAsHTML ? cue.getCueAsHTML().textContent : cue.text);",
+        "        });",
+        "      });",
+        '      plSetSubtitleText(lines.join("\\n"));',
+        "      return;",
+        "    }",
         "    if (!plSubCues || plIndex < 0 || !pl[plIndex]",
         "        || plSubForHref !== pl[plIndex].href) return;",
         "    var t = plVideo.currentTime;",
@@ -1866,8 +1956,10 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "    for (var i = 0; i < plSubCues.length; i++) {",
         "      if (plSubCues[i].start <= t && t < plSubCues[i].end) text = plSubCues[i].text;",
         "    }",
-        "    plSubsEl.textContent = text;",
+        "    plSetSubtitleText(text);",
         "  }",
+        "  var plSubRequest = 0;",
+        '  plVideo.textTracks.addEventListener("change", plUpdateSubs);',
         "  var plIndex = -1;",
         "  var plDragIndex = -1;",
         "  function plItemId(item) {",
@@ -2145,7 +2237,7 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "      plLoadSubs(pl[plIndex]);",
         "    } else {",
         "      plSubCues = null;",
-        "      plSubsEl.hidden = true;",
+        "      plUpdateSubs();",
         "    }",
         "    if (SPEED_BY_CHANNEL[channel]) {",
         "      plVideo.playbackRate = SPEED_BY_CHANNEL[channel];",
@@ -2841,6 +2933,7 @@ def update_index_html(download_dir, api_port=DEFAULT_API_PORT,
     tagged "old" and hidden by default; each section gets a "show all"
     button that reveals them (they stay on disk either way); the
     "manually" folder is exempt. Watched files are deleted from disk
+    once their mark is older than settings.watched_grace_minutes,
     except for keep_watched subscriptions, whose files stay in place
     and are listed dimmed (watched.json is the log).
 
@@ -3212,12 +3305,12 @@ class ApiHandler(BaseHTTPRequestHandler):
             if not VIDEO_ID_API_RE.fullmatch(video_id):
                 raise ValueError(f"bad video id: {video_id!r}")
             with _watched_lock:
-                watched = load_watched()
+                marks = load_watched_marks()
                 if data.get("watched"):
-                    watched.add(video_id)
+                    marks[video_id] = time.time()
                 else:
-                    watched.discard(video_id)
-                save_watched(watched)
+                    marks.pop(video_id, None)
+                save_watched_marks(marks)
             log.info(
                 "marked %s: %s",
                 "watched" if data.get("watched") else "unwatched", video_id,
@@ -3829,7 +3922,7 @@ def download_video(sub, video, download_dir, subdir=None):
             # real subtitles (yt-dlp skips auto subs that duplicate real
             # ones).
             "--write-auto-subs",
-            "--sub-langs", ",".join(sub_langs),
+            "--sub-langs", restricted_subtitle_languages(",".join(sub_langs)),
             # The web player needs WebVTT; YouTube also serves srv*/json3.
             "--convert-subs", "vtt",
         ]
@@ -3933,10 +4026,10 @@ def record_manual_download(video_id, settings):
         seen.add(video_id)
         save_state(seen)
     with _watched_lock:
-        watched = load_watched()
-        if video_id in watched:
-            watched.discard(video_id)
-            save_watched(watched)
+        marks = load_watched_marks()
+        if video_id in marks:
+            marks.pop(video_id)
+            save_watched_marks(marks)
             log.info("manual download: removed watched mark for %s", video_id)
     update_index_html(
         settings.get("download_dir", "/srv/files"),
@@ -4128,28 +4221,53 @@ def extract_audio_only(path):
     return final_path
 
 
+ALLOWED_SUBTITLE_LANGUAGES = ("zh", "en", "de", "fr", "es", "nl")
+
+
+def allowed_subtitle_language(code):
+    return code.split("-", 1)[0].lower() in ALLOWED_SUBTITLE_LANGUAGES
+
+
+def restricted_subtitle_languages(langs):
+    """Intersect yt-dlp selectors (including 'all') with our allowed languages."""
+    allowed = "|".join(ALLOWED_SUBTITLE_LANGUAGES)
+    return langs + ",-(?!(?:" + allowed + r")(?:-|$)).*"
+
+
 def original_subtitle_language(info):
     """Prefer the original language, with published captions before auto."""
-    published = info.get("subtitles") or {}
-    automatic = info.get("automatic_captions") or {}
+    published = {k: v for k, v in (info.get("subtitles") or {}).items()
+                 if allowed_subtitle_language(k) and v}
+    automatic = {k: v for k, v in (info.get("automatic_captions") or {}).items()
+                 if allowed_subtitle_language(k) and v}
     available = {**automatic, **published}
     originals = [lang[:-5] for lang in automatic if lang.endswith("-orig")]
     language = info.get("language")
-    candidates = originals + ([language] if language else [])
+    # Dubbed audio can have its own "-orig" captions too. The first such
+    # track is not necessarily the video's language (often it is Arabic).
+    # Trust the video's language first, and only infer from -orig when unique.
+    candidates = ([language] if language else [])
+    if len(originals) == 1:
+        candidates += originals
     for lang in candidates:
-        # The plain track may be published, while -orig is auto-generated.
-        if lang in published:
-            return lang
-        if lang + "-orig" in automatic:
-            return lang + "-orig"
-        if lang in automatic:
-            return lang
+        base = lang.split("-")[0].lower()
+        # Prefer published captions within the language family, even if
+        # the audio uses a regional code (en-US) and captions use en.
+        def same_language(code):
+            return code != "live_chat" and code.split("-")[0].lower() == base
+        for code in [lang, base, *published]:
+            if same_language(code) and published.get(code):
+                return code
+        for code in [lang + "-orig", base + "-orig", lang, base, *automatic]:
+            if same_language(code) and automatic.get(code):
+                return code
     # No original-language signal: prefer an available published track,
     # then English auto captions, then any available non-live auto track.
     for lang in [*published, "en", *automatic]:
         if lang != "live_chat" and available.get(lang):
             return lang
-    raise RuntimeError("No published or auto-generated subtitles available")
+    raise RuntimeError("No published or auto-generated subtitles available in "
+                       "Chinese, English, German, French, Spanish, or Dutch")
 
 
 def run_subtitle_download_job(job_id, path, video_id, settings, langs):
@@ -4172,7 +4290,7 @@ def run_subtitle_download_job(job_id, path, video_id, settings, langs):
                 # A failing translated/regional track must not prevent
                 # downloading the remaining matching caption tracks.
                 "--ignore-errors",
-                "--write-subs", "--write-auto-subs", "--sub-langs", langs,
+                "--write-subs", "--write-auto-subs", "--sub-langs", restricted_subtitle_languages(langs),
                 "--sub-format", "vtt/best", "--convert-subs", "vtt",
                 "-o", str(Path(folder) / (video_id + ".%(ext)s")),
                 f"https://www.youtube.com/watch?v={video_id}",
@@ -4549,17 +4667,22 @@ def run_round(config, seen, scan_only=False, telegram_token=None, telegram_chat_
     completed = []
     failed = load_failed()
     if not scan_only:
-        # Delete files the user marked as watched since the last round
-        # (keep_watched subscriptions keep theirs; the mark is a log
-        # entry only). One NFS tree walk
-        # is shared by the deletion, the index rebuild, and the watched
-        # mark pruning below (the walk is the slow part on NFS).
+        # Delete files the user marked as watched at least
+        # watched_grace_minutes ago (keep_watched subscriptions keep
+        # theirs; the mark is a log entry only). Fresh marks stay on
+        # disk for the grace period so playback can continue. One NFS
+        # tree walk is shared by the deletion, the index rebuild, and
+        # the watched mark pruning below (the walk is slow on NFS).
         download_dir = settings.get("download_dir", "/srv/files")
         files = walk_video_files(download_dir)
         keep_channels = {s["name"] for s in subs
                          if s.get("keep_watched") and "name" in s}
+        grace = settings.get("watched_grace_minutes",
+                             DEFAULT_WATCHED_GRACE_MINUTES)
+        with _watched_lock:
+            due = watched_marks_due(load_watched_marks(), grace)
         removed = delete_watched_videos(
-            download_dir, load_watched(), keep_channels, files=files)
+            download_dir, due, keep_channels, files=files)
         if removed:
             log.info("removed %d watched video(s)", len(removed))
             removed_set = set(removed)
@@ -4579,12 +4702,13 @@ def run_round(config, seen, scan_only=False, telegram_token=None, telegram_chat_
         # the deletion above (on the post-deletion file list) so marks
         # consumed by it are pruned too.
         with _watched_lock:
-            watched = load_watched()
-            pruned = prune_watched_marks(download_dir, watched, files=files)
-            if pruned != watched:
-                save_watched(pruned)
+            marks = load_watched_marks()
+            pruned = prune_watched_marks(download_dir, set(marks), files=files)
+            if pruned != set(marks):
+                save_watched_marks({vid: ts for vid, ts in marks.items()
+                                    if vid in pruned})
                 log.info("pruned %d dead watched mark(s)",
-                         len(watched) - len(pruned))
+                         len(marks) - len(pruned))
     for sub in subs:
         try:
             completed.extend(
