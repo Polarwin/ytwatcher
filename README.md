@@ -140,13 +140,12 @@ Original-language selection and fallback only consider these languages.
 Existing subtitle files are not removed by this restriction.
 
 When downloaded Spanish captions are available, ytwatcher asks the local
-OpenAI-compatible SmolLM API to create timing-matched English and Simplified
-Chinese VTT tracks. The defaults are
+OpenAI-compatible SmolLM API to create timing-matched English VTT tracks. The defaults are
 `http://127.0.0.1:8349/v1` and `SmolLM3-Q4_K_M.gguf`; set `YTWatcher_LLM_URL`
 or `YTWatcher_LLM_MODEL` in the service environment to change them.
 Translation generation is best-effort, so source Spanish captions remain
 available if the local API is stopped. In the playlist player, Spanish stays
-as the source subtitle; choose English or 中文 and click **Show translation**
+as the source subtitle; click **Show translation**
 to display its translation underneath during playback. The **Translate
 selection / subtitle** control also translates a selected word or phrase (or
 the current subtitle when nothing is selected) with the same local model.
@@ -220,7 +219,7 @@ setting survive page reloads, but are per-browser, like the watched
 marks.
 
 **Preload offline** caches each queued media file and its discovered subtitle
-sidecars, including the generated English and Chinese translations. The player
+sidecars, including the generated English translations. The player
 keeps Spanish visible and the **Show translation** button displays the chosen
 translation beneath it.
 

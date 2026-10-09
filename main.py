@@ -1364,7 +1364,7 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         '        <div id="pl-subs" hidden></div>',
         '        <div class="pl-controls">',
         '          <select id="pl-translate-target" aria-label="Translation language">',
-        '            <option value="en">English</option><option value="zh">中文</option>',
+        '            <option value="en">English</option>',
         '          </select>',
         '          <button id="pl-show-translation" type="button" aria-pressed="false">Show translation</button>',
         '          <span id="pl-subs-translation" hidden></span>',
@@ -4452,7 +4452,7 @@ def translate_vtt_batch(texts, target):
 
 
 def prebuild_spanish_translations(path):
-    """Create timing-preserving en/zh VTT sidecars for Spanish subtitles."""
+    """Create timing-preserving English VTT sidecars for Spanish subtitles."""
     media_stem = (path.name[:-len(path.suffix)]
                   if path.suffix.lower() in VIDEO_EXTENSIONS else path.name)
     try:
@@ -4519,7 +4519,7 @@ def prebuild_spanish_translations(path):
                 current = None
         if current:
             groups.append(current)
-        for lang in ("en", "zh"):
+        for lang in ("en",):
             target = source.with_name(source.name[:-4] + "." + lang + "-x-smollm.vtt")
             if target.exists() and target.stat().st_mtime >= source.stat().st_mtime:
                 continue
