@@ -76,6 +76,8 @@ MAX_DOWNLOAD_ATTEMPTS = 5
 # config editing, manual downloads). Overridable via settings.api_port in
 # subscriptions.yaml.
 DEFAULT_API_PORT = 8791
+LOCAL_LLM_URL = os.environ.get("YTWatcher_LLM_URL", "http://127.0.0.1:8349/v1")
+LOCAL_LLM_MODEL = os.environ.get("YTWatcher_LLM_MODEL", "SmolLM3-Q4_K_M.gguf")
 
 # Default grace period before watched-marked files are deleted (minutes).
 DEFAULT_WATCHED_GRACE_MINUTES = 90
@@ -999,9 +1001,10 @@ def scan_downloads(download_dir, files=None):
             except OSError:
                 vtt_cache[path.parent] = []
         subs = {}
+        media_stem = path.name[:-len(path.suffix)] if path.suffix else path.name
         for f in vtt_cache[path.parent]:
-            if f.startswith(path.stem + "."):
-                lang = f[len(path.stem) + 1:-len(".vtt")]
+            if f.startswith(media_stem + "."):
+                lang = f[len(media_stem) + 1:-len(".vtt")]
                 subs[lang] = (rel.parent / f).as_posix()
         groups.setdefault(channel, []).append({
             "rel": rel_posix,
@@ -1059,9 +1062,10 @@ def scan_static_media(items):
                     stat = path.stat()
                     rel = path.relative_to(root).as_posix()
                     subs = {}
+                    media_stem = path.name[:-len(path.suffix)] if path.suffix else path.name
                     for candidate in files:
-                        if candidate.startswith(path.stem + ".") and candidate.endswith(".vtt"):
-                            lang = candidate[len(path.stem) + 1:-4]
+                        if candidate.startswith(media_stem + ".") and candidate.endswith(".vtt"):
+                            lang = candidate[len(media_stem) + 1:-4]
                             sub = (path.parent / candidate).relative_to(root).as_posix()
                             subs[lang] = base + urllib.parse.quote(sub, safe="/")
                     entries.append({"name": rel, "href": base + urllib.parse.quote(rel, safe="/"),
@@ -1255,6 +1259,8 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "      text-align: center; font-size: 1.05rem; line-height: 1.3; color: #fff;",
         "      background: #000; border-radius: 4px; white-space: pre-line;",
         "      user-select: text; -webkit-user-select: text; cursor: text; }",
+        "    #pl-subs-translation { color: #a9d7ff; font-size: 1rem; text-align: center;",
+        "      white-space: pre-line; padding: .2rem .6rem; }",
         "    #pl-now { color: #8ab4f8; margin-top: .5rem; font-size: .95rem; }",
         "    li.pl-current a { color: #7bd88a; }",
         "    li.pl-current-video .entry-row > a { color: #7bd88a; }",
@@ -1356,6 +1362,15 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         '      <div id="pl-player" hidden>',
         '        <video id="pl-video" controls playsinline></video>',
         '        <div id="pl-subs" hidden></div>',
+        '        <div class="pl-controls">',
+        '          <select id="pl-translate-target" aria-label="Translation language">',
+        '            <option value="en">English</option><option value="zh">中文</option>',
+        '          </select>',
+        '          <button id="pl-show-translation" type="button" aria-pressed="false">Show translation</button>',
+        '          <span id="pl-subs-translation" hidden></span>',
+        '          <button id="pl-translate" type="button">Translate selection / subtitle</button>',
+        '          <span id="pl-translation" role="status"></span>',
+        '        </div>',
         '        <button id="pl-copy-subs" type="button" hidden>Copy subtitles</button>',
         '        <span id="pl-copy-status" role="status"></span>',
         '        <div id="pl-now"></div>',
@@ -1825,6 +1840,9 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "  var plVideo = document.getElementById(\"pl-video\");",
         "  var plNow = document.getElementById(\"pl-now\");",
         "  var plSubsEl = document.getElementById(\"pl-subs\");",
+        '  var plSubsTranslation = document.getElementById("pl-subs-translation");',
+        '  var plShowTranslation = document.getElementById("pl-show-translation");',
+        '  var plTranslateTarget = document.getElementById("pl-translate-target");',
         '  var plCopySubs = document.getElementById("pl-copy-subs");',
         '  var plCopyStatus = document.getElementById("pl-copy-status");',
         "  function plSetSubtitleText(text) {",
@@ -1836,6 +1854,15 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "    plSubsEl.hidden = !text;",
         "    plCopySubs.hidden = !text;",
         "  }",
+        '  var plTranslationCues = { en: null, zh: null };',
+        '  var plShowTranslationOn = false;',
+        '  plShowTranslation.addEventListener("click", function () {',
+        '    plShowTranslationOn = !plShowTranslationOn;',
+        '    plShowTranslation.setAttribute("aria-pressed", String(plShowTranslationOn));',
+        '    plShowTranslation.textContent = plShowTranslationOn ? "Hide translation" : "Show translation";',
+        '    plUpdateSubs();',
+        '  });',
+        '  plTranslateTarget.addEventListener("change", plUpdateSubs);',
         '  plSubsEl.addEventListener("pointerdown", function () { plVideo.pause(); });',
         '  plCopySubs.addEventListener("click", function () {',
         "    plVideo.pause();",
@@ -1854,6 +1881,20 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         '      plCopyStatus.textContent = "Copied";',
         "    }).catch(selectText);",
         "  });",
+        '  document.getElementById("pl-translate").addEventListener("click", function () {',
+        '    var sel = window.getSelection();',
+        '    var phrase = sel && sel.toString().trim();',
+        '    if (!phrase) phrase = plSubsEl.textContent.trim();',
+        '    var output = document.getElementById("pl-translation");',
+        '    if (!phrase) { output.textContent = "Select a word or wait for a subtitle."; return; }',
+        '    output.textContent = "Translating locally…";',
+        '    fetch(API + "/translate", { method: "POST",',
+        '      headers: { "Content-Type": "application/json" },',
+        '      body: JSON.stringify({ text: phrase, target: document.getElementById("pl-translate-target").value })',
+        '    }).then(function (r) { return r.json().then(function (d) { if (!r.ok) throw new Error(d.error); return d; }); })',
+        '      .then(function (d) { output.textContent = d.translation; })',
+        '      .catch(function (e) { output.textContent = "Translation failed: " + e.message; });',
+        '  });',
         "  var plRepeat = document.getElementById(\"pl-repeat\");",
         "  var plAutowatch = document.getElementById(\"pl-autowatch\");",
         "  var plAutolatest = document.getElementById(\"pl-autolatest\");",
@@ -1863,21 +1904,28 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "    ++plSubRequest;",
         "    plSubCues = null;",
         "    plSubForHref = null;",
+        '    plTranslationCues = { en: null, zh: null };',
         '    plSetSubtitleText("");',
+        '    plSubsTranslation.textContent = ""; plSubsTranslation.hidden = true;',
         '    plVideo.classList.remove("audio-only");',
         '    plVideo.querySelectorAll("track").forEach(function (t) { t.remove(); });',
         "    if (!item.subs) return;",
         "    var subs;",
         "    try { subs = JSON.parse(item.subs); } catch (e) { subs = null; }",
         "    if (!subs) return;",
-        "    var first = true;",
+        '    // SmolLM translations are shown below the Spanish source with the',
+        '    // in-player toggle; do not add them as replaceable native tracks.',
         "    Object.keys(subs).forEach(function (lang) {",
+        '      if (lang.indexOf("x-smollm") >= 0) return;',
         '      var tr = document.createElement("track");',
         '      tr.kind = "subtitles";',
-        "      tr.srclang = lang;",
-        "      tr.label = lang;",
+        '      tr.srclang = lang.split("-")[0];',
+        '      tr.label = lang.indexOf("x-smollm") >= 0 ? (lang.indexOf("zh") === 0 ? "中文 (SmolLM)" : "English (SmolLM)") : lang;',
         "      tr.src = subs[lang];",
-        "      if (first) { tr.default = true; first = false; }",
+        '      if (/^es(?:-|$)/.test(lang)) {',
+        '        plVideo.querySelectorAll("track[default]").forEach(function (old) { old.default = false; });',
+        '        tr.default = true;',
+        '      } else if (!lang.includes("x-smollm") && !plVideo.querySelector("track[default]")) tr.default = true;',
         "      plVideo.appendChild(tr);",
         '      tr.track.addEventListener("cuechange", plUpdateSubs);',
         "    });",
@@ -1888,6 +1936,7 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "  // the parser keeps only that newest line per cue.",
         "  var plSubCues = null;",
         "  var plSubForHref = null;",
+        '  var plTranslationForHref = null;',
         "  function plParseVtt(text) {",
         "    var cues = [];",
         "    text.split(/\\r?\\n\\r?\\n/).forEach(function (block) {",
@@ -1915,6 +1964,8 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "    var request = ++plSubRequest;",
         "    plSubCues = null;",
         "    plSubForHref = null;",
+        '    plTranslationCues = { en: null, zh: null };',
+        '    plTranslationForHref = item ? item.href : null;',
         '    plSetSubtitleText("");',
         "    if (!item || !item.subs) return;",
         "    var subs;",
@@ -1922,21 +1973,37 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "    if (!subs) return;",
         "    var langs = Object.keys(subs);",
         "    if (!langs.length) return;",
-        "    // Prefer the plain language code ('es', 'en') over variants",
-        "    // like 'es-orig' or 'es-419'.",
-        "    var plain = langs.filter(function (l) { return l.indexOf(\"-\") < 0; });",
-        "    var lang = plain.length ? plain[0] : langs[0];",
-        "    fetch(subs[lang]).then(function (r) {",
+        '    var originalLang = langs.find(function (l) { return l === "es" || /^es-/.test(l) && l.indexOf("x-smollm") < 0; });',
+        '    if (!originalLang) originalLang = langs.find(function (l) { return l.indexOf("x-smollm") < 0; });',
+        '    var loads = [];',
+        '    if (originalLang) loads.push(fetch(subs[originalLang]).then(function (r) {',
         '      if (!r.ok) throw new Error("HTTP " + r.status);',
         "      return r.text();",
         "    }).then(function (text) {",
         "      if (request !== plSubRequest || plIndex < 0 || pl[plIndex] !== item) return;",
         "      plSubCues = plParseVtt(text);",
         "      plSubForHref = item.href;",
-        "      plSubsEl.hidden = false;",
-        "      plUpdateSubs();",
-        "    }).catch(function () {});",
+        "    }).catch(function () {}));",
+        '    ["en", "zh"].forEach(function (target) {',
+        '      var key = langs.find(function (l) { return l.indexOf("." + target + "-x-smollm") >= 0; });',
+        '      if (!key) key = langs.find(function (l) { return l === target + "-x-smollm"; });',
+        '      if (!key) return;',
+        '      loads.push(fetch(subs[key]).then(function (r) { if (!r.ok) throw new Error("HTTP " + r.status); return r.text(); })',
+        '        .then(function (text) { if (request === plSubRequest && plIndex >= 0 && pl[plIndex] === item) plTranslationCues[target] = plParseVtt(text); })',
+        '        .catch(function () {}));',
+        '    });',
+        '    Promise.all(loads).then(function () { if (request === plSubRequest) plUpdateSubs(); });',
         "  }",
+        '  function plCurrentTranslation(time) {',
+        '    var cues = plTranslationCues[plTranslateTarget.value] || [];',
+        '    var text = "";',
+        '    for (var i = 0; i < cues.length; i++) if (cues[i].start <= time && time < cues[i].end) text = cues[i].text;',
+        '    return text;',
+        '  }',
+        '  function plSetTranslation(text) {',
+        '    plSubsTranslation.textContent = text;',
+        '    plSubsTranslation.hidden = !plShowTranslationOn || !text;',
+        '  }',
         "  function plUpdateSubs() {",
         '    if (!plVideo.classList.contains("audio-only")) {',
         "      var lines = [];",
@@ -1947,6 +2014,7 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "        });",
         "      });",
         '      plSetSubtitleText(lines.join("\\n"));',
+        '      plSetTranslation(plCurrentTranslation(plVideo.currentTime));',
         "      return;",
         "    }",
         "    if (!plSubCues || plIndex < 0 || !pl[plIndex]",
@@ -1957,6 +2025,7 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "      if (plSubCues[i].start <= t && t < plSubCues[i].end) text = plSubCues[i].text;",
         "    }",
         "    plSetSubtitleText(text);",
+        '    plSetTranslation(plCurrentTranslation(t));',
         "  }",
         "  var plSubRequest = 0;",
         '  plVideo.textTracks.addEventListener("change", plUpdateSubs);',
@@ -2237,6 +2306,7 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "      plLoadSubs(pl[plIndex]);",
         "    } else {",
         "      plSubCues = null;",
+        "      plLoadSubs(pl[plIndex]);",
         "      plUpdateSubs();",
         "    }",
         "    if (SPEED_BY_CHANNEL[channel]) {",
@@ -2496,15 +2566,23 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "    try {",
         "      var cache = await caches.open(\"ytwatcher-media-v1\");",
         "      var done = 0, failed = 0;",
-        "      for (var i = 0; i < pl.length; i++) {",
-        "        btn.textContent = \"Caching \" + (i + 1) + \"/\" + pl.length + \"…\";",
+        "      var resources = [];",
+        "      pl.forEach(function (item) {",
+        "        resources.push(item.href);",
+        "        var subs;",
+        "        try { subs = JSON.parse(item.subs || \"{}\"); } catch (e) { subs = {}; }",
+        "        Object.keys(subs).forEach(function (lang) { resources.push(subs[lang]); });",
+        "      });",
+        "      resources = Array.from(new Set(resources));",
+        "      for (var i = 0; i < resources.length; i++) {",
+        "        btn.textContent = \"Caching \" + (i + 1) + \"/\" + resources.length + \"…\";",
         "        try {",
-        "          var cached = await cache.match(pl[i].href, { ignoreSearch: true });",
-        "          if (!cached) await cache.add(pl[i].href);",
+        "          var cached = await cache.match(resources[i], { ignoreSearch: true });",
+        "          if (!cached) await cache.add(resources[i]);",
         "          done++;",
         "        } catch (e) { failed++; }",
         "      }",
-        "      btn.textContent = \"✓ cached: \" + done + (failed ? \" (\" + failed + \" failed)\" : \"\");",
+        "      btn.textContent = \"✓ cached: \" + done + \" media/subtitle files\" + (failed ? \" (\" + failed + \" failed)\" : \"\");",
         "    } catch (e) {",
         "      window.alert(\"Preload failed: \" + (e.message || e));",
         "      btn.textContent = label;",
@@ -3079,7 +3157,8 @@ def delete_watched_videos(download_dir, watched_ids, keep_channels=(), files=Non
             try:
                 sidecars = [
                     p for p in path.parent.iterdir()
-                    if p.suffix == ".vtt" and p.name.startswith(path.stem + ".")
+                    if p.suffix == ".vtt" and p.name.startswith(
+                        path.name[:-len(path.suffix)] + ".")
                 ]
             except OSError:
                 sidecars = []
@@ -3286,6 +3365,8 @@ class ApiHandler(BaseHTTPRequestHandler):
             self._post_video_upgrade()
         elif self.path == "/subtitle-download":
             self._post_video_upgrade(subtitles=True)
+        elif self.path == "/translate":
+            self._post_translate()
         elif self.path == "/audio-convert":
             self._post_audio_convert()
         elif self.path == "/rebuild-index":
@@ -3318,7 +3399,24 @@ class ApiHandler(BaseHTTPRequestHandler):
             self._json(200, {"ok": True})
         except (ValueError, json.JSONDecodeError) as e:
             log.warning("bad /watched request: %s", e)
+
+    def _post_translate(self):
+        try:
+            body = self._read_body()
+            if body is None:
+                return
+            data = json.loads(body or b"{}")
+            phrase = data.get("text", "")
+            target = data.get("target", "en")
+            if not isinstance(phrase, str) or not phrase.strip() or len(phrase) > 500:
+                raise ValueError("text must contain 1 to 500 characters")
+            if target not in ("en", "zh"):
+                raise ValueError("target must be en or zh")
+            self._json(200, {"translation": translate_local(phrase.strip(), target)})
+        except (ValueError, json.JSONDecodeError) as e:
             self._json(400, {"error": str(e)})
+        except Exception as e:
+            self._json(503, {"error": str(e)})
 
     def _post_config(self):
         body = self._read_body()
@@ -3952,6 +4050,12 @@ def download_video(sub, video, download_dir, subdir=None):
             sub["name"], video["id"],
         )
         return "failed", None, None
+    if sub_langs:
+        try:
+            prebuild_spanish_translations(downloaded)
+        except Exception as exc:
+            log.warning("[%s] SmolLM translation unavailable for %s: %s",
+                        sub["name"], video["id"], exc)
     return "ok", downloaded, parse_duration_print(result.stdout)
 
 
@@ -4270,6 +4374,177 @@ def original_subtitle_language(info):
                        "Chinese, English, German, French, Spanish, or Dutch")
 
 
+def translate_local(text, target):
+    """Translate text with the configured local OpenAI-compatible SmolLM API."""
+    language = "English" if target == "en" else "Simplified Chinese"
+    response = local_llm_post(
+        {"model": LOCAL_LLM_MODEL, "temperature": 0.1, "max_tokens": 512,
+         "chat_template_kwargs": {"enable_thinking": False},
+         "messages": [{"role": "system", "content":
+             "Translate the user's text into " + language +
+             ". Return only the translation, with no explanation."},
+             {"role": "user", "content": text}]}, timeout=120)
+    response.raise_for_status()
+    result = response.json()["choices"][0]["message"]["content"].strip()
+    if not result:
+        raise RuntimeError("Local model returned an empty translation")
+    return result
+
+
+def local_llm_post(payload, timeout):
+    """Post to the single-request local model gateway, waiting if it is busy."""
+    url = LOCAL_LLM_URL.rstrip("/") + "/chat/completions"
+    for attempt in range(60):
+        response = requests.post(url, json=payload, timeout=timeout)
+        if response.status_code != 429:
+            return response
+        try:
+            error = response.json().get("error", {}).get("message", "")
+        except (ValueError, AttributeError):
+            error = ""
+        if "already running" not in error.lower() and "busy" not in error.lower():
+            response.raise_for_status()
+        if attempt == 0 or attempt % 6 == 0:
+            log.info("SmolLM is busy; waiting before retry %d", attempt + 1)
+        time.sleep(5)
+    response.raise_for_status()
+
+
+def translate_vtt_batch(texts, target):
+    language = "English" if target == "en" else "Simplified Chinese"
+    prompt = ("Translate each Spanish subtitle line into " + language +
+              ". Return a JSON object with one property named translations. "
+              "The translations array must contain exactly " + str(len(texts)) +
+              " strings. Keep each input item at the same index: translate it "
+              "alone, without combining, splitting, omitting, or adding items. "
+              "An empty input string must remain empty. No explanations. "
+              "Input JSON: " + json.dumps(texts, ensure_ascii=False))
+    response = local_llm_post(
+        {"model": LOCAL_LLM_MODEL, "temperature": 0.1, "max_tokens": 2048,
+         "chat_template_kwargs": {"enable_thinking": False},
+         "response_format": {"type": "json_object"},
+         "messages": [{"role": "user", "content": prompt}]}, timeout=600)
+    response.raise_for_status()
+    choice = response.json()["choices"][0]
+    content = choice["message"]["content"]
+    # OpenAI-compatible JSON mode requires an object. Ask the model to wrap
+    # its ordered cue array in a single "translations" property.
+    content = re.sub(r"^\s*```(?:json)?\s*|\s*```\s*$", "", content.strip())
+    try:
+        try:
+            decoded = json.loads(content)
+        except json.JSONDecodeError:
+            # Some local chat templates emit a bare backslash in a JSON string
+            # (for example, "\selective"). Escape only invalid JSON escapes.
+            repaired = re.sub(r'\\(?!["\\/bfnrtu0-9])', r"\\\\", content)
+            decoded = json.loads(repaired)
+    except json.JSONDecodeError:
+        decoded = None
+    result = decoded.get("translations") if isinstance(decoded, dict) else decoded
+    if not isinstance(result, list) or len(result) != len(texts) or not all(
+            isinstance(x, str) for x in result):
+        if len(texts) == 1:
+            return [translate_local(texts[0], target)]
+        log.warning("SmolLM merged or malformed a %d-line batch; retrying lines separately",
+                    len(texts))
+        return [translate_vtt_batch([text], target)[0] for text in texts]
+    return [value.replace("\\n", "\n") for value in result]
+
+
+def prebuild_spanish_translations(path):
+    """Create timing-preserving en/zh VTT sidecars for Spanish subtitles."""
+    media_stem = (path.name[:-len(path.suffix)]
+                  if path.suffix.lower() in VIDEO_EXTENSIONS else path.name)
+    try:
+        candidates = sorted(
+            path.parent / name for name in os.listdir(path.parent)
+            if name.startswith(media_stem + ".es") and name.endswith(".vtt")
+        )
+    except OSError:
+        candidates = []
+    plain_spanish = [p for p in candidates if p.name == media_stem + ".es.vtt"]
+    sources = plain_spanish or [p for p in candidates if "-orig" not in p.name]
+    if not sources:
+        sources = candidates
+    for source in sources:
+        original = source.read_text(encoding="utf-8-sig")
+        blocks = re.split(r"(\r?\n\s*\r?\n)", original)
+        cues = []
+        for block in blocks:
+            if "-->" not in block:
+                continue
+            lines = block.splitlines()
+            timing = next((j for j, line in enumerate(lines) if "-->" in line), -1)
+            if timing < 0:
+                continue
+            tm = re.search(r"(\d{2}:)?\d{2}:\d{2}\.\d+\s*-->\s*(\d{2}:)?\d{2}:\d{2}\.\d+", lines[timing])
+            if not tm:
+                continue
+            stamps = re.findall(r"(?:\d{2}:)?\d{2}:\d{2}\.\d+", tm.group(0))
+            def seconds(stamp):
+                parts = stamp.split(":")
+                return sum(float(part) * (60 ** (len(parts) - i - 1))
+                           for i, part in enumerate(parts))
+            # Auto captions can carry the preceding caption line forward in
+            # each cue. The player displays only the newest line for these
+            # rolling cues, so translate that line and avoid duplicated text.
+            cue_lines = [re.sub(r"<[^>]*>", "", x).strip()
+                         for x in lines[timing + 1:] if x.strip()]
+            cue_text = html.unescape(cue_lines[-1]) if cue_lines else ""
+            cues.append({"start": seconds(stamps[0]), "end": seconds(stamps[1]),
+                         "text": cue_text})
+        if not cues:
+            continue
+        # Roll-up auto captions repeat the previous line and reveal new text
+        # in fragments. Remove repeated frames, then join fragments into
+        # sentence-sized units so the model can translate with context.
+        groups, current = [], None
+        previous_text = None
+        for cue in cues:
+            text = cue["text"].strip()
+            if not text:
+                continue
+            if text == previous_text:
+                if current:
+                    current["end"] = cue["end"]
+                continue
+            previous_text = text
+            if current is None:
+                current = {"start": cue["start"], "end": cue["end"], "text": text}
+            else:
+                current["end"] = cue["end"]
+                current["text"] += " " + text
+            if re.search(r"[.!?。！？][\"'’”)]*$", current["text"]) or len(current["text"]) >= 600:
+                groups.append(current)
+                current = None
+        if current:
+            groups.append(current)
+        for lang in ("en", "zh"):
+            target = source.with_name(source.name[:-4] + "." + lang + "-x-smollm.vtt")
+            if target.exists() and target.stat().st_mtime >= source.stat().st_mtime:
+                continue
+            translated = []
+            for start in range(0, len(groups), 2):
+                translated.extend(translate_vtt_batch(
+                    [group["text"] for group in groups[start:start + 2]], lang))
+            def timestamp(value):
+                millis = round(value * 1000)
+                hours, millis = divmod(millis, 3_600_000)
+                minutes, millis = divmod(millis, 60_000)
+                seconds, millis = divmod(millis, 1000)
+                return f"{hours:02d}:{minutes:02d}:{seconds:02d}.{millis:03d}"
+            output = ["WEBVTT\n\n"]
+            for group, translation in zip(groups, translated):
+                output.append(f"{timestamp(group['start'])} --> {timestamp(group['end'])}\n")
+                output.append(translation + "\n\n")
+            tmp = _tmp_path(target)
+            try:
+                tmp.write_text("".join(output), encoding="utf-8")
+                tmp.replace(target)
+            finally:
+                tmp.unlink(missing_ok=True)
+
+
 def run_subtitle_download_job(job_id, path, video_id, settings, langs):
     """Fetch sidecars only; yt-dlp prefers manual captions per language."""
     error = None
@@ -4310,13 +4585,21 @@ def run_subtitle_download_job(job_id, path, video_id, settings, langs):
             if not path.is_file():
                 raise RuntimeError("The original media file is no longer available")
             for sidecar in sidecars:
-                target = path.parent / (path.stem + sidecar.name[len(video_id):])
+                media_stem = path.name[:-len(path.suffix)] if path.suffix else path.name
+                target = path.parent / (media_stem + sidecar.name[len(video_id):])
                 temporary = _tmp_path(target)
                 try:
                     shutil.copyfile(sidecar, temporary)
                     temporary.replace(target)
                 finally:
                     temporary.unlink(missing_ok=True)
+            # Translation is best-effort: the local SmolLM API may be busy or
+            # unavailable, but the source captions remain usable.
+            try:
+                prebuild_spanish_translations(path)
+            except Exception as exc:
+                log.warning("subtitle-download job %s: SmolLM translation unavailable: %s",
+                            job_id, exc)
             if result.returncode:
                 log.warning("subtitle-download job %s: some caption tracks failed", job_id)
         # Publish the refreshed page before signalling completion to the browser.
