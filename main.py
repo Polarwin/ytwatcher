@@ -1417,7 +1417,7 @@ def scan_downloads(download_dir, files=None):
 # Bump when the index.html template changes: the fingerprint below only
 # covers the file listing, so without this an existing index.html would
 # keep the old template until some video is added or removed.
-INDEX_TEMPLATE_VERSION = 94
+INDEX_TEMPLATE_VERSION = 95
 
 
 def static_folder_url(item):
@@ -2353,6 +2353,13 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "  // the parser keeps only that newest line per cue.",
         "  var plSubCues = null;",
         "  var plSubForHref = null;",
+        # VTT cue payloads carry HTML entities (&amp;, &#39;, ...). Decode
+        # them at parse time: undecoded, the parsed text never equals the
+        # rendered DOM textContent, and the subtitle box would be torn
+        # down and rebuilt on every timeupdate while such a cue is
+        # active — visible as screen flicker on mobile.
+        "  var plDecodeTa = document.createElement(\"textarea\");",
+        "  function plDecodeEntities(s) { plDecodeTa.innerHTML = s; return plDecodeTa.value; }",
         "  function plParseVtt(text) {",
         "    var cues = [];",
         "    text.split(/\\r?\\n\\r?\\n/).forEach(function (block) {",
@@ -2369,7 +2376,7 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "      var end = (+(m[5] || 0)) * 3600 + (+m[6]) * 60 + (+m[7]) + (+m[8]) / 1000;",
         "      var lines = [];",
         "      for (var j = ti + 1; j < blines.length; j++) {",
-        '        var l = blines[j].replace(/<[^>]+>/g, "").replace(/^>+\\s*/, "").trim();',
+        '        var l = plDecodeEntities(blines[j].replace(/<[^>]+>/g, "").replace(/^>+\\s*/, "")).trim();',
         "        if (l) lines.push(l);",
         "      }",
         "      if (lines.length) cues.push({ start: start, end: end, text: lines[lines.length - 1] });",
@@ -4446,7 +4453,9 @@ def download_video(sub, video, download_dir, subdir=None):
     subscription sets 'subtitles' (language codes, yt-dlp --sub-langs
     syntax like "es.*"), sidecar subtitles are downloaded too: real subs
     first, auto-generated ones for languages without them
-    (--write-auto-subs), normalized to .vtt. Returns
+    (--write-auto-subs), normalized to .vtt. A subtitle download failure
+    (e.g. HTTP 429) is retried once without subtitles, so the media still
+    lands: subtitles must not gate the download. Returns
     (status, file path, duration). status is "ok", "failed",
     "members_only", or "live"; path and duration are None unless "ok".
     """
@@ -4464,10 +4473,11 @@ def download_video(sub, video, download_dir, subdir=None):
         "--print", "after_move:%(filepath)s\t%(duration)s",
     ]
     sub_langs = sub.get("subtitles")
+    sub_flags = []
     if sub_langs:
         if isinstance(sub_langs, str):
             sub_langs = [sub_langs]
-        cmd += [
+        sub_flags = [
             "--write-subs",
             # Auto-generated captions fill in for languages that have no
             # real subtitles (yt-dlp skips auto subs that duplicate real
@@ -4477,8 +4487,16 @@ def download_video(sub, video, download_dir, subdir=None):
             # The web player needs WebVTT; YouTube also serves srv*/json3.
             "--convert-subs", "vtt",
         ]
-    cmd.append(f"https://www.youtube.com/watch?v={video['id']}")
-    result = run_yt_dlp(cmd)
+    url = f"https://www.youtube.com/watch?v={video['id']}"
+    result = run_yt_dlp(cmd + sub_flags + [url])
+    if result.returncode != 0 and sub_flags:
+        # A failed subtitle download (e.g. HTTP 429 on the timedtext API)
+        # makes yt-dlp exit 1 BEFORE the media is downloaded. The media is
+        # what matters: retry once without subtitle flags and accept a
+        # sub-less file. Sidecar subs from earlier attempts stay valid.
+        log.warning("[%s] %s: retrying without subtitles (media only)",
+                    sub["name"], video["id"])
+        result = run_yt_dlp(cmd + [url])
     if result.returncode != 0:
         if is_members_only_error(result.stderr):
             return "members_only", None, None
