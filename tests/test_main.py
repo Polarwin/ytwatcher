@@ -370,7 +370,10 @@ def test_build_subtitle_dictionary_job(monkeypatch, tmp_path):
                    "Hola comieron casa\n")
     monkeypatch.setattr(main, "DICTIONARY_FILE", tmp_path / "dictionary.json")
     monkeypatch.setattr(main, "_dictionary_cache", None)
-    monkeypatch.setattr(main, "_dictionary_llm",
+    # No lexicon: exercise the (mocked) network backend.
+    monkeypatch.setattr(main, "LEXICON_FILE", tmp_path / "no-lexicon.json")
+    monkeypatch.setattr(main, "_lexicon", None)
+    monkeypatch.setattr(main, "_dictionary_google",
                         lambda w: {"en": w + "!", "pos": "noun"})
     job = main.build_subtitle_dictionary("Chan/a.es.vtt", str(tmp_path))
     assert job and job["status"] == "running"
@@ -382,6 +385,66 @@ def test_build_subtitle_dictionary_job(monkeypatch, tmp_path):
     d = json.loads((tmp_path / "Chan" / "a.es.dict.json").read_text())
     assert set(d) == {"casa", "comieron", "hola"}
     assert d["hola"] == {"en": "hola!", "pos": "noun"}
+
+
+def test_spanish_infinitive(monkeypatch):
+    spanish_verbs = {"comer", "vivir", "hablar", "comer"}
+    monkeypatch.setattr(
+        main, "_wiktionary_spanish_verb",
+        lambda w: w in spanish_verbs if w in ("comer", "comir", "vivir",
+                                              "viver", "hablar", "casar")
+        else None)
+    assert main._spanish_infinitive("comieron") == "comer"
+    assert main._spanish_infinitive("vivieron") == "vivir"
+    assert main._spanish_infinitive("hablan") is None  # present tense: unsure
+    assert main._spanish_infinitive("casa") is None    # noun, not a verb form
+
+
+def test_dictionary_google_backend(monkeypatch):
+    translations = {"comieron": "they ate", "casa": "home"}
+    monkeypatch.setattr(main, "_google_translate_best",
+                        lambda w: translations.get(w))
+    monkeypatch.setattr(main, "_wiktionary_spanish_verb",
+                        lambda w: {"comer": True, "comir": False}.get(w))
+    assert main._dictionary_google("comieron") == {
+        "en": "they ate", "pos": "verb", "inf": "comer"}
+    assert main._dictionary_google("casa") == {"en": "home"}
+    monkeypatch.setattr(main, "_google_translate_best", lambda w: None)
+    assert main._dictionary_google("casa") is None
+
+
+def test_dictionary_lexicon_backend(monkeypatch, tmp_path):
+    lex = tmp_path / "lexicon-es.json"
+    lex.write_text(json.dumps({
+        "comer": {"e": "eat", "p": "verb"},
+        "comieron": {"e": "eat", "p": "verb", "i": "comer"},
+        # morphology without a translation: enriches the net result
+        "sintieron": {"p": "verb", "i": "sentir"},
+    }))
+    monkeypatch.setattr(main, "LEXICON_FILE", lex)
+    monkeypatch.setattr(main, "_lexicon", None)
+    monkeypatch.setattr(main, "DICTIONARY_FILE", tmp_path / "dictionary.json")
+    monkeypatch.setattr(main, "_dictionary_cache", None)
+    net = {"sintieron": {"en": "they felt"}}
+    monkeypatch.setattr(main, "_dictionary_google", lambda w: net.get(w))
+    # Lexicon hit: instant, offline, no network call.
+    assert main.dictionary_lookup("comieron") == {
+        "en": "eat", "pos": "verb", "inf": "comer"}
+    # Net result enriched with offline morphology.
+    assert main.dictionary_lookup("sintieron") == {
+        "en": "they felt", "pos": "verb", "inf": "sentir"}
+
+
+def test_google_translate_best_retries_languages(monkeypatch):
+    results = {("casa", "auto"): "casa", ("casa", "es"): "home"}
+    monkeypatch.setattr(
+        main, "_google_translate",
+        lambda w, lang="auto": results.get((w, lang)))
+    assert main._google_translate_best("casa") == "home"
+    # Echo in every language: return the word itself (proper noun).
+    monkeypatch.setattr(main, "_google_translate",
+                        lambda w, lang="auto": w)
+    assert main._google_translate_best("Pedro") == "Pedro"
 
 
 def test_watched_marks_due():

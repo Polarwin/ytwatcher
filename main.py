@@ -551,12 +551,157 @@ def _dictionary_llm(word):
     return result
 
 
-def dictionary_lookup(word):
-    """Translate word via the local LLM, caching results in dictionary.json.
+# --- Google Translate backend -------------------------------------------------
+#
+# The gtx/translate_a endpoints are bot-blocked from this network, but
+# the Chrome dictionary endpoint works and answers single words in
+# ~0.15s. It gives translations only, so verb class/infinitive come from
+# a local conjugation heuristic validated against the Wiktionary REST
+# API (which 404s non-words and tags entries with language/POS).
 
-    Lookups are serialized: the gateway runs one generation at a time,
-    so concurrent clicks would 429 each other. The first lookup after
-    an idle period can be slow (llama-server cold start).
+GOOGLE_DICT_URL = "https://clients5.google.com/translate_a/t"
+WIKTIONARY_URL = "https://en.wiktionary.org/api/rest_v1/page/definition/"
+
+
+def _google_translate(text, lang="auto", timeout=15):
+    """Translate via the Chrome-dict endpoint; returns text or None."""
+    resp = requests.get(GOOGLE_DICT_URL, params={
+        "client": "dict-chrome-ex", "sl": lang, "tl": "en", "q": text,
+    }, timeout=timeout)
+    resp.raise_for_status()
+    data = resp.json()
+    parts = []
+    for seg in data:
+        # Shape is [["translation"], ...]; language-detection misses come
+        # back as [[word, "detected-lang"]] — lists, skipped here.
+        if (seg and isinstance(seg, list) and isinstance(seg[0], str)
+                and seg[0]):
+            parts.append(seg[0])
+    return " ".join(parts).strip() or None
+
+
+def _google_translate_best(word):
+    """Translate, retrying with explicit source languages on echo/miss.
+
+    sl=auto echoes some single words ("casa"); es/de cover the
+    languages our subtitles come in. Returns the first translation
+    that differs from the input, else the last non-None result.
+    """
+    fallback = None
+    for lang in ("auto", "es", "de"):
+        try:
+            out = _google_translate(word, lang)
+        except Exception as e:
+            log.warning("google translate failed for %r (%s): %s",
+                        word, lang, e)
+            return fallback
+        if not out:
+            continue
+        fallback = out
+        if out.strip().lower() != word.strip().lower():
+            return out
+    return fallback
+
+
+def _wiktionary_spanish_verb(word, timeout=15):
+    """True/False: Wiktionary lists <word> as a Spanish verb; None on error."""
+    try:
+        resp = requests.get(
+            WIKTIONARY_URL + urllib.parse.quote(word, safe=""),
+            timeout=timeout, headers={"User-Agent": "ytwatcher-dict/1.0"})
+    except Exception:
+        return None
+    if resp.status_code == 404:
+        return False
+    if resp.status_code != 200:
+        return None
+    try:
+        data = resp.json()
+    except ValueError:
+        return None
+    for entries in data.values():
+        if not isinstance(entries, list):
+            continue
+        for entry in entries:
+            if (entry.get("language") == "Spanish"
+                    and "verb" in entry.get("partOfSpeech", "").lower()):
+                return True
+    return False
+
+
+# Strong verb endings only: present-tense endings are excluded because
+# they collide with nouns ("casa" the house vs. "casa" he marries) —
+# there a translation alone must carry the answer.
+_VERB_ENDINGS = (
+    ("ar", ("aríamos", "aríais", "ábamos", "asteis", "aremos", "abais",
+            "arán", "arás", "aría", "arías", "aron", "aban", "aste",
+            "ando", "ados", "adas", "ado", "ada", "é", "ad")),
+    ("er", ("eríamos", "eríais", "isteis", "eremos", "iendo", "eréis",
+            "ieron", "imos", "iste", "erán", "erás", "ería", "erías",
+            "erían", "íamos", "íais", "ían", "ías", "ía", "idos", "idas",
+            "ido", "ida", "í", "ed")),
+    ("ir", ("iríamos", "iríais", "isteis", "iremos", "iendo", "iréis",
+            "ieron", "imos", "iste", "irán", "irás", "iría", "irías",
+            "irían", "íamos", "íais", "ían", "ías", "ía", "idos", "idas",
+            "ido", "ida", "í", "id")),
+)
+
+
+def _spanish_infinitive(word):
+    """Best-effort dictionary infinitive for a conjugated Spanish verb.
+
+    Reconstructs candidates from strong conjugation endings (both
+    classes for endings shared by -er/-ir) and keeps those Wiktionary
+    confirms as Spanish verbs. Returns None when unsure — the
+    translation alone is then the whole answer.
+    """
+    w = word.lower()
+    candidates = []
+    if len(w) > 4 and w.endswith(("ar", "er", "ir")):
+        candidates.append(w)  # already an infinitive (amar, partir...)
+    for group, endings in _VERB_ENDINGS:
+        for end in endings:
+            if w.endswith(end) and len(w) - len(end) >= 2:
+                candidates.append(w[:-len(end)] + group)
+                break
+    seen = set()
+    for cand in candidates:
+        if cand in seen:
+            continue
+        seen.add(cand)
+        if _wiktionary_spanish_verb(cand):
+            return cand
+    return None
+
+
+def _dictionary_google(word):
+    """Google-backed lookup: translation + heuristic verb info. None on failure."""
+    try:
+        en = _google_translate_best(word)
+    except Exception as e:
+        log.warning("google translate failed for %r: %s", word, e)
+        return None
+    if not en:
+        return None
+    result = {"en": en}
+    try:
+        inf = _spanish_infinitive(word)
+    except Exception as e:
+        log.warning("infinitive heuristic failed for %r: %s", word, e)
+        inf = None
+    if inf:
+        result["pos"] = "verb"
+        result["inf"] = inf
+    elif word.lower().endswith("mente") and len(word) > 6:
+        result["pos"] = "adverb"
+    return result
+
+
+def dictionary_lookup(word):
+    """Translate word (Google; local-LLM fallback), caching in dictionary.json.
+
+    Lookups are serialized: the dict build job and live clicks share
+    one cache, and the LLM fallback runs one generation at a time.
     """
     key = word.lower()
     with _dictionary_lock:
@@ -575,7 +720,31 @@ def dictionary_lookup(word):
                     log.warning("could not read dictionary.json: %s", e)
         if key in _dictionary_cache:
             return _dictionary_cache[key]
-        result = _dictionary_llm(word)
+        lex = _lexicon_load().get(key)
+        if lex and lex.get("e"):
+            # Offline lexicon hit: instant, exact verb morphology.
+            result = {"en": lex["e"]}
+            if lex.get("p"):
+                result["pos"] = lex["p"]
+            if lex.get("i"):
+                result["inf"] = lex["i"]
+        else:
+            net = _dictionary_google(word) or _dictionary_llm(word)
+            if not net:
+                return None
+            result = {"en": net["en"]}
+            if net.get("pos"):
+                result["pos"] = net["pos"]
+            if net.get("inf"):
+                result["inf"] = net["inf"]
+            if lex:
+                # Offline morphology beats the online heuristic when
+                # the net result carries no verb info itself.
+                pos = result.get("pos") or lex.get("p", "")
+                if pos:
+                    result["pos"] = pos
+                if lex.get("i") and "inf" not in result:
+                    result["inf"] = lex["i"]
         if result:
             _dictionary_cache[key] = result
             try:
@@ -587,6 +756,33 @@ def dictionary_lookup(word):
             except OSError as e:
                 log.warning("could not save dictionary.json: %s", e)
         return result
+
+
+# --- Offline lexicon (built by build_lexicon.py from Kaikki/Wiktionary) ----
+#
+# First lookup backend: bundled, instant, works offline, and exact about
+# verb infinitives (conjugation tables). Entries look like
+# {"e": "eat", "p": "verb", "i": "comer"} ("i" only on conjugated forms).
+LEXICON_FILE = Path(__file__).parent / "lexicon-es.json"
+_lexicon = None
+
+
+def _lexicon_load():
+    global _lexicon
+    if _lexicon is None:
+        _lexicon = {}
+        if LEXICON_FILE.exists():
+            t0 = time.time()
+            try:
+                with open(LEXICON_FILE, encoding="utf-8") as f:
+                    data = json.load(f)
+                if isinstance(data, dict):
+                    _lexicon = data
+            except (json.JSONDecodeError, OSError) as e:
+                log.warning("could not read %s: %s", LEXICON_FILE, e)
+            log.info("lexicon: %d entries (%.1fs)",
+                     len(_lexicon), time.time() - t0)
+    return _lexicon
 
 
 VTT_WORD_RE = re.compile(r"[^\W\d_]+", re.UNICODE)
@@ -1215,7 +1411,7 @@ def scan_downloads(download_dir, files=None):
 # Bump when the index.html template changes: the fingerprint below only
 # covers the file listing, so without this an existing index.html would
 # keep the old template until some video is added or removed.
-INDEX_TEMPLATE_VERSION = 92
+INDEX_TEMPLATE_VERSION = 93
 
 
 def static_folder_url(item):
@@ -1452,7 +1648,7 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "    #pl-dict-close { position: absolute; top: .1rem; right: .3rem;",
         "      background: none; border: none; color: #bbb; cursor: pointer;",
         "      font-size: 1rem; }",
-        "    .pl-dict-word { color: #8ab4f8; font-weight: bold; }",
+        "    .pl-dict-word { color: #8ab4f8; font-weight: bold; margin-right: .5rem; }",
         "    .pl-dict-pos { color: #bbb; font-size: .85em; margin-left: .4rem; }",
         "    .pl-dict-inf { color: #7bd88a; margin-left: .4rem; }",
         "    #pl-now { color: #8ab4f8; margin-top: .5rem; font-size: .95rem; }",
