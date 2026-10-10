@@ -416,10 +416,11 @@ def test_dictionary_google_backend(monkeypatch):
 def test_dictionary_lexicon_backend(monkeypatch, tmp_path):
     lex = tmp_path / "lexicon-es.json"
     lex.write_text(json.dumps({
-        "comer": {"e": "eat", "p": "verb"},
-        "comieron": {"e": "eat", "p": "verb", "i": "comer"},
+        "comer": {"g": ["eat", "have"], "p": "verb"},
+        "comieron": {"g": ["eat"], "p": "verb", "i": "comer"},
         # morphology without a translation: enriches the net result
         "sintieron": {"p": "verb", "i": "sentir"},
+        "banco": {"e": "bank", "p": "noun"},  # legacy single-gloss format
     }))
     monkeypatch.setattr(main, "LEXICON_FILE", lex)
     monkeypatch.setattr(main, "_lexicon", None)
@@ -430,6 +431,11 @@ def test_dictionary_lexicon_backend(monkeypatch, tmp_path):
     # Lexicon hit: instant, offline, no network call.
     assert main.dictionary_lookup("comieron") == {
         "en": "eat", "pos": "verb", "inf": "comer"}
+    # Multiple meanings: first is primary, rest ride along.
+    assert main.dictionary_lookup("comer") == {
+        "en": "eat", "pos": "verb", "meanings": ["have"]}
+    # Legacy {"e": ...} entries still work.
+    assert main.dictionary_lookup("banco") == {"en": "bank", "pos": "noun"}
     # Net result enriched with offline morphology.
     assert main.dictionary_lookup("sintieron") == {
         "en": "they felt", "pos": "verb", "inf": "sentir"}

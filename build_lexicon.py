@@ -5,11 +5,12 @@ One-time step (per language): downloads the word list from kaikki.org
 (~1 GB JSONL, streamed) and produces lexicon-<lang>.json next to this
 script, e.g.:
 
-  {"comer":    {"e": "eat", "p": "verb"},
-   "comieron": {"e": "eat", "p": "verb", "i": "comer"}, ...}
+  {"comer":    {"g": ["eat"], "p": "verb"},
+   "comieron": {"g": ["eat"], "p": "verb", "i": "comer"}, ...}
 
-Keys are lowercased word forms. "e" is an English translation (at lemma
-level), "p" a part of speech, "i" the dictionary infinitive — present on
+Keys are lowercased word forms. "g" is a list of English meanings
+(usually senses from different source words: "banco" -> bank/bench/...),
+"p" a part of speech, "i" the dictionary infinitive — present on
 conjugated verb forms, including irregulars ("sintieron" -> "sentir"),
 thanks to Wiktionary's conjugation tables. main.py's dictionary_lookup
 consumes this as its first (offline) backend.
@@ -74,14 +75,14 @@ def build(lang, url, out_path):
                 i = form_of[0].get("word")
             record = {}
             if en:
-                record["e"] = en
+                record["g"] = [en]
             if pos and not is_pure_form:
                 record["p"] = pos
             if i:
                 record["i"] = i
             if record:
-                # First wins, but prefer records that carry a translation.
-                if key not in out or (en and not out[key].get("e")):
+                # First wins, but prefer records that carry a gloss.
+                if key not in out or (en and not out[key].get("g")):
                     out[key] = record
             # Reverse map: every conjugated form -> its infinitive.
             # Existing entries (real lemmas) always win; the second
@@ -120,16 +121,18 @@ def build(lang, url, out_path):
                     key = es.lower()
                     rec = out.get(key)
                     if rec is None:
-                        out[key] = {"e": word}
-                    elif not rec.get("e"):
-                        rec["e"] = word
-    # Third pass: forms without their own translation inherit the
-    # lemma's English gloss ("comieron" shows "eat", not nothing).
+                        out[key] = {"g": [word]}
+                    elif "g" not in rec:
+                        rec["g"] = [word]
+                    elif word not in rec["g"] and len(rec["g"]) < 6:
+                        rec["g"].append(word)
+    # Third pass: forms without their own glosses inherit the lemma's
+    # meaning list ("comieron" shows "eat", not nothing).
     for key, rec in out.items():
-        if not rec.get("e") and rec.get("i"):
+        if not rec.get("g") and rec.get("i"):
             lemma = out.get(rec["i"])
-            if lemma and lemma.get("e"):
-                rec["e"] = lemma["e"]
+            if lemma and lemma.get("g"):
+                rec["g"] = list(lemma["g"])
     print(f"done: {n_lines} lines -> {len(out)} entries in "
           f"{time.time() - t0:.0f}s", flush=True)
     tmp = Path(tempfile.mkstemp(dir=out_path.parent)[1])

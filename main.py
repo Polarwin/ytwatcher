@@ -721,9 +721,15 @@ def dictionary_lookup(word):
         if key in _dictionary_cache:
             return _dictionary_cache[key]
         lex = _lexicon_load().get(key)
-        if lex and lex.get("e"):
+        glosses = None
+        if lex:
+            # New format: {"g": [meanings...]}; legacy: {"e": one gloss}.
+            glosses = lex.get("g") or ([lex["e"]] if lex.get("e") else None)
+        if glosses:
             # Offline lexicon hit: instant, exact verb morphology.
-            result = {"en": lex["e"]}
+            result = {"en": glosses[0]}
+            if len(glosses) > 1:
+                result["meanings"] = glosses[1:]
             if lex.get("p"):
                 result["pos"] = lex["p"]
             if lex.get("i"):
@@ -1411,7 +1417,7 @@ def scan_downloads(download_dir, files=None):
 # Bump when the index.html template changes: the fingerprint below only
 # covers the file listing, so without this an existing index.html would
 # keep the old template until some video is added or removed.
-INDEX_TEMPLATE_VERSION = 93
+INDEX_TEMPLATE_VERSION = 94
 
 
 def static_folder_url(item):
@@ -1650,6 +1656,7 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "      font-size: 1rem; }",
         "    .pl-dict-word { color: #8ab4f8; font-weight: bold; margin-right: .5rem; }",
         "    .pl-dict-pos { color: #bbb; font-size: .85em; margin-left: .4rem; }",
+        "    .pl-dict-alt { color: #bbb; margin-left: .4rem; }",
         "    .pl-dict-inf { color: #7bd88a; margin-left: .4rem; }",
         "    #pl-now { color: #8ab4f8; margin-top: .5rem; font-size: .95rem; }",
         "    li.pl-current a { color: #7bd88a; }",
@@ -2261,6 +2268,9 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "  var plDictCache = {}; // item href -> {word: {en, pos, inf}} (offline dict)",
         "  function plDictRender(word, d) {",
         "    var body = \"<b>\" + d.en + \"</b>\";",
+        "    if (d.meanings && d.meanings.length) {",
+        "      body += '<span class=\"pl-dict-alt\"> \\u00b7 ' + d.meanings.slice(0, 5).join(\" \\u00b7 \") + \"</span>\";",
+        "    }",
         "    if (d.pos) body += '<span class=\"pl-dict-pos\">' + d.pos + \"</span>\";",
         "    if (d.inf) body += '<span class=\"pl-dict-inf\">\\u2190 ' + d.inf + \"</span>\";",
         "    plDictShow(word, body);",
