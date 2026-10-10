@@ -46,7 +46,7 @@ def fetch_subtitles(path, video_id, langs, dry_run):
         "--skip-download",
         "--write-subs",
         "--write-auto-subs",
-        "--sub-langs", langs,
+        "--sub-langs", main.restricted_subtitle_languages(langs),
         "--convert-subs", "vtt",
         "-o", template,
         f"https://www.youtube.com/watch?v={video_id}",

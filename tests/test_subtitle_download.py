@@ -9,6 +9,16 @@ from yt_dlp import YoutubeDL
 
 
 @pytest.mark.parametrize("info,expected", [
+    ({"language": "en-US", "subtitles": {"en-US": [1]},
+      "automatic_captions": {"ar-orig": [1], "bn-orig": [1], "en-orig": [1]}}, "en-US"),
+    ({"language": "en-US", "subtitles": {"en": [1]},
+      "automatic_captions": {"ar-orig": [1], "en-orig": [1]}}, "en"),
+    ({"language": "en-US",
+      "automatic_captions": {"ar-orig": [1], "en-orig": [1]}}, "en-orig"),
+    ({"language": "de-DE", "subtitles": {"en": [1], "de": [1]},
+      "automatic_captions": {"ar-orig": [1], "de-orig": [1]}}, "de"),
+    ({"subtitles": {"en-US": [1]},
+      "automatic_captions": {"ar-orig": [1], "en-orig": [1]}}, "en-US"),
     ({"automatic_captions": {"en": [1], "de-orig": [1], "de": [1]}}, "de-orig"),
     ({"subtitles": {"de": [1]}, "automatic_captions": {"de-orig": [1]}}, "de"),
     ({"language": "de", "subtitles": {"en": [1], "de": [1]}}, "de"),
@@ -23,6 +33,32 @@ def test_original_subtitle_language(info, expected):
 def test_original_subtitle_language_missing():
     with pytest.raises(RuntimeError, match="No published"):
         main.original_subtitle_language({"subtitles": {"live_chat": [1]}})
+
+
+def test_disallowed_original_language_falls_back_to_english():
+    assert main.original_subtitle_language({
+        "language": "ar", "subtitles": {"ar": [1], "en-US": [1]},
+        "automatic_captions": {"ar-orig": [1]},
+    }) == "en-US"
+    with pytest.raises(RuntimeError, match="Chinese, English"):
+        main.original_subtitle_language({"automatic_captions": {"ar-orig": [1]}})
+
+
+@pytest.mark.parametrize("selector,expected", [
+    ("all", {"zh-Hans", "zh-Hant", "en-US", "de", "fr", "es-419", "nl"}),
+    ("en.*,ar", {"en-US"}),
+    ("all,-en.*", {"zh-Hans", "zh-Hant", "de", "fr", "es-419", "nl"}),
+    ("ar", set()),
+])
+def test_language_allowlist_enforced_by_ytdlp(selector, expected):
+    tracks = {lang: [{"ext": "vtt", "url": "https://example.com/captions"}]
+              for lang in ["zh-Hans", "zh-Hant", "en-US", "de", "fr", "es-419",
+                           "nl", "ar", "hi", "ja", "it", "live_chat"]}
+    with YoutubeDL({"writesubtitles": True, "writeautomaticsub": True,
+                    "subtitleslangs": main.restricted_subtitle_languages(selector).split(","),
+                    "subtitlesformat": "vtt", "quiet": True}) as ydl:
+        chosen = ydl.process_subtitles("abcdefghijk", tracks, {})
+    assert set(chosen or {}) == expected
 
 
 @pytest.mark.parametrize("published", [True, False])
@@ -46,7 +82,7 @@ def test_subtitle_worker(tmp_path, monkeypatch, available, returncode):
         assert "--skip-download" in cmd
         assert "--ignore-errors" in cmd
         assert "--write-subs" in cmd and "--write-auto-subs" in cmd
-        assert cmd[cmd.index("--sub-langs") + 1] == "es.*"
+        assert cmd[cmd.index("--sub-langs") + 1] == main.restricted_subtitle_languages("es.*")
         if available:
             output = Path(cmd[cmd.index("-o") + 1].replace("%(ext)s", "es.vtt"))
             output.write_text("WEBVTT\n\n00:00.000 --> 00:01.000\nHola\n")
