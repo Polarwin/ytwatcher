@@ -348,6 +348,42 @@ def test_watched_marks_roundtrip_and_migration(monkeypatch, tmp_path):
     assert main.load_watched() == {"abcdefghijk"}
 
 
+def test_subtitle_words(tmp_path):
+    vtt = tmp_path / "a.es.vtt"
+    vtt.write_text(
+        "WEBVTT\n\n"
+        "00:00:01.000 --> 00:00:04.000\n"
+        "<c>\u00bfC\u00f3mo est\u00e1n, <b>ustedes</b>?</c>\n\n"
+        "NOTE ignore me\n\n"
+        "00:00:05.000 --> 00:00:07.000\n"
+        "El gato &amp; el perro 123\n")
+    assert main.subtitle_words(vtt) == [
+        "c\u00f3mo", "el", "est\u00e1n", "gato", "perro", "ustedes"]
+    assert main.dict_path_for(vtt).name == "a.es.dict.json"
+
+
+def test_build_subtitle_dictionary_job(monkeypatch, tmp_path):
+    import time as _time
+    vtt = tmp_path / "Chan" / "a.es.vtt"
+    vtt.parent.mkdir()
+    vtt.write_text("WEBVTT\n\n00:00:01.000 --> 00:00:02.000\n"
+                   "Hola comieron casa\n")
+    monkeypatch.setattr(main, "DICTIONARY_FILE", tmp_path / "dictionary.json")
+    monkeypatch.setattr(main, "_dictionary_cache", None)
+    monkeypatch.setattr(main, "_dictionary_llm",
+                        lambda w: {"en": w + "!", "pos": "noun"})
+    job = main.build_subtitle_dictionary("Chan/a.es.vtt", str(tmp_path))
+    assert job and job["status"] == "running"
+    for _ in range(200):
+        if job["status"] != "running":
+            break
+        _time.sleep(0.05)
+    assert job["status"] == "done"
+    d = json.loads((tmp_path / "Chan" / "a.es.dict.json").read_text())
+    assert set(d) == {"casa", "comieron", "hola"}
+    assert d["hola"] == {"en": "hola!", "pos": "noun"}
+
+
 def test_watched_marks_due():
     now = 10000.0
     marks = {"fresh": now - 60, "old": now - 7200, "legacy": 0}

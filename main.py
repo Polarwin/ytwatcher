@@ -506,6 +506,195 @@ def watched_marks_due(marks, grace_minutes, now=None):
     return {vid for vid, ts in marks.items() if now - ts >= grace_seconds}
 
 
+# Local LLM gateway (llama-cli-backend.py) backing the on-the-fly
+# subtitle dictionary. Overridable for testing.
+LLM_URL = os.environ.get("YTWATCHER_LLM_URL", "http://127.0.0.1:8349")
+DICTIONARY_FILE = Path(__file__).parent / "dictionary.json"
+DICTIONARY_WORD_RE = re.compile(r"^[\wÀ-ÿ'’-]{1,40}$", re.UNICODE)
+DICTIONARY_PROMPT = (
+    "You are a Spanish-English dictionary. Given a single Spanish word, "
+    "reply with ONLY a compact JSON object (no markdown, no prose): "
+    '{"en": "<english translation>", "pos": "<part of speech, lowercase '
+    'english, e.g. noun/verb/adjective/adverb>", "inf": "<dictionary '
+    "infinitive, ONLY if the word is a conjugated verb; omit otherwise>"
+    "}. If the input is not a Spanish word, translate it anyway if "
+    "possible."
+)
+_dictionary_cache = None
+_dictionary_lock = threading.Lock()
+
+
+def _dictionary_llm(word):
+    """Ask the local LLM for a translation; returns a dict or None."""
+    payload = {
+        "messages": [
+            {"role": "system", "content": DICTIONARY_PROMPT},
+            {"role": "user", "content": word},
+        ],
+        "temperature": 0,
+    }
+    resp = requests.post(LLM_URL + "/v1/chat/completions", json=payload,
+                         timeout=180)
+    resp.raise_for_status()
+    text = resp.json()["choices"][0]["message"]["content"].strip()
+    match = re.search(r"\{.*\}", text, re.S)
+    if not match:
+        return None
+    obj = json.loads(match.group(0))
+    en = str(obj.get("en", "")).strip()
+    if not en:
+        return None
+    result = {"en": en, "pos": str(obj.get("pos", "")).strip()}
+    inf = str(obj.get("inf", "")).strip()
+    if inf and "verb" in result["pos"].lower():
+        result["inf"] = inf
+    return result
+
+
+def dictionary_lookup(word):
+    """Translate word via the local LLM, caching results in dictionary.json.
+
+    Lookups are serialized: the gateway runs one generation at a time,
+    so concurrent clicks would 429 each other. The first lookup after
+    an idle period can be slow (llama-server cold start).
+    """
+    key = word.lower()
+    with _dictionary_lock:
+        global _dictionary_cache
+        if _dictionary_cache is None:
+            _dictionary_cache = {}
+            if DICTIONARY_FILE.exists():
+                try:
+                    with open(DICTIONARY_FILE, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                    if isinstance(data, dict):
+                        _dictionary_cache = {
+                            k: v for k, v in data.items()
+                            if isinstance(v, dict) and v.get("en")}
+                except (json.JSONDecodeError, OSError) as e:
+                    log.warning("could not read dictionary.json: %s", e)
+        if key in _dictionary_cache:
+            return _dictionary_cache[key]
+        result = _dictionary_llm(word)
+        if result:
+            _dictionary_cache[key] = result
+            try:
+                tmp = _tmp_path(DICTIONARY_FILE)
+                with open(tmp, "w", encoding="utf-8") as f:
+                    json.dump(_dictionary_cache, f, indent=1,
+                              ensure_ascii=False)
+                tmp.replace(DICTIONARY_FILE)
+            except OSError as e:
+                log.warning("could not save dictionary.json: %s", e)
+        return result
+
+
+VTT_WORD_RE = re.compile(r"[^\W\d_]+", re.UNICODE)
+_dict_jobs = {}
+_dict_jobs_lock = threading.Lock()
+
+
+def subtitle_words(vtt_path):
+    """Unique lowercase words from a .vtt file (tags/timings stripped)."""
+    try:
+        text = Path(vtt_path).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return []
+    words = set()
+    for line in text.splitlines():
+        line = line.strip()
+        if (not line or "-->" in line
+                or line.startswith(("WEBVTT", "NOTE", "Kind:", "Language:"))):
+            continue
+        line = html.unescape(re.sub(r"<[^>]+>", "", line))
+        for w in VTT_WORD_RE.findall(line):
+            words.add(w.lower())
+    return sorted(words)
+
+
+def dict_path_for(vtt_path):
+    """'Name [id].es.vtt' -> 'Name [id].es.dict.json' next to it."""
+    p = Path(vtt_path)
+    name = p.name[:-4] if p.name.lower().endswith(".vtt") else p.name
+    return p.with_name(name + ".dict.json")
+
+
+def _save_dict_file(dict_path, mapping):
+    tmp = _tmp_path(dict_path)
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(mapping, f, indent=1, ensure_ascii=False)
+    tmp.replace(dict_path)
+
+
+def build_subtitle_dictionary(rel_vtt, download_dir):
+    """Start building <subtitle>.dict.json in the background.
+
+    Returns the job dict. Skipped (existing job returned) if one is
+    already running for this file. The per-file dict is written
+    incrementally, so partial results are usable — and offline-
+    cacheable — while the LLM works through the remaining words.
+    """
+    vtt = resolve_download_rel(download_dir, rel_vtt)
+    if vtt is None or vtt.suffix != ".vtt":
+        return None
+    with _dict_jobs_lock:
+        job = _dict_jobs.get(rel_vtt)
+        if job and job["status"] == "running":
+            return job
+        job = {"status": "running", "total": 0, "done": 0}
+        _dict_jobs[rel_vtt] = job
+    threading.Thread(target=_run_dict_job,
+                     args=(vtt, rel_vtt, job), daemon=True).start()
+    return job
+
+
+def _run_dict_job(vtt, rel_vtt, job):
+    dict_path = dict_path_for(vtt)
+    out = {}
+    if dict_path.exists():
+        try:
+            data = json.loads(dict_path.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                out = {k: v for k, v in data.items() if isinstance(v, dict)}
+        except (json.JSONDecodeError, OSError):
+            pass
+    try:
+        words = subtitle_words(vtt)
+        job["total"] = len(words)
+        pending = [w for w in words if w not in out]
+        for i, w in enumerate(pending):
+            try:
+                result = dictionary_lookup(w)
+            except Exception as e:
+                log.warning("dict job: lookup failed for %r: %s", w, e)
+                result = None
+            if result:
+                out[w] = result
+            job["done"] += 1
+            # Save periodically: the file doubles as the offline
+            # dictionary, so partial progress must be visible.
+            if (i + 1) % 10 == 0 or i + 1 == len(pending):
+                _save_dict_file(dict_path, out)
+        job["status"] = "done"
+        log.info("dict job done for %s: %d words", rel_vtt, len(out))
+    except Exception as e:
+        job["status"] = "failed"
+        job["error"] = str(e)
+        log.error("dict job failed for %s: %s", rel_vtt, e)
+
+
+def start_dictionary_builds(video_path, download_dir):
+    """Kick off dict builds for every subtitle sidecar of a video."""
+    video_path = Path(video_path)
+    root = Path(download_dir)
+    try:
+        rel_dir = video_path.parent.relative_to(root)
+    except ValueError:
+        return
+    for vtt in sorted(video_path.parent.glob(video_path.stem + ".*.vtt")):
+        build_subtitle_dictionary(str(rel_dir / vtt.name), str(root))
+
+
 def fetch_recent_videos(channel_url, limit):
     """Return a list of {id, title, availability, duration, live_status,
     timestamp} for the channel's N most recent videos. duration is seconds
@@ -1026,7 +1215,7 @@ def scan_downloads(download_dir, files=None):
 # Bump when the index.html template changes: the fingerprint below only
 # covers the file listing, so without this an existing index.html would
 # keep the old template until some video is added or removed.
-INDEX_TEMPLATE_VERSION = 90
+INDEX_TEMPLATE_VERSION = 92
 
 
 def static_folder_url(item):
@@ -1255,6 +1444,17 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "      text-align: center; font-size: 1.05rem; line-height: 1.3; color: #fff;",
         "      background: #000; border-radius: 4px; white-space: pre-line;",
         "      user-select: text; -webkit-user-select: text; cursor: text; }",
+        "    .pl-sub-word { cursor: pointer; }",
+        "    .pl-sub-word:hover { text-decoration: underline; }",
+        "    #pl-dict { margin-top: .4rem; padding: .45rem .6rem; position: relative;",
+        "      background: #16213a; border: 1px solid #3a5a9a; border-radius: 4px;",
+        "      max-width: 40rem; }",
+        "    #pl-dict-close { position: absolute; top: .1rem; right: .3rem;",
+        "      background: none; border: none; color: #bbb; cursor: pointer;",
+        "      font-size: 1rem; }",
+        "    .pl-dict-word { color: #8ab4f8; font-weight: bold; }",
+        "    .pl-dict-pos { color: #bbb; font-size: .85em; margin-left: .4rem; }",
+        "    .pl-dict-inf { color: #7bd88a; margin-left: .4rem; }",
         "    #pl-now { color: #8ab4f8; margin-top: .5rem; font-size: .95rem; }",
         "    li.pl-current a { color: #7bd88a; }",
         "    li.pl-current-video .entry-row > a { color: #7bd88a; }",
@@ -1356,6 +1556,7 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         '      <div id="pl-player" hidden>',
         '        <video id="pl-video" controls playsinline></video>',
         '        <div id="pl-subs" hidden></div>',
+        '        <div id="pl-dict" hidden></div>',
         '        <button id="pl-copy-subs" type="button" hidden>Copy subtitles</button>',
         '        <span id="pl-copy-status" role="status"></span>',
         '        <div id="pl-now"></div>',
@@ -1827,15 +2028,73 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "  var plSubsEl = document.getElementById(\"pl-subs\");",
         '  var plCopySubs = document.getElementById("pl-copy-subs");',
         '  var plCopyStatus = document.getElementById("pl-copy-status");',
+        "  var plDictEl = document.getElementById(\"pl-dict\");",
         "  function plSetSubtitleText(text) {",
-        "    // Keep the text node intact between cue changes so selection survives.",
+        "    // Keep the DOM intact between cue changes so selection survives.",
         "    if (plSubsEl.textContent !== text) {",
-        "      plSubsEl.textContent = text;",
+        "      plSubsEl.textContent = \"\";",
+        "      if (text) {",
+        "        text.split(/(\\s+)/).forEach(function (part) {",
+        "          if (!part) return;",
+        "          if (/^\\s+$/.test(part)) {",
+        "            plSubsEl.appendChild(document.createTextNode(part));",
+        "            return;",
+        "          }",
+        "          var span = document.createElement(\"span\");",
+        "          span.className = \"pl-sub-word\";",
+        "          span.textContent = part;",
+        "          plSubsEl.appendChild(span);",
+        "        });",
+        "      }",
         '      plCopyStatus.textContent = "";',
         "    }",
         "    plSubsEl.hidden = !text;",
         "    plCopySubs.hidden = !text;",
+        "    if (!text) plDictEl.hidden = true;",
         "  }",
+        "  function plDictShow(word, html) {",
+        "    plDictEl.innerHTML = \"<button id=\\\"pl-dict-close\\\" type=\\\"button\\\">\\u00d7</button>\" +",
+        "      \"<span class=\\\"pl-dict-word\\\"></span><span class=\\\"pl-dict-body\\\"></span>\";",
+        "    plDictEl.querySelector(\".pl-dict-word\").textContent = word;",
+        "    plDictEl.querySelector(\".pl-dict-body\").innerHTML = html;",
+        "    plDictEl.hidden = false;",
+        "    plDictEl.querySelector(\"#pl-dict-close\").addEventListener(\"click\", function () {",
+        "      plDictEl.hidden = true;",
+        "    });",
+        "  }",
+        "  var plDictCache = {}; // item href -> {word: {en, pos, inf}} (offline dict)",
+        "  function plDictRender(word, d) {",
+        "    var body = \"<b>\" + d.en + \"</b>\";",
+        "    if (d.pos) body += '<span class=\"pl-dict-pos\">' + d.pos + \"</span>\";",
+        "    if (d.inf) body += '<span class=\"pl-dict-inf\">\\u2190 ' + d.inf + \"</span>\";",
+        "    plDictShow(word, body);",
+        "  }",
+        "  function plDictLookup(word) {",
+        "    if (!word) return;",
+        "    // The per-subtitle dict (built server-side, cached offline) wins:",
+        "    // it works without network and is instant.",
+        "    var item = plIndex >= 0 ? pl[plIndex] : null;",
+        "    var local = item && plDictCache[item.href];",
+        "    if (local && local[word.toLowerCase()]) {",
+        "      plDictRender(word, local[word.toLowerCase()]);",
+        "      return;",
+        "    }",
+        "    plDictShow(word, \"looking up\\u2026 (first call after idle can take a minute)\");",
+        "    fetch(API + \"/dictionary?word=\" + encodeURIComponent(word))",
+        "      .then(function (r) {",
+        "        return r.json().then(function (d) {",
+        "          if (!r.ok) throw new Error(d.error || (\"HTTP \" + r.status));",
+        "          plDictRender(d.word || word, d);",
+        "        });",
+        "      })",
+        "      .catch(function (e) { plDictShow(word, \"\\u26a0 \" + (e.message || e)); });",
+        "  }",
+        "  plSubsEl.addEventListener(\"click\", function (ev) {",
+        "    var span = ev.target && ev.target.closest ? ev.target.closest(\".pl-sub-word\") : null;",
+        "    if (!span) return;",
+        "    var word = span.textContent.replace(/[^\\p{L}\\p{M}'\\u2019-]/gu, \"\");",
+        "    plDictLookup(word);",
+        "  });",
         '  plSubsEl.addEventListener("pointerdown", function () { plVideo.pause(); });',
         '  plCopySubs.addEventListener("click", function () {',
         "    plVideo.pause();",
@@ -1935,6 +2194,14 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "      plSubForHref = item.href;",
         "      plSubsEl.hidden = false;",
         "      plUpdateSubs();",
+        "      // Per-subtitle dictionary (built server-side): loads through",
+        "      // the service worker, so this also warms the offline cache.",
+        "      var dictUrl = subs[lang].replace(/\\.vtt(\\?.*)?$/, \".dict.json\");",
+        "      fetch(dictUrl).then(function (r) {",
+        "        return r.ok ? r.json() : null;",
+        "      }).then(function (d) {",
+        "        if (d) plDictCache[item.href] = d;",
+        "      }).catch(function () {});",
         "    }).catch(function () {});",
         "  }",
         "  function plUpdateSubs() {",
@@ -2495,7 +2762,7 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "    btn.disabled = true;",
         "    try {",
         "      var cache = await caches.open(\"ytwatcher-media-v1\");",
-        "      var done = 0, failed = 0;",
+        "      var done = 0, failed = 0, dictPending = 0;",
         "      for (var i = 0; i < pl.length; i++) {",
         "        btn.textContent = \"Caching \" + (i + 1) + \"/\" + pl.length + \"…\";",
         "        try {",
@@ -2503,8 +2770,30 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "          if (!cached) await cache.add(pl[i].href);",
         "          done++;",
         "        } catch (e) { failed++; }",
+        "        // Subtitles and their dictionaries are needed offline too.",
+        "        var subs = null;",
+        "        try { subs = JSON.parse(pl[i].subs || \"{}\"); } catch (e) {}",
+        "        if (subs) {",
+        "          for (var lang in subs) {",
+        "            try { await cache.add(subs[lang]); } catch (e) { failed++; }",
+        "            try {",
+        "              await fetch(API + \"/build-dict\", {",
+        "                method: \"POST\",",
+        "                headers: { \"Content-Type\": \"application/json\" },",
+        "                body: JSON.stringify({ path: subs[lang] }),",
+        "              });",
+        "            } catch (e) { /* build trigger is best-effort */ }",
+        "            var dictUrl = subs[lang].replace(/\\.vtt(\\?.*)?$/, \".dict.json\");",
+        "            try {",
+        "              var dresp = await fetch(dictUrl); // cached by the service worker",
+        "              if (dresp.ok) plDictCache[pl[i].href] = await dresp.json();",
+        "              else dictPending++;",
+        "            } catch (e) { dictPending++; }",
+        "          }",
+        "        }",
         "      }",
-        "      btn.textContent = \"✓ cached: \" + done + (failed ? \" (\" + failed + \" failed)\" : \"\");",
+        "      btn.textContent = \"✓ cached: \" + done + (failed ? \" (\" + failed + \" failed)\" : \"\")",
+        "        + (dictPending ? \" — \" + dictPending + \" dict still building\" : \"\");",
         "    } catch (e) {",
         "      window.alert(\"Preload failed: \" + (e.message || e));",
         "      btn.textContent = label;",
@@ -2855,7 +3144,7 @@ _index_lock = threading.Lock()
 SERVICE_WORKER_JS = r"""
 var PAGE_CACHE = "ytwatcher-page-v1";
 var MEDIA_CACHE = "ytwatcher-media-v1";
-var MEDIA_RE = /\.(webm|mp4|m4a|mp3|opus|ogg|aac|wav|flac|mkv|vtt)(\?|$)/i;
+var MEDIA_RE = /\.(webm|mp4|m4a|mp3|opus|ogg|aac|wav|flac|mkv|vtt|dict\.json)(\?|$)/i;
 
 self.addEventListener("install", function (e) { e.waitUntil(self.skipWaiting()); });
 self.addEventListener("activate", function (e) { e.waitUntil(self.clients.claim()); });
@@ -3075,11 +3364,13 @@ def delete_watched_videos(download_dir, watched_ids, keep_channels=(), files=Non
             # its folder and shows dimmed on the index page.
             continue
         try:
-            # Subtitle sidecars ("Name [id].es.vtt") follow their video.
+            # Subtitle sidecars ("Name [id].es.vtt") and their
+            # dictionaries ("Name [id].es.dict.json") follow the video.
             try:
                 sidecars = [
                     p for p in path.parent.iterdir()
-                    if p.suffix == ".vtt" and p.name.startswith(path.stem + ".")
+                    if p.name.startswith(path.stem + ".")
+                    and (p.suffix == ".vtt" or p.name.endswith(".dict.json"))
                 ]
             except OSError:
                 sidecars = []
@@ -3232,7 +3523,9 @@ class ApiHandler(BaseHTTPRequestHandler):
         if not self._origin_allowed():
             self._json(403, {"error": "cross-origin request forbidden"})
             return
-        if self.path == "/watched":
+        if self.path.startswith("/dictionary"):
+            self._get_dictionary()
+        elif self.path == "/watched":
             # The page merges this into its localStorage watched set, so
             # marks sync across browsers and the server stays the source
             # of truth.
@@ -3290,10 +3583,62 @@ class ApiHandler(BaseHTTPRequestHandler):
             self._post_audio_convert()
         elif self.path == "/rebuild-index":
             self._post_rebuild_index()
+        elif self.path == "/build-dict":
+            self._post_build_dict()
         elif self.path == "/cookies":
             self._post_cookies()
         else:
             self._json(404, {"error": "not found"})
+
+    def _get_dictionary(self):
+        """Translate one word via the local LLM (GET /dictionary?word=x).
+
+        Cached in dictionary.json; results look like
+        {"en": "...", "pos": "verb", "inf": "comer"}.
+        """
+        word = (urllib.parse.parse_qs(
+            urllib.parse.urlsplit(self.path).query).get("word") or [""])[0]
+        word = word.strip()
+        if not DICTIONARY_WORD_RE.fullmatch(word):
+            self._json(400, {"error": "bad word"})
+            return
+        try:
+            result = dictionary_lookup(word)
+        except Exception as e:
+            log.warning("dictionary lookup failed for %r: %s", word, e)
+            self._json(502, {"error": "lookup failed (LLM unavailable?)"})
+            return
+        if not result:
+            self._json(404, {"error": "no translation"})
+            return
+        self._json(200, {"word": word, **result})
+
+    def _post_build_dict(self):
+        """Start (or report) the per-subtitle dictionary build.
+
+        Body: {"path": "Chan/File.es.vtt"} (download_dir-relative). The
+        dict file appears next to the subtitle as File.es.dict.json.
+        """
+        body = self._read_body()
+        if body is None:
+            return
+        try:
+            data = json.loads(body or b"{}")
+        except json.JSONDecodeError as e:
+            self._json(400, {"error": str(e)})
+            return
+        rel = data.get("path", "")
+        if not isinstance(rel, str) or not rel.endswith(".vtt"):
+            self._json(400, {"error": "path must be a .vtt file"})
+            return
+        settings = load_config().get("settings", {})
+        download_dir = settings.get("download_dir", "/srv/files")
+        job = build_subtitle_dictionary(rel, download_dir)
+        if job is None:
+            self._json(400, {"error": "path not allowed"})
+            return
+        self._json(202, {"status": job["status"],
+                         "done": job["done"], "total": job["total"]})
 
     def _post_watched(self):
         try:
@@ -4673,6 +5018,9 @@ def process_subscription(sub, settings, seen, failed, scan_only=False):
                     if timestamp:
                         set_mtime(downloaded, timestamp)
                     record_duration(settings["download_dir"], downloaded, duration)
+                    if sub.get("subtitles"):
+                        start_dictionary_builds(
+                            downloaded, settings["download_dir"])
                 size = downloaded.stat().st_size if downloaded else 0
                 completed.append({
                     "channel": name,
