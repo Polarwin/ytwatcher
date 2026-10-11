@@ -374,7 +374,7 @@ def test_build_subtitle_dictionary_job(monkeypatch, tmp_path):
     monkeypatch.setattr(main, "LEXICON_FILE", tmp_path / "no-lexicon.json")
     monkeypatch.setattr(main, "_lexicon", None)
     monkeypatch.setattr(main, "_dictionary_google",
-                        lambda w: {"en": w + "!", "pos": "noun"})
+                        lambda w, src="es", dst="en": {"en": w + "!", "pos": "noun"})
     job = main.build_subtitle_dictionary("Chan/a.es.vtt", str(tmp_path))
     assert job and job["status"] == "running"
     for _ in range(200):
@@ -403,13 +403,15 @@ def test_spanish_infinitive(monkeypatch):
 def test_dictionary_google_backend(monkeypatch):
     translations = {"comieron": "they ate", "casa": "home"}
     monkeypatch.setattr(main, "_google_translate_best",
-                        lambda w: translations.get(w))
+                        lambda w, src="es", dst="en": translations.get(w))
     monkeypatch.setattr(main, "_wiktionary_spanish_verb",
                         lambda w: {"comer": True, "comir": False}.get(w))
     assert main._dictionary_google("comieron") == {
         "en": "they ate", "pos": "verb", "inf": "comer"}
     assert main._dictionary_google("casa") == {"en": "home"}
-    monkeypatch.setattr(main, "_google_translate_best", lambda w: None)
+    # The Spanish-only heuristics stay out of other source languages.
+    assert main._dictionary_google("casa", src="de", dst="en") == {"en": "home"}
+    monkeypatch.setattr(main, "_google_translate_best", lambda *a, **k: None)
     assert main._dictionary_google("casa") is None
 
 
@@ -427,7 +429,8 @@ def test_dictionary_lexicon_backend(monkeypatch, tmp_path):
     monkeypatch.setattr(main, "DICTIONARY_FILE", tmp_path / "dictionary.json")
     monkeypatch.setattr(main, "_dictionary_cache", None)
     net = {"sintieron": {"en": "they felt"}}
-    monkeypatch.setattr(main, "_dictionary_google", lambda w: net.get(w))
+    monkeypatch.setattr(main, "_dictionary_google",
+                        lambda w, src="es", dst="en": net.get(w))
     # Lexicon hit: instant, offline, no network call.
     assert main.dictionary_lookup("comieron") == {
         "en": "eat", "pos": "verb", "inf": "comer"}
@@ -441,15 +444,57 @@ def test_dictionary_lexicon_backend(monkeypatch, tmp_path):
         "en": "they felt", "pos": "verb", "inf": "sentir"}
 
 
+def test_dictionary_lookup_language_pairs(monkeypatch, tmp_path):
+    monkeypatch.setattr(main, "DICTIONARY_FILE", tmp_path / "dictionary.json")
+    monkeypatch.setattr(main, "_dictionary_cache", None)
+    calls = []
+
+    def fake_google(w, src="es", dst="en"):
+        calls.append((w, src, dst))
+        return {"en": f"{w}-{src}>{dst}"}
+
+    monkeypatch.setattr(main, "_dictionary_google", fake_google)
+    monkeypatch.setattr(main, "_dictionary_llm", lambda *a, **k: None)
+    # German source, Spanish target: the cache key carries the pair.
+    assert main.dictionary_lookup("haus", src="de", dst="es") == {
+        "en": "haus-de>es"}
+    assert ("haus", "de", "es") in calls
+    # Same word, another pair: an independent cache entry.
+    assert main.dictionary_lookup("haus", src="de", dst="en") == {
+        "en": "haus-de>en"}
+    assert "de:es:haus" in main._dictionary_cache
+    assert "de:en:haus" in main._dictionary_cache
+    # Second call for the same pair: cache hit, no new lookup.
+    n_calls = len(calls)
+    assert main.dictionary_lookup("haus", src="de", dst="es") == {
+        "en": "haus-de>es"}
+    assert len(calls) == n_calls
+
+
+def test_subtitle_language():
+    assert main.subtitle_language("a.es.vtt") == "es"
+    assert main.subtitle_language("Chan/Name [id].de.vtt") == "de"
+    assert main.subtitle_language("Name [id].en-GB.vtt") == "en-GB"
+    assert main.subtitle_language("no-language-here.vtt") == "es"
+
+
 def test_google_translate_best_retries_languages(monkeypatch):
     results = {("casa", "auto"): "casa", ("casa", "es"): "home"}
     monkeypatch.setattr(
         main, "_google_translate",
-        lambda w, lang="auto": results.get((w, lang)))
+        lambda w, lang="auto", target="en": results.get((w, lang)))
     assert main._google_translate_best("casa") == "home"
+    # Non-default pairs pass their target through to the endpoint.
+    seen = {}
+    def fake_translate(w, lang="auto", target="en"):
+        seen[(w, lang, target)] = True
+        return "Haus"
+    monkeypatch.setattr(main, "_google_translate", fake_translate)
+    assert main._google_translate_best("casa", src="es", dst="de") == "Haus"
+    assert ("casa", "es", "de") in seen
     # Echo in every language: return the word itself (proper noun).
     monkeypatch.setattr(main, "_google_translate",
-                        lambda w, lang="auto": w)
+                        lambda w, lang="auto", target="en": w)
     assert main._google_translate_best("Pedro") == "Pedro"
 
 

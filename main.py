@@ -511,24 +511,40 @@ def watched_marks_due(marks, grace_minutes, now=None):
 LLM_URL = os.environ.get("YTWATCHER_LLM_URL", "http://127.0.0.1:8349")
 DICTIONARY_FILE = Path(__file__).parent / "dictionary.json"
 DICTIONARY_WORD_RE = re.compile(r"^[\wÀ-ÿ'’-]{1,40}$", re.UNICODE)
-DICTIONARY_PROMPT = (
-    "You are a Spanish-English dictionary. Given a single Spanish word, "
-    "reply with ONLY a compact JSON object (no markdown, no prose): "
-    '{"en": "<english translation>", "pos": "<part of speech, lowercase '
-    'english, e.g. noun/verb/adjective/adverb>", "inf": "<dictionary '
-    "infinitive, ONLY if the word is a conjugated verb; omit otherwise>"
-    "}. If the input is not a Spanish word, translate it anyway if "
-    "possible."
-)
+_LANGUAGE_RE = re.compile(r"^[a-z]{2,3}(-[a-z0-9]{1,8})?$")
+LANGUAGE_NAMES = {
+    "en": "English", "de": "German", "es": "Spanish", "fr": "French",
+    "it": "Italian", "pt": "Portuguese", "nl": "Dutch", "pl": "Polish",
+    "sv": "Swedish", "tr": "Turkish", "ru": "Russian", "ar": "Arabic",
+    "zh": "Chinese", "ja": "Japanese", "ko": "Korean",
+}
 _dictionary_cache = None
 _dictionary_lock = threading.Lock()
 
 
-def _dictionary_llm(word):
+def _language_name(code):
+    """Human-readable language name for prompts; falls back to the code."""
+    return LANGUAGE_NAMES.get((code or "").split("-")[0].lower(), code or "?")
+
+
+def _dictionary_prompt(src, dst):
+    return (
+        f"You are a {_language_name(src)}-{_language_name(dst)} dictionary. "
+        f"Given a single {_language_name(src)} word, "
+        "reply with ONLY a compact JSON object (no markdown, no prose): "
+        '{"en": "<translation>", "pos": "<part of speech, lowercase '
+        'english, e.g. noun/verb/adjective/adverb>", "inf": "<dictionary '
+        "infinitive, ONLY if the word is a conjugated verb; omit otherwise>"
+        "}. If the input is not a "
+        f"{_language_name(src)} word, translate it anyway if possible."
+    )
+
+
+def _dictionary_llm(word, src="es", dst="en"):
     """Ask the local LLM for a translation; returns a dict or None."""
     payload = {
         "messages": [
-            {"role": "system", "content": DICTIONARY_PROMPT},
+            {"role": "system", "content": _dictionary_prompt(src, dst)},
             {"role": "user", "content": word},
         ],
         "temperature": 0,
@@ -563,10 +579,10 @@ GOOGLE_DICT_URL = "https://clients5.google.com/translate_a/t"
 WIKTIONARY_URL = "https://en.wiktionary.org/api/rest_v1/page/definition/"
 
 
-def _google_translate(text, lang="auto", timeout=15):
+def _google_translate(text, lang="auto", target="en", timeout=15):
     """Translate via the Chrome-dict endpoint; returns text or None."""
     resp = requests.get(GOOGLE_DICT_URL, params={
-        "client": "dict-chrome-ex", "sl": lang, "tl": "en", "q": text,
+        "client": "dict-chrome-ex", "sl": lang, "tl": target, "q": text,
     }, timeout=timeout)
     resp.raise_for_status()
     data = resp.json()
@@ -580,17 +596,18 @@ def _google_translate(text, lang="auto", timeout=15):
     return " ".join(parts).strip() or None
 
 
-def _google_translate_best(word):
-    """Translate, retrying with explicit source languages on echo/miss.
+def _google_translate_best(word, src="es", dst="en"):
+    """Translate, retrying with auto-detection on echo/miss.
 
-    sl=auto echoes some single words ("casa"); es/de cover the
-    languages our subtitles come in. Returns the first translation
-    that differs from the input, else the last non-None result.
+    The subtitle language is known, so it is tried first; sl=auto covers
+    the echo cases (proper nouns) and any wrong guesses. Returns the
+    first translation that differs from the input, else the last
+    non-None result.
     """
     fallback = None
-    for lang in ("auto", "es", "de"):
+    for lang in dict.fromkeys((src, "auto")):
         try:
-            out = _google_translate(word, lang)
+            out = _google_translate(word, lang, dst)
         except Exception as e:
             log.warning("google translate failed for %r (%s): %s",
                         word, lang, e)
@@ -674,36 +691,44 @@ def _spanish_infinitive(word):
     return None
 
 
-def _dictionary_google(word):
+def _dictionary_google(word, src="es", dst="en"):
     """Google-backed lookup: translation + heuristic verb info. None on failure."""
     try:
-        en = _google_translate_best(word)
+        en = _google_translate_best(word, src, dst)
     except Exception as e:
         log.warning("google translate failed for %r: %s", word, e)
         return None
     if not en:
         return None
     result = {"en": en}
-    try:
-        inf = _spanish_infinitive(word)
-    except Exception as e:
-        log.warning("infinitive heuristic failed for %r: %s", word, e)
-        inf = None
-    if inf:
-        result["pos"] = "verb"
-        result["inf"] = inf
-    elif word.lower().endswith("mente") and len(word) > 6:
-        result["pos"] = "adverb"
+    if src == "es":
+        # The infinitive heuristic and the -mente adverb rule are
+        # Spanish-specific; other source languages get the plain
+        # translation (the LLM fallback may still add pos/inf).
+        try:
+            inf = _spanish_infinitive(word)
+        except Exception as e:
+            log.warning("infinitive heuristic failed for %r: %s", word, e)
+            inf = None
+        if inf:
+            result["pos"] = "verb"
+            result["inf"] = inf
+        elif word.lower().endswith("mente") and len(word) > 6:
+            result["pos"] = "adverb"
     return result
 
 
-def dictionary_lookup(word):
-    """Translate word (Google; local-LLM fallback), caching in dictionary.json.
+def dictionary_lookup(word, src="es", dst="en"):
+    """Translate word from src into dst (Google; local-LLM fallback).
 
     Lookups are serialized: the dict build job and live clicks share
-    one cache, and the LLM fallback runs one generation at a time.
+    one cache, and the LLM fallback runs one generation at a time. The
+    default pair es->en keeps the legacy bare-word cache keys; other
+    pairs are cached as "src:dst:word". Results always use the "en"
+    field for the gloss (historical name, any target language).
     """
     key = word.lower()
+    cache_key = key if (src, dst) == ("es", "en") else f"{src}:{dst}:{key}"
     with _dictionary_lock:
         global _dictionary_cache
         if _dictionary_cache is None:
@@ -718,9 +743,9 @@ def dictionary_lookup(word):
                             if isinstance(v, dict) and v.get("en")}
                 except (json.JSONDecodeError, OSError) as e:
                     log.warning("could not read dictionary.json: %s", e)
-        if key in _dictionary_cache:
-            return _dictionary_cache[key]
-        lex = _lexicon_load().get(key)
+        if cache_key in _dictionary_cache:
+            return _dictionary_cache[cache_key]
+        lex = _lexicon_for(src).get(key) if dst == "en" else None
         glosses = None
         if lex:
             # New format: {"g": [meanings...]}; legacy: {"e": one gloss}.
@@ -735,7 +760,8 @@ def dictionary_lookup(word):
             if lex.get("i"):
                 result["inf"] = lex["i"]
         else:
-            net = _dictionary_google(word) or _dictionary_llm(word)
+            net = (_dictionary_google(word, src, dst)
+                   or _dictionary_llm(word, src, dst))
             if not net:
                 return None
             result = {"en": net["en"]}
@@ -752,7 +778,7 @@ def dictionary_lookup(word):
                 if lex.get("i") and "inf" not in result:
                     result["inf"] = lex["i"]
         if result:
-            _dictionary_cache[key] = result
+            _dictionary_cache[cache_key] = result
             try:
                 tmp = _tmp_path(DICTIONARY_FILE)
                 with open(tmp, "w", encoding="utf-8") as f:
@@ -791,6 +817,36 @@ def _lexicon_load():
     return _lexicon
 
 
+_lexicons = {}  # non-default languages: lang -> entries
+
+
+def _lexicon_for(lang):
+    """Lexicon entries for lang (-> English); {} when no file is built.
+
+    The Spanish lexicon uses the dedicated loader above; other languages
+    load lexicon-<lang>.json on demand (built by build_lexicon.py --lang).
+    Lexicons only answer to=en lookups.
+    """
+    if lang == "es":
+        return _lexicon_load()
+    if lang not in _lexicons:
+        data = {}
+        path = Path(__file__).parent / f"lexicon-{lang}.json"
+        if path.exists():
+            t0 = time.time()
+            try:
+                with open(path, encoding="utf-8") as f:
+                    loaded = json.load(f)
+                if isinstance(loaded, dict):
+                    data = loaded
+            except (json.JSONDecodeError, OSError) as e:
+                log.warning("could not read %s: %s", path, e)
+            log.info("lexicon-%s: %d entries (%.1fs)",
+                     lang, len(data), time.time() - t0)
+        _lexicons[lang] = data
+    return _lexicons[lang]
+
+
 VTT_WORD_RE = re.compile(r"[^\W\d_]+", re.UNICODE)
 _dict_jobs = {}
 _dict_jobs_lock = threading.Lock()
@@ -819,6 +875,17 @@ def dict_path_for(vtt_path):
     p = Path(vtt_path)
     name = p.name[:-4] if p.name.lower().endswith(".vtt") else p.name
     return p.with_name(name + ".dict.json")
+
+
+_SUBTITLE_LANG_RE = re.compile(r"[A-Za-z]{2,3}(-[A-Za-z0-9]{1,8})?")
+
+
+def subtitle_language(vtt_path):
+    """Language code from 'Name [id].de.vtt'; 'es' when the name has none."""
+    name = Path(vtt_path).name
+    stem = name[:-4] if name.lower().endswith(".vtt") else name
+    lang = stem.rsplit(".", 1)[-1] if "." in stem else ""
+    return lang if _SUBTITLE_LANG_RE.fullmatch(lang) else "es"
 
 
 def _save_dict_file(dict_path, mapping):
@@ -863,10 +930,11 @@ def _run_dict_job(vtt, rel_vtt, job):
     try:
         words = subtitle_words(vtt)
         job["total"] = len(words)
+        src = subtitle_language(vtt)
         pending = [w for w in words if w not in out]
         for i, w in enumerate(pending):
             try:
-                result = dictionary_lookup(w)
+                result = dictionary_lookup(w, src=src)
             except Exception as e:
                 log.warning("dict job: lookup failed for %r: %s", w, e)
                 result = None
@@ -1417,7 +1485,7 @@ def scan_downloads(download_dir, files=None):
 # Bump when the index.html template changes: the fingerprint below only
 # covers the file listing, so without this an existing index.html would
 # keep the old template until some video is added or removed.
-INDEX_TEMPLATE_VERSION = 95
+INDEX_TEMPLATE_VERSION = 96
 
 
 def static_folder_url(item):
@@ -1761,6 +1829,17 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         '        <div id="pl-subs" hidden></div>',
         '        <div id="pl-dict" hidden></div>',
         '        <button id="pl-copy-subs" type="button" hidden>Copy subtitles</button>',
+        '        <select id="pl-dict-to" title="Dictionary target language" hidden>',
+        '          <option value="en">to English</option>',
+        '          <option value="de">to Deutsch</option>',
+        '          <option value="es">to Español</option>',
+        '          <option value="fr">to Français</option>',
+        '          <option value="zh">to 中文</option>',
+        '          <option value="it">to Italiano</option>',
+        '          <option value="pt">to Português</option>',
+        '          <option value="ja">to 日本語</option>',
+        '          <option value="ru">to Русский</option>',
+        '        </select>',
         '        <span id="pl-copy-status" role="status"></span>',
         '        <div id="pl-now"></div>',
         '      </div>',
@@ -2232,6 +2311,14 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         '  var plCopySubs = document.getElementById("pl-copy-subs");',
         '  var plCopyStatus = document.getElementById("pl-copy-status");',
         "  var plDictEl = document.getElementById(\"pl-dict\");",
+        '  var plDictToSel = document.getElementById("pl-dict-to");',
+        '  try {',
+        '    var savedDictTo = localStorage.getItem("ytwatcher:dict-to");',
+        '    if (savedDictTo) plDictToSel.value = savedDictTo;',
+        '  } catch (e) {}',
+        '  plDictToSel.addEventListener("change", function () {',
+        '    try { localStorage.setItem("ytwatcher:dict-to", plDictToSel.value); } catch (e) {}',
+        "  });",
         "  function plSetSubtitleText(text) {",
         "    // Keep the DOM intact between cue changes so selection survives.",
         "    if (plSubsEl.textContent !== text) {",
@@ -2253,6 +2340,7 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "    }",
         "    plSubsEl.hidden = !text;",
         "    plCopySubs.hidden = !text;",
+        "    plDictToSel.hidden = !text;",
         "    if (!text) plDictEl.hidden = true;",
         "  }",
         "  function plDictShow(word, html) {",
@@ -2266,6 +2354,8 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "    });",
         "  }",
         "  var plDictCache = {}; // item href -> {word: {en, pos, inf}} (offline dict)",
+        '  var plLiveDict = {}; // "from:to:word" -> lookup result (this session)',
+        '  var plSubLang = "es"; // language of the subtitle currently shown',
         "  function plDictRender(word, d) {",
         "    var body = \"<b>\" + d.en + \"</b>\";",
         "    if (d.meanings && d.meanings.length) {",
@@ -2277,19 +2367,26 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "  }",
         "  function plDictLookup(word) {",
         "    if (!word) return;",
-        "    // The per-subtitle dict (built server-side, cached offline) wins:",
-        "    // it works without network and is instant.",
+        "    var from = plSubLang || \"es\";",
+        "    var to = plDictToSel.value || \"en\";",
+        "    // The per-subtitle dict (built server-side, cached offline) only",
+        "    // answers to=en lookups: the files are built into English.",
         "    var item = plIndex >= 0 ? pl[plIndex] : null;",
         "    var local = item && plDictCache[item.href];",
-        "    if (local && local[word.toLowerCase()]) {",
+        '    if (to === "en" && local && local[word.toLowerCase()]) {',
         "      plDictRender(word, local[word.toLowerCase()]);",
         "      return;",
         "    }",
+        '    var ck = from + ":" + to + ":" + word.toLowerCase();',
+        "    if (plLiveDict[ck]) { plDictRender(word, plLiveDict[ck]); return; }",
         "    plDictShow(word, \"looking up\\u2026 (first call after idle can take a minute)\");",
-        "    fetch(API + \"/dictionary?word=\" + encodeURIComponent(word))",
+        '    fetch(API + "/dictionary?word=" + encodeURIComponent(word)',
+        '          + "&from=" + encodeURIComponent(from)',
+        '          + "&to=" + encodeURIComponent(to))',
         "      .then(function (r) {",
         "        return r.json().then(function (d) {",
         "          if (!r.ok) throw new Error(d.error || (\"HTTP \" + r.status));",
+        "          plLiveDict[ck] = d;",
         "          plDictRender(d.word || word, d);",
         "        });",
         "      })",
@@ -2398,6 +2495,7 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "    // like 'es-orig' or 'es-419'.",
         "    var plain = langs.filter(function (l) { return l.indexOf(\"-\") < 0; });",
         "    var lang = plain.length ? plain[0] : langs[0];",
+        "    plSubLang = lang;",
         "    fetch(subs[lang]).then(function (r) {",
         '      if (!r.ok) throw new Error("HTTP " + r.status);',
         "      return r.text();",
@@ -2420,8 +2518,10 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "  function plUpdateSubs() {",
         '    if (!plVideo.classList.contains("audio-only")) {',
         "      var lines = [];",
+        '      plSubLang = "";',
         "      Array.from(plVideo.textTracks).forEach(function (track) {",
         '        if (track.mode !== "showing") return;',
+        '        if (!plSubLang) plSubLang = track.language || "";',
         "        Array.from(track.activeCues || []).forEach(function (cue) {",
         "          lines.push(cue.getCueAsHTML ? cue.getCueAsHTML().textContent : cue.text);",
         "        });",
@@ -3804,27 +3904,34 @@ class ApiHandler(BaseHTTPRequestHandler):
             self._json(404, {"error": "not found"})
 
     def _get_dictionary(self):
-        """Translate one word via the local LLM (GET /dictionary?word=x).
+        """Translate one word (GET /dictionary?word=x&from=es&to=en).
 
-        Cached in dictionary.json; results look like
-        {"en": "...", "pos": "verb", "inf": "comer"}.
+        'from' defaults to the historical Spanish source, 'to' to
+        English. Cached in dictionary.json; results look like
+        {"en": "...", "pos": "verb", "inf": "comer"} ("en" is the gloss
+        field regardless of the target language).
         """
-        word = (urllib.parse.parse_qs(
-            urllib.parse.urlsplit(self.path).query).get("word") or [""])[0]
-        word = word.strip()
+        qs = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+        word = (qs.get("word") or [""])[0].strip()
+        src = (qs.get("from") or ["es"])[0].strip().lower()
+        dst = (qs.get("to") or ["en"])[0].strip().lower()
         if not DICTIONARY_WORD_RE.fullmatch(word):
             self._json(400, {"error": "bad word"})
             return
+        if not (_LANGUAGE_RE.match(src) and _LANGUAGE_RE.match(dst)):
+            self._json(400, {"error": "bad language code"})
+            return
         try:
-            result = dictionary_lookup(word)
+            result = dictionary_lookup(word, src=src, dst=dst)
         except Exception as e:
-            log.warning("dictionary lookup failed for %r: %s", word, e)
+            log.warning("dictionary lookup failed for %r (%s->%s): %s",
+                        word, src, dst, e)
             self._json(502, {"error": "lookup failed (LLM unavailable?)"})
             return
         if not result:
             self._json(404, {"error": "no translation"})
             return
-        self._json(200, {"word": word, **result})
+        self._json(200, {"word": word, "from": src, "to": dst, **result})
 
     def _post_build_dict(self):
         """Start (or report) the per-subtitle dictionary build.
