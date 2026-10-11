@@ -256,21 +256,40 @@ class Handler(BaseHTTPRequestHandler):
 
     def _serve_file(self, name):
         p = TEMP_DIR / name
-        if not name or not p.is_file():
+        if not name:
+            self._send(404, "not found", "text/plain")
+            return
+        try:
+            size = p.stat().st_size
+            f = open(p, "rb")
+        except OSError:
             self._send(404, "not found", "text/plain")
             return
         ctype = mimetypes.guess_type(p.name)[0] or "application/octet-stream"
-        size = p.stat().st_size
         note_access(p.name)  # the 10-min clock restarts on every fetch
+        # Header values are latin-1; non-ASCII titles (CJK, fullwidth
+        # punctuation) must ride in the RFC 5987 filename* parameter.
+        fallback = p.name.encode("ascii", "replace").decode().replace(
+            "\\", "").replace('"', "")
         self.send_response(200)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(size))
         # attachment: browsers save instead of playing inline.
-        self.send_header("Content-Disposition",
-                         f'attachment; filename="{p.name}"')
+        self.send_header(
+            "Content-Disposition",
+            f"attachment; filename=\"{fallback}\"; "
+            f"filename*=UTF-8''{urllib.parse.quote(p.name)}")
         self.end_headers()
-        with open(p, "rb") as f:
-            self.wfile.write(f.read())
+        try:
+            with f:
+                while True:
+                    chunk = f.read(256 * 1024)
+                    if not chunk:
+                        break
+                    self.wfile.write(chunk)
+        except (OSError, BrokenPipeError):
+            # Client went away, or cleanup deleted the file mid-stream.
+            pass
 
     def do_POST(self):
         path = urllib.parse.urlsplit(self.path).path
