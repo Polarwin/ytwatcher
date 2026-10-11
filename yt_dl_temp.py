@@ -235,6 +235,41 @@ aktualisiert sich alle 10 s.</p>
 """
 
 
+PLAY_PAGE = """<!doctype html>
+<html><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>__TITLE__</title>
+<style>
+ html, body {{ margin:0; height:100%; background:#000; }}
+ video {{ width:100vw; height:100vh; object-fit:contain; background:#000; }}
+ #bar {{ position:fixed; top:.4rem; right:.4rem; display:flex; gap:.4rem; }}
+ #bar button {{ padding:.45rem .9rem; background:rgba(42,111,42,.9);
+        border:1px solid #444; border-radius:4px; color:#fff;
+        cursor:pointer; font-size:1rem; }}
+ #title {{ position:fixed; left:.6rem; top:.4rem; color:#bbb;
+        font:.85rem sans-serif; text-shadow:0 0 4px #000;
+        max-width:70vw; overflow:hidden; text-overflow:ellipsis;
+        white-space:nowrap; }}
+</style></head><body>
+<video id="v" src="__SRC__" controls autoplay playsinline></video>
+<div id="bar">
+ <button type="button" onclick="full()">&#x26F6; Fullscreen</button>
+ <button type="button" onclick="history.back()">&#x2715; Zurück</button>
+</div>
+<div id="title">__TITLE__</div>
+<script>
+function full() {{
+  var v = document.getElementById("v");
+  if (v.requestFullscreen) v.requestFullscreen();
+  else if (v.webkitEnterFullscreen) v.webkitEnterFullscreen(); // iOS
+}}
+document.getElementById("v").addEventListener("dblclick", full);
+</script>
+</body></html>
+"""
+
+
 def render_page():
     now = time.time()
     job_rows = []
@@ -255,14 +290,24 @@ def render_page():
     except OSError:
         entries = []
     ttl = current_ttl()
+    file_rows = []
+    try:
+        entries = sorted(TEMP_DIR.iterdir(), key=lambda p: p.stat().st_mtime,
+                         reverse=True)
+    except OSError:
+        entries = []
     for p in entries:
         if p.name in (ACCESS_FILE.name, SETTINGS_FILE.name) \
                 or p.suffix in (".part", ".ytdl") or not p.is_file():
             continue
         left = max(0, ttl - (now - last_activity(p)))
+        ctype = mimetypes.guess_type(p.name)[0] or ""
+        quoted = urllib.parse.quote(p.name)
+        play = (f' · <a href="/play/{quoted}" target="_blank">▶ Play</a>'
+                if ctype.startswith(("video/", "audio/")) else "")
         file_rows.append(
-            f'<div class="file"><a href="/files/{urllib.parse.quote(p.name)}"'
-            f' download>{html.escape(p.name)}</a>'
+            f'<div class="file"><a href="/files/{quoted}"'
+            f' download>{html.escape(p.name)}</a>{play}'
             f'<div class="meta">{fmt_size(p.stat().st_size)} · '
             f'wird in {int(left // 60)}:{int(left % 60):02d} min gelöscht'
             f"</div></div>")
@@ -292,8 +337,91 @@ class Handler(BaseHTTPRequestHandler):
         elif path.startswith("/files/"):
             name = Path(urllib.parse.unquote(path[len("/files/"):])).name
             self._serve_file(name)
+        elif path.startswith("/raw/"):
+            name = Path(urllib.parse.unquote(path[len("/raw/"):])).name
+            self._serve_raw(name)
+        elif path.startswith("/play/"):
+            name = Path(urllib.parse.unquote(path[len("/play/"):])).name
+            self._play(name)
         else:
             self._send(404, "not found", "text/plain")
+
+    def _play(self, name):
+        p = TEMP_DIR / name
+        if not name or not p.is_file():
+            self._send(404, "not found", "text/plain")
+            return
+        ctype = mimetypes.guess_type(p.name)[0] or ""
+        if not ctype.startswith(("video/", "audio/")):
+            self._send(404, "not a media file", "text/plain")
+            return
+        note_access(p.name)  # watching counts as access too
+        quoted = urllib.parse.quote(p.name)
+        body = PLAY_PAGE.replace("__SRC__", f"/raw/{quoted}") \
+                        .replace("__TITLE__", html.escape(p.name))
+        self._send(200, body)
+
+    def _serve_raw(self, name):
+        """Inline file streaming (no attachment) with HTTP Range support —
+        browsers need ranges to seek, and iPhone Safari refuses to play
+        without them."""
+        p = TEMP_DIR / name
+        if not name:
+            self._send(404, "not found", "text/plain")
+            return
+        try:
+            size = p.stat().st_size
+            f = open(p, "rb")
+        except OSError:
+            self._send(404, "not found", "text/plain")
+            return
+        note_access(p.name)
+        ctype = mimetypes.guess_type(p.name)[0] or "application/octet-stream"
+        rng = self.headers.get("Range", "")
+        if rng.startswith("bytes="):
+            try:
+                start_s, _, end_s = rng[6:].partition("-")
+                start = int(start_s) if start_s else 0
+                end = int(end_s) if end_s else size - 1
+                start, end = max(0, start), min(end, size - 1)
+                if start > end:
+                    raise ValueError
+                self.send_response(206)
+                self.send_header("Content-Type", ctype)
+                self.send_header("Accept-Ranges", "bytes")
+                self.send_header("Content-Range",
+                                 f"bytes {start}-{end}/{size}")
+                self.send_header("Content-Length", str(end - start + 1))
+                self.end_headers()
+                f.seek(start)
+                remaining = end - start + 1
+                with f:
+                    while remaining > 0:
+                        chunk = f.read(min(256 * 1024, remaining))
+                        if not chunk:
+                            break
+                        self.wfile.write(chunk)
+                        remaining -= len(chunk)
+                return
+            except (ValueError, OSError):
+                try:
+                    f.close()
+                except OSError:
+                    pass
+        try:
+            self.send_response(200)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Accept-Ranges", "bytes")
+            self.send_header("Content-Length", str(size))
+            self.end_headers()
+            with f:
+                while True:
+                    chunk = f.read(256 * 1024)
+                    if not chunk:
+                        break
+                    self.wfile.write(chunk)
+        except (OSError, BrokenPipeError):
+            pass  # client went away or cleanup removed the file mid-stream
 
     def _serve_file(self, name):
         p = TEMP_DIR / name
