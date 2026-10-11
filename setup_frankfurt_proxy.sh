@@ -26,7 +26,9 @@ systemctl disable --now ytwatcher 2>/dev/null || true
 systemctl disable --now yt-dlp-update.timer 2>/dev/null || true
 
 echo "==> upstream check"
-if curl -s -o /dev/null --max-time 10 "http://$UPSTREAM/"; then
+# -q/--noproxy: as root, curl may read /root/.curlrc or env with a dead
+# proxy — the check must hit the upstream directly.
+if curl -q -sf --noproxy '*' -o /dev/null --max-time 10 "http://$UPSTREAM/"; then
     echo "upstream reachable"
 else
     echo "http://$UPSTREAM/ unreachable." >&2

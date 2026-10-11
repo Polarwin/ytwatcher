@@ -19,7 +19,7 @@ if [ "$EUID" -ne 0 ]; then
 fi
 
 echo "==> upstream check (tailscale must be up)"
-if ! curl -sf --max-time 10 "http://$UPSTREAM/" > /dev/null; then
+if ! curl -q -sf --noproxy '*' --max-time 10 "http://$UPSTREAM/" > /dev/null; then
     echo "http://$UPSTREAM/ unreachable." >&2
     echo "Install + log in tailscale first: curl -fsSL https://tailscale.com/install.sh | sudo sh && sudo tailscale up" >&2
     exit 1
