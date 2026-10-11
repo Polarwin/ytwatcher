@@ -10,6 +10,8 @@ UNIT_FILE="/etc/systemd/system/$SERVICE_NAME.service"
 # Under sudo, $HOME is root's: resolve the invoking user's home so the
 # unit's PATH really contains ~/.local/bin (deno lives there).
 USER_HOME="$(getent passwd "${SUDO_USER:-$USER}" | cut -d: -f6)"
+# Where finished downloads land; on the NAS at home, local disk on a VPS.
+TEMP_DIR="${YT_TEMP_DIR:-/srv/files/static/temp}"
 
 if [ ! -x "$VENV_PYTHON" ]; then
     echo "ERROR: $VENV_PYTHON not found. Create the venv first." >&2
@@ -32,7 +34,7 @@ Environment=PYTHONUNBUFFERED=1
 Environment=PATH=$USER_HOME/.local/bin:/usr/local/bin:/usr/bin:/bin
 # yt-dlp writes its cache under XDG_CACHE_HOME.
 Environment=XDG_CACHE_HOME=$PROJECT_DIR/.cache
-Environment=YT_TEMP_DIR=/srv/files/static/temp
+Environment=YT_TEMP_DIR=$TEMP_DIR
 Environment=YT_TEMP_TTL=600
 Environment=YT_TEMP_PORT=8792
 ExecStart=$VENV_PYTHON yt_dl_temp.py
@@ -40,6 +42,9 @@ Restart=always
 RestartSec=10
 NoNewPrivileges=true
 PrivateTmp=true
+# Bound the JS challenge solver (deno) so a pathological run gets
+# OOM-killed instead of pushing the small VPS into swap thrash.
+MemoryMax=400M
 ProtectSystem=full
 ProtectHome=read-only
 # No ReadWritePaths hole for /srv/files: systemd's bind mount over the
