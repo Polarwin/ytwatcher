@@ -125,6 +125,13 @@ def run_download(job_id, url, preset):
     out = TEMP_DIR / "%(title).200B [%(id)s].%(ext)s"
     cmd = [main.YT_DLP, "--no-playlist", "-f", PRESETS[preset],
            "-o", str(out), url]
+    # Datacenter IPs need the logged-in session to pass YouTube's bot
+    # wall; residential connections usually don't.
+    try:
+        if main.COOKIES_FILE.exists() and main.COOKIES_FILE.stat().st_size:
+            cmd += ["--cookies", str(main.COOKIES_FILE)]
+    except OSError:
+        pass
     try:
         result = subprocess.run(cmd, capture_output=True, text=True,
                                 timeout=1800)
