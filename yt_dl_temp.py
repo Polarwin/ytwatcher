@@ -21,7 +21,7 @@ from pathlib import Path
 import main  # same project: yt-dlp path + quality presets
 
 TEMP_DIR = Path(os.environ.get("YT_TEMP_DIR", "/srv/files/static/temp"))
-TTL_SECONDS = int(os.environ.get("YT_TEMP_TTL", "600"))
+TTL_SECONDS = int(os.environ.get("YT_TEMP_TTL", "3600"))
 PORT = int(os.environ.get("YT_TEMP_PORT", "8792"))
 BIND = os.environ.get("YT_TEMP_BIND", "")
 # Last-fetch timestamps survive restarts. The NFS mount is noatime, so
@@ -115,7 +115,7 @@ def cleanup_loop():
         except OSError:
             pass
         with _jobs_lock:
-            stale = [j for j, v in _jobs.items() if now - v["ts"] > 3600]
+            stale = [j for j, v in _jobs.items() if now - v["ts"] > TTL_SECONDS]
             for j in stale:
                 del _jobs[j]
         time.sleep(30)

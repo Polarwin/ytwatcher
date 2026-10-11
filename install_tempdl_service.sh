@@ -35,7 +35,7 @@ Environment=PATH=$USER_HOME/.local/bin:/usr/local/bin:/usr/bin:/bin
 # yt-dlp writes its cache under XDG_CACHE_HOME.
 Environment=XDG_CACHE_HOME=$PROJECT_DIR/.cache
 Environment=YT_TEMP_DIR=$TEMP_DIR
-Environment=YT_TEMP_TTL=600
+Environment=YT_TEMP_TTL=3600
 Environment=YT_TEMP_PORT=8792
 ExecStart=$VENV_PYTHON yt_dl_temp.py
 Restart=always
