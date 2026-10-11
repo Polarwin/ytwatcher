@@ -28,6 +28,37 @@ BIND = os.environ.get("YT_TEMP_BIND", "")
 # the access time must be tracked by the app itself.
 ACCESS_FILE = Path(os.environ.get(
     "YT_TEMP_ACCESS", str(TEMP_DIR.parent / ".yt_temp_access.json")))
+# On-screen settings (e.g. how long files are kept); the env values
+# above are only the initial defaults.
+SETTINGS_FILE = Path(os.environ.get(
+    "YT_TEMP_SETTINGS", str(TEMP_DIR.parent / ".yt_temp_settings.json")))
+_settings = {"ttl_minutes": max(1, TTL_SECONDS // 60)}
+_settings_lock = threading.Lock()
+
+
+def load_settings():
+    global _settings
+    try:
+        data = json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
+        if isinstance(data, dict):
+            minutes = int(data.get("ttl_minutes", _settings["ttl_minutes"]))
+            _settings = {"ttl_minutes": max(1, min(minutes, 7 * 24 * 60))}
+    except (OSError, ValueError, TypeError):
+        pass
+
+
+def save_settings():
+    try:
+        tmp = SETTINGS_FILE.with_suffix(".tmp")
+        tmp.write_text(json.dumps(_settings), encoding="utf-8")
+        tmp.replace(SETTINGS_FILE)
+    except OSError:
+        pass
+
+
+def current_ttl():
+    with _settings_lock:
+        return _settings["ttl_minutes"] * 60
 
 PRESETS = {
     "video": main.MANUAL_QUALITY_PRESETS["720"],
@@ -94,14 +125,15 @@ def default_bind():
 def cleanup_loop():
     while True:
         now = time.time()
+        ttl = current_ttl()
         try:
             names = set()
             for p in TEMP_DIR.iterdir():
-                if p.name == ACCESS_FILE.name:
+                if p.name == ACCESS_FILE.name or p.name == SETTINGS_FILE.name:
                     continue
                 names.add(p.name)
                 try:
-                    if now - last_activity(p) > TTL_SECONDS:
+                    if now - last_activity(p) > ttl:
                         p.unlink()
                 except OSError:
                     pass
@@ -115,7 +147,7 @@ def cleanup_loop():
         except OSError:
             pass
         with _jobs_lock:
-            stale = [j for j, v in _jobs.items() if now - v["ts"] > TTL_SECONDS]
+            stale = [j for j, v in _jobs.items() if now - v["ts"] > ttl]
             for j in stale:
                 del _jobs[j]
         time.sleep(30)
@@ -188,10 +220,16 @@ PAGE = """<!doctype html>
  </select>
  <button type="submit">Download</button>
 </form>
+<form method="post" action="/settings" class="settings">
+ <label>Dateien behalten für
+  <input type="number" name="ttl_minutes" min="1" max="10080"
+         value="{ttl_minutes}" style="width:5.5em"> Minuten</label>
+ <button type="submit">Speichern</button>
+</form>
 {jobs}
 {files}
-<p class="meta">Dateien werden {ttl} Minuten nach dem letzten Abruf
-automatisch gelöscht (abrufen = Download auf dein Gerät). Seite
+<p class="meta">Dateien und Verlauf werden {ttl} Minuten nach dem letzten
+Abruf automatisch gelöscht (abrufen = Download auf dein Gerät). Seite
 aktualisiert sich alle 10 s.</p>
 </body></html>
 """
@@ -216,11 +254,12 @@ def render_page():
                          reverse=True)
     except OSError:
         entries = []
+    ttl = current_ttl()
     for p in entries:
-        if p.name == ACCESS_FILE.name or p.suffix in (".part", ".ytdl") \
-                or not p.is_file():
+        if p.name in (ACCESS_FILE.name, SETTINGS_FILE.name) \
+                or p.suffix in (".part", ".ytdl") or not p.is_file():
             continue
-        left = max(0, TTL_SECONDS - (now - last_activity(p)))
+        left = max(0, ttl - (now - last_activity(p)))
         file_rows.append(
             f'<div class="file"><a href="/files/{urllib.parse.quote(p.name)}"'
             f' download>{html.escape(p.name)}</a>'
@@ -229,8 +268,10 @@ def render_page():
             f"</div></div>")
     jobs_html = ("<h2>Jobs</h2>" + "".join(job_rows)) if job_rows else ""
     files_html = ("<h2>Dateien</h2>" + "".join(file_rows)) if file_rows else ""
-    return PAGE.format(jobs=jobs_html, files=files_html,
-                       ttl=TTL_SECONDS // 60)
+    with _settings_lock:
+        minutes = _settings["ttl_minutes"]
+    return PAGE.format(jobs=jobs_html, files=files_html, ttl=minutes,
+                       ttl_minutes=minutes)
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -293,7 +334,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         path = urllib.parse.urlsplit(self.path).path
-        if path != "/download":
+        if path not in ("/download", "/settings"):
             self._send(404, "not found", "text/plain")
             return
         length = int(self.headers.get("Content-Length", 0))
@@ -306,6 +347,25 @@ class Handler(BaseHTTPRequestHandler):
                 data = {}
         else:
             data = dict(urllib.parse.parse_qsl(raw))
+        if path == "/settings":
+            try:
+                minutes = int(data.get("ttl_minutes", ""))
+            except (TypeError, ValueError):
+                minutes = 0
+            if not 1 <= minutes <= 7 * 24 * 60:
+                self._send(400, render_page().replace(
+                    "<h1>YouTube Download</h1>",
+                    '<h1>YouTube Download</h1><div class="job err">'
+                    "Aufbewahrungsfrist zwischen 1 und 10080 Minuten"
+                    "</div>"))
+                return
+            with _settings_lock:
+                _settings["ttl_minutes"] = minutes
+                save_settings()
+            self.send_response(303)
+            self.send_header("Location", "/")
+            self.end_headers()
+            return
         url = str(data.get("url", "")).strip()
         preset = data.get("preset", "video")
         if not URL_RE.match(url) or preset not in PRESETS:
@@ -332,11 +392,12 @@ class Handler(BaseHTTPRequestHandler):
 def main_():
     TEMP_DIR.mkdir(parents=True, exist_ok=True)
     load_access()
+    load_settings()
     threading.Thread(target=cleanup_loop, daemon=True).start()
     host = default_bind()
     server = ThreadingHTTPServer((host, PORT), Handler)
     print(f"serving on http://{host}:{PORT}, temp dir {TEMP_DIR}, "
-          f"ttl {TTL_SECONDS}s", flush=True)
+          f"ttl {current_ttl()}s", flush=True)
     server.serve_forever()
 
 
