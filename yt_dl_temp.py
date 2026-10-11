@@ -155,7 +155,8 @@ def cleanup_loop():
 
 def run_download(job_id, url, preset):
     out = TEMP_DIR / "%(title).200B [%(id)s].%(ext)s"
-    cmd = [main.YT_DLP, "--no-playlist", "-f", PRESETS[preset],
+    fmt = PRESETS[preset]
+    cmd = [main.YT_DLP, "--no-playlist", "-f", fmt,
            "-o", str(out), url]
     # Datacenter IPs need the logged-in session to pass YouTube's bot
     # wall; residential connections usually don't.
@@ -164,16 +165,30 @@ def run_download(job_id, url, preset):
             cmd += ["--cookies", str(main.COOKIES_FILE)]
     except OSError:
         pass
+    started = time.monotonic()
+    print(f"manual job {job_id}: started preset={preset} format={fmt} url={url}",
+          flush=True)
     try:
         result = subprocess.run(cmd, capture_output=True, text=True,
                                 timeout=1800)
         ok = result.returncode == 0
         err = "" if ok else result.stderr.strip()[-1500:]
+        print(f"manual job {job_id}: yt-dlp finished rc={result.returncode} "
+              f"elapsed={time.monotonic() - started:.1f}s", flush=True)
+        if result.stdout.strip():
+            print(f"manual job {job_id}: yt-dlp stdout:\n"
+                  f"{result.stdout.strip()[-2000:]}", flush=True)
     except subprocess.TimeoutExpired:
         ok, err = False, "download timed out"
+    except Exception as exc:
+        ok, err = False, f"{type(exc).__name__}: {exc}"
     if not ok:
-        # Full stderr to the journal; the page only shows a tail.
-        print(f"download failed for {url}:\n{err}", flush=True)
+        # Full failure detail to the journal; the page shows the same error.
+        print(f"manual job {job_id}: FAILED preset={preset} format={fmt} "
+              f"url={url}\n{err}", flush=True)
+    else:
+        print(f"manual job {job_id}: completed preset={preset} "
+              f"elapsed={time.monotonic() - started:.1f}s", flush=True)
     with _jobs_lock:
         _jobs[job_id]["status"] = "done" if ok else "failed"
         _jobs[job_id]["error"] = err
@@ -369,6 +384,8 @@ class Handler(BaseHTTPRequestHandler):
         url = str(data.get("url", "")).strip()
         preset = data.get("preset", "video")
         if not URL_RE.match(url) or preset not in PRESETS:
+            print(f"manual download rejected: url_valid={bool(URL_RE.match(url))} "
+                  f"preset={preset!r}", flush=True)
             self._send(400, render_page().replace(
                 "<h1>YouTube Download</h1>",
                 '<h1>YouTube Download</h1><div class="job err">ungültige '
@@ -378,6 +395,8 @@ class Handler(BaseHTTPRequestHandler):
         with _jobs_lock:
             _jobs[job_id] = {"url": url, "preset": preset, "ts": time.time(),
                              "status": "starting", "error": ""}
+        print(f"manual job {job_id}: accepted preset={preset} url={url}",
+              flush=True)
         threading.Thread(target=run_download,
                          args=(job_id, url, preset), daemon=True).start()
         self.send_response(303)
