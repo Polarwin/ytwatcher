@@ -1485,7 +1485,7 @@ def scan_downloads(download_dir, files=None):
 # Bump when the index.html template changes: the fingerprint below only
 # covers the file listing, so without this an existing index.html would
 # keep the old template until some video is added or removed.
-INDEX_TEMPLATE_VERSION = 96
+INDEX_TEMPLATE_VERSION = 97
 
 
 def static_folder_url(item):
@@ -2517,16 +2517,10 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "  }",
         "  function plUpdateSubs() {",
         '    if (!plVideo.classList.contains("audio-only")) {',
-        "      var lines = [];",
-        '      plSubLang = "";',
-        "      Array.from(plVideo.textTracks).forEach(function (track) {",
-        '        if (track.mode !== "showing") return;',
-        '        if (!plSubLang) plSubLang = track.language || "";',
-        "        Array.from(track.activeCues || []).forEach(function (cue) {",
-        "          lines.push(cue.getCueAsHTML ? cue.getCueAsHTML().textContent : cue.text);",
-        "        });",
-        "      });",
-        '      plSetSubtitleText(lines.join("\\n"));',
+        "      // Let the browser render video captions natively. Mirroring each",
+        "      // cue change into page DOM makes mobile browsers repaint the",
+        "      // video layer and can flash the whole screen. The custom text",
+        "      // block is only needed for audio-only playback below.",
         "      return;",
         "    }",
         "    if (!plSubCues || plIndex < 0 || !pl[plIndex]",
