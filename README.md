@@ -154,6 +154,28 @@ any other download. The video ID is also added to `state.json` so the
 watcher never re-downloads it afterwards, and `index.html` is rebuilt
 right away.
 
+## Private Frankfurt downloader
+
+The separate `yt_dl_temp.py` app isolates downloads by login account. Each
+account has its own files, job history, last-access times, and retention
+setting. Download and playback URLs verify the login too; knowing another
+account's filename does not grant access. Responses are private and are
+not stored in browser/proxy caches.
+
+Install its extra dependency with
+`.venv/bin/pip install -r requirements-tempdl.txt`. Keep the same
+`username bcrypt-hash` records as the Caddy `basic_auth` block in `.web-users`
+beside the script, or set `YT_TEMP_USERS_FILE` to that file. This file is
+gitignored. Caddy must pass the original `Authorization` header to the app,
+which is the default reverse-proxy behavior. Account-file changes take effect
+without restarting the app.
+
+`YT_TEMP_DIR` defaults to `/srv/files/yt-dl-private` and must be outside the
+shared `/srv/files/static` root. Each login uses a separate private subfolder.
+Existing shared files have no recorded owner, so they are hidden from all
+accounts and expire through the existing cleanup. New downloads retain the
+same download/play buttons and user-configurable retention period.
+
 ## Cookies
 
 Some videos (members-only, age-restricted, bot-checked) only download

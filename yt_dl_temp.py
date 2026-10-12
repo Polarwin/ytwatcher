@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
 """Minimal YouTube download page.
 
-Paste a link, the server downloads it into static/temp, and the file can
-be fetched from the list. Files (and partials) vanish TTL_SECONDS after
-the download finished. Run behind the frankfurt Caddy (basic auth);
-binds the tailscale IP so the proxy can reach it.
+Each authenticated account downloads into its own private folder. Files
+expire after that user's retention period since their last access. Run
+behind Frankfurt Caddy (basic auth); verify the same accounts locally so
+both the listing and direct file URLs enforce ownership.
 """
+import base64
+import binascii
+import hashlib
+import hmac
 import html
 import json
 import mimetypes
@@ -15,12 +19,17 @@ import subprocess
 import threading
 import time
 import urllib.parse
+import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+import bcrypt
+
 import main  # same project: yt-dlp path + quality presets
 
-TEMP_DIR = Path(os.environ.get("YT_TEMP_DIR", "/srv/files/static/temp"))
+TEMP_DIR = Path(os.environ.get("YT_TEMP_DIR", "/srv/files/yt-dl-private"))
+AUTH_USERS_FILE = Path(os.environ.get(
+    "YT_TEMP_USERS_FILE", str(Path(__file__).with_name(".web-users"))))
 TTL_SECONDS = int(os.environ.get("YT_TEMP_TTL", "3600"))
 PORT = int(os.environ.get("YT_TEMP_PORT", "8792"))
 BIND = os.environ.get("YT_TEMP_BIND", "")
@@ -32,8 +41,101 @@ ACCESS_FILE = Path(os.environ.get(
 # above are only the initial defaults.
 SETTINGS_FILE = Path(os.environ.get(
     "YT_TEMP_SETTINGS", str(TEMP_DIR.parent / ".yt_temp_settings.json")))
-_settings = {"ttl_minutes": max(1, TTL_SECONDS // 60)}
+_settings = {"ttl_minutes": max(1, TTL_SECONDS // 60), "users": {}}
 _settings_lock = threading.Lock()
+_auth_lock = threading.Lock()
+_auth_version = None
+_auth_accounts = {}
+_auth_cache = {}
+_auth_secret = os.urandom(32)
+
+
+def authenticated_user(authorization):
+    """Verify Basic credentials against the same bcrypt accounts as Caddy.
+
+    Never trust a browser-supplied username/header. Cache only successful
+    password checks, using an HMAC rather than storing plaintext passwords.
+    Credential-file changes invalidate all cached authentications.
+    """
+    if not authorization or len(authorization) > 4096:
+        return None
+    scheme, _, encoded = authorization.partition(" ")
+    if scheme.lower() != "basic":
+        return None
+    try:
+        decoded = base64.b64decode(encoded, validate=True).decode("utf-8")
+    except (binascii.Error, UnicodeError):
+        return None
+    user, separator, password = decoded.partition(":")
+    if not separator or not user or len(user) > 256:
+        return None
+    password = password.encode("utf-8")
+    if len(password) > 72:
+        return None
+    global _auth_version, _auth_accounts
+    with _auth_lock:
+        try:
+            stat = AUTH_USERS_FILE.stat()
+            version = (stat.st_mtime_ns, stat.st_size, stat.st_ino)
+            if version != _auth_version:
+                accounts = {}
+                for line in AUTH_USERS_FILE.read_text(encoding="utf-8").splitlines():
+                    if not line.strip() or line.lstrip().startswith("#"):
+                        continue
+                    name, hashed = line.split()
+                    if not hashed.startswith(("$2a$", "$2b$", "$2y$")):
+                        raise ValueError("Expected bcrypt password hash")
+                    accounts[name] = hashed.encode("ascii")
+                _auth_accounts = accounts
+                _auth_version = version
+                _auth_cache.clear()
+        except (OSError, ValueError, UnicodeError):
+            _auth_cache.clear()
+            _auth_accounts = {}
+            _auth_version = None
+            return None
+        hashed = _auth_accounts.get(user)
+        if hashed is None:
+            return None
+        key = hmac.digest(_auth_secret, decoded.encode("utf-8"), "sha256")
+        if _auth_cache.get(key, 0) > time.monotonic():
+            return user
+        try:
+            valid = bcrypt.checkpw(password, hashed)
+        except ValueError:
+            valid = False
+        if not valid:
+            return None
+        if len(_auth_cache) >= 256:
+            _auth_cache.clear()
+        _auth_cache[key] = time.monotonic() + 300
+        return user
+
+
+def user_key(user):
+    return "u_" + hashlib.sha256(user.encode("utf-8")).hexdigest()
+
+
+def user_directory(user, create=False):
+    folder = TEMP_DIR / user_key(user)
+    if folder.is_symlink():
+        raise ValueError("User folder must not be a symlink")
+    if create:
+        folder.mkdir(mode=0o700, parents=True, exist_ok=True)
+    return folder
+
+
+def user_file(user, name):
+    """Only a regular, completed file directly inside this user's folder."""
+    if not name or name in (".", "..") or Path(name).name != name:
+        return None
+    try:
+        path = user_directory(user) / name
+        if path.is_symlink() or not path.is_file() or path.suffix in (".part", ".ytdl"):
+            return None
+        return path
+    except (OSError, ValueError):
+        return None
 
 
 def load_settings():
@@ -42,23 +144,28 @@ def load_settings():
         data = json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
         if isinstance(data, dict):
             minutes = int(data.get("ttl_minutes", _settings["ttl_minutes"]))
-            _settings = {"ttl_minutes": max(1, min(minutes, 7 * 24 * 60))}
+            users = data.get("users", {})
+            if not isinstance(users, dict):
+                users = {}
+            _settings = {"ttl_minutes": max(1, min(minutes, 7 * 24 * 60)),
+                         "users": {str(user): max(1, min(int(value), 7 * 24 * 60))
+                                   for user, value in users.items()}}
     except (OSError, ValueError, TypeError):
         pass
 
 
 def save_settings():
     try:
-        tmp = SETTINGS_FILE.with_suffix(".tmp")
+        tmp = main._tmp_path(SETTINGS_FILE)
         tmp.write_text(json.dumps(_settings), encoding="utf-8")
         tmp.replace(SETTINGS_FILE)
     except OSError:
         pass
 
 
-def current_ttl():
+def current_ttl(user=None):
     with _settings_lock:
-        return _settings["ttl_minutes"] * 60
+        return _settings["users"].get(user, _settings["ttl_minutes"]) * 60
 
 PRESETS = {
     "video": main.MANUAL_QUALITY_PRESETS["720"],
@@ -69,7 +176,7 @@ URL_RE = re.compile(r"^https?://\S+$")
 
 _jobs = {}
 _jobs_lock = threading.Lock()
-# filename -> last fetch timestamp (from their device); kept in ACCESS_FILE.
+# Private relative path -> last fetch timestamp; kept in ACCESS_FILE.
 _access = {}
 _access_lock = threading.Lock()
 
@@ -86,16 +193,16 @@ def load_access():
 
 def save_access():
     try:
-        tmp = ACCESS_FILE.with_suffix(".tmp")
+        tmp = main._tmp_path(ACCESS_FILE)
         tmp.write_text(json.dumps(_access), encoding="utf-8")
         tmp.replace(ACCESS_FILE)
     except OSError:
         pass
 
 
-def note_access(name):
+def note_access(path):
     with _access_lock:
-        _access[name] = time.time()
+        _access[path.relative_to(TEMP_DIR).as_posix()] = time.time()
         save_access()
 
 
@@ -105,7 +212,7 @@ def last_activity(path):
     except OSError:
         return 0
     with _access_lock:
-        return max(mtime, _access.get(path.name, 0))
+        return max(mtime, _access.get(path.relative_to(TEMP_DIR).as_posix(), 0))
 
 
 def default_bind():
@@ -122,40 +229,64 @@ def default_bind():
     return "127.0.0.1"
 
 
-def cleanup_loop():
-    while True:
-        now = time.time()
-        ttl = current_ttl()
-        try:
-            names = set()
-            for p in TEMP_DIR.iterdir():
-                if p.name == ACCESS_FILE.name or p.name == SETTINGS_FILE.name:
+def cleanup_once(now=None):
+    now = time.time() if now is None else now
+    with _settings_lock:
+        default_ttl = _settings["ttl_minutes"] * 60
+        user_ttls = {user_key(u): minutes * 60 for u, minutes in _settings["users"].items()}
+    with _jobs_lock:
+        active = {user_key(j["user"]) for j in _jobs.values()
+                  if j["status"] in ("starting", "downloading")}
+    names = set()
+    try:
+        for folder in TEMP_DIR.iterdir():
+            if folder.is_symlink():
+                continue
+            # Old shared files have no known owner: never list them for any
+            # account, but let the normal retention cleanup expire them.
+            if folder.is_file():
+                files, ttl, busy = [folder], default_ttl, False
+            elif folder.is_dir() and re.fullmatch(r"u_[0-9a-f]{64}", folder.name):
+                files, ttl, busy = list(folder.iterdir()), user_ttls.get(folder.name, default_ttl), folder.name in active
+            else:
+                continue
+            for path in files:
+                if path in (ACCESS_FILE, SETTINGS_FILE) or path.is_symlink() or not path.is_file():
                     continue
-                names.add(p.name)
                 try:
-                    if now - last_activity(p) > ttl:
-                        p.unlink()
+                    if not busy and now - last_activity(path) > ttl:
+                        path.unlink()
+                    else:
+                        names.add(path.relative_to(TEMP_DIR).as_posix())
                 except OSError:
                     pass
-            # Drop access entries whose files are gone.
-            with _access_lock:
-                gone = [n for n in _access if n not in names]
-                if gone:
-                    for n in gone:
-                        del _access[n]
-                    save_access()
-        except OSError:
-            pass
-        with _jobs_lock:
-            stale = [j for j, v in _jobs.items() if now - v["ts"] > ttl]
-            for j in stale:
-                del _jobs[j]
+        with _access_lock:
+            gone = [n for n in _access if n not in names]
+            if gone:
+                for name in gone:
+                    del _access[name]
+                save_access()
+    except OSError:
+        pass
+    with _jobs_lock:
+        stale = [key for key, job in _jobs.items()
+                 if job["status"] not in ("starting", "downloading")
+                 and now - job["ts"] > current_ttl(job["user"])]
+        for key in stale:
+            del _jobs[key]
+
+
+def cleanup_loop():
+    while True:
+        cleanup_once()
         time.sleep(30)
 
 
-def run_download(job_id, url, preset):
-    out = TEMP_DIR / "%(title).200B [%(id)s].%(ext)s"
-    cmd = [main.YT_DLP, "--no-playlist", "-f", PRESETS[preset],
+def run_download(job_id, url, preset, user):
+    folder = TEMP_DIR / user_key(user)
+    out = folder / "%(title).200B [%(id)s].%(ext)s"
+    cmd = [main.YT_DLP, "--no-playlist", "--no-mtime",
+           "--print", "after_move:%(filepath)s", "-f", PRESETS[preset],
            "-o", str(out), url]
     # Datacenter IPs need the logged-in session to pass YouTube's bot
     # wall; residential connections usually don't.
@@ -165,18 +296,29 @@ def run_download(job_id, url, preset):
     except OSError:
         pass
     try:
+        user_directory(user, create=True)
         result = subprocess.run(cmd, capture_output=True, text=True,
                                 timeout=1800)
         ok = result.returncode == 0
         err = "" if ok else result.stderr.strip()[-1500:]
+        if ok:
+            for line in result.stdout.splitlines():
+                path = Path(line.strip())
+                if path.parent == folder and user_file(user, path.name) is not None:
+                    note_access(path)
     except subprocess.TimeoutExpired:
         ok, err = False, "download timed out"
+    except (OSError, ValueError) as exc:
+        ok, err = False, str(exc)
     if not ok:
         # Full stderr to the journal; the page only shows a tail.
         print(f"download failed for {url}:\n{err}", flush=True)
     with _jobs_lock:
-        _jobs[job_id]["status"] = "done" if ok else "failed"
-        _jobs[job_id]["error"] = err
+        job = _jobs.get(job_id)
+        if job is not None:
+            job["status"] = "done" if ok else "failed"
+            job["error"] = err
+            job["ts"] = time.time()
 
 
 def fmt_size(n):
@@ -270,14 +412,14 @@ document.getElementById("v").addEventListener("dblclick", full);
 """
 
 
-def render_page():
+def render_page(user):
     now = time.time()
     job_rows = []
     with _jobs_lock:
-        jobs = list(_jobs.values())
+        jobs = [dict(job) for job in _jobs.values() if job["user"] == user]
     for j in sorted(jobs, key=lambda v: v["ts"], reverse=True)[:5]:
         cls = "err" if j["status"] == "failed" else "meta"
-        note = {"downloading": "lädt…", "done": "fertig",
+        note = {"starting": "lädt…", "downloading": "lädt…", "done": "fertig",
                 "failed": html.escape(j["error"] or "fehlgeschlagen")}
         job_rows.append(
             f'<div class="job"><span class="meta">{html.escape(j["url"])}'
@@ -285,20 +427,14 @@ def render_page():
             f"</span></div>")
     file_rows = []
     try:
-        entries = sorted(TEMP_DIR.iterdir(), key=lambda p: p.stat().st_mtime,
+        entries = sorted(user_directory(user).iterdir(), key=lambda p: p.stat().st_mtime,
                          reverse=True)
-    except OSError:
+    except (OSError, ValueError):
         entries = []
-    ttl = current_ttl()
-    file_rows = []
-    try:
-        entries = sorted(TEMP_DIR.iterdir(), key=lambda p: p.stat().st_mtime,
-                         reverse=True)
-    except OSError:
-        entries = []
+    ttl = current_ttl(user)
     for p in entries:
         if p.name in (ACCESS_FILE.name, SETTINGS_FILE.name) \
-                or p.suffix in (".part", ".ytdl") or not p.is_file():
+                or user_file(user, p.name) is None:
             continue
         left = max(0, ttl - (now - last_activity(p)))
         ctype = mimetypes.guess_type(p.name)[0] or ""
@@ -313,49 +449,70 @@ def render_page():
             f"</div></div>")
     jobs_html = ("<h2>Jobs</h2>" + "".join(job_rows)) if job_rows else ""
     files_html = ("<h2>Dateien</h2>" + "".join(file_rows)) if file_rows else ""
-    with _settings_lock:
-        minutes = _settings["ttl_minutes"]
+    minutes = ttl // 60
     return PAGE.format(jobs=jobs_html, files=files_html, ttl=minutes,
                        ttl_minutes=minutes)
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "yt-dl-temp/1.0"
+    server_version = "yt-dl-temp/2.0"
+
+    def _private_headers(self):
+        self.send_header("Cache-Control", "private, no-store")
+        self.send_header("Vary", "Authorization")
+
+    def _require_user(self):
+        credentials = self.headers.get_all("Authorization") or []
+        self.user = authenticated_user(credentials[0]) if len(credentials) == 1 else None
+        if self.user is not None:
+            return True
+        body = b"Authentication required"
+        self.send_response(401)
+        self.send_header("WWW-Authenticate", 'Basic realm="YouTube Download", charset="UTF-8"')
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self._private_headers()
+        self.end_headers()
+        self.wfile.write(body)
+        return False
 
     def _send(self, code, body, ctype="text/html; charset=utf-8"):
         data = body.encode() if isinstance(body, str) else body
         self.send_response(code)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(data)))
+        self._private_headers()
         self.end_headers()
         self.wfile.write(data)
 
     def do_GET(self):
+        if not self._require_user():
+            return
         path = urllib.parse.urlsplit(self.path).path
         if path in ("/", "/index.html"):
-            self._send(200, render_page())
+            self._send(200, render_page(self.user))
         elif path.startswith("/files/"):
-            name = Path(urllib.parse.unquote(path[len("/files/"):])).name
+            name = urllib.parse.unquote(path[len("/files/"):])
             self._serve_file(name)
         elif path.startswith("/raw/"):
-            name = Path(urllib.parse.unquote(path[len("/raw/"):])).name
+            name = urllib.parse.unquote(path[len("/raw/"):])
             self._serve_raw(name)
         elif path.startswith("/play/"):
-            name = Path(urllib.parse.unquote(path[len("/play/"):])).name
+            name = urllib.parse.unquote(path[len("/play/"):])
             self._play(name)
         else:
             self._send(404, "not found", "text/plain")
 
     def _play(self, name):
-        p = TEMP_DIR / name
-        if not name or not p.is_file():
+        p = user_file(self.user, name)
+        if p is None:
             self._send(404, "not found", "text/plain")
             return
         ctype = mimetypes.guess_type(p.name)[0] or ""
         if not ctype.startswith(("video/", "audio/")):
             self._send(404, "not a media file", "text/plain")
             return
-        note_access(p.name)  # watching counts as access too
+        note_access(p)  # watching counts as access too
         quoted = urllib.parse.quote(p.name)
         body = PLAY_PAGE.replace("__SRC__", f"/raw/{quoted}") \
                         .replace("__TITLE__", html.escape(p.name))
@@ -365,8 +522,8 @@ class Handler(BaseHTTPRequestHandler):
         """Inline file streaming (no attachment) with HTTP Range support —
         browsers need ranges to seek, and iPhone Safari refuses to play
         without them."""
-        p = TEMP_DIR / name
-        if not name:
+        p = user_file(self.user, name)
+        if p is None:
             self._send(404, "not found", "text/plain")
             return
         try:
@@ -375,7 +532,7 @@ class Handler(BaseHTTPRequestHandler):
         except OSError:
             self._send(404, "not found", "text/plain")
             return
-        note_access(p.name)
+        note_access(p)
         ctype = mimetypes.guess_type(p.name)[0] or "application/octet-stream"
         rng = self.headers.get("Range", "")
         if rng.startswith("bytes="):
@@ -392,6 +549,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_header("Content-Range",
                                  f"bytes {start}-{end}/{size}")
                 self.send_header("Content-Length", str(end - start + 1))
+                self._private_headers()
                 self.end_headers()
                 f.seek(start)
                 remaining = end - start + 1
@@ -413,6 +571,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Type", ctype)
             self.send_header("Accept-Ranges", "bytes")
             self.send_header("Content-Length", str(size))
+            self._private_headers()
             self.end_headers()
             with f:
                 while True:
@@ -424,8 +583,8 @@ class Handler(BaseHTTPRequestHandler):
             pass  # client went away or cleanup removed the file mid-stream
 
     def _serve_file(self, name):
-        p = TEMP_DIR / name
-        if not name:
+        p = user_file(self.user, name)
+        if p is None:
             self._send(404, "not found", "text/plain")
             return
         try:
@@ -435,7 +594,7 @@ class Handler(BaseHTTPRequestHandler):
             self._send(404, "not found", "text/plain")
             return
         ctype = mimetypes.guess_type(p.name)[0] or "application/octet-stream"
-        note_access(p.name)  # the 10-min clock restarts on every fetch
+        note_access(p)  # the user's retention clock restarts on every fetch
         # Header values are latin-1; non-ASCII titles (CJK, fullwidth
         # punctuation) must ride in the RFC 5987 filename* parameter.
         fallback = p.name.encode("ascii", "replace").decode().replace(
@@ -448,6 +607,7 @@ class Handler(BaseHTTPRequestHandler):
             "Content-Disposition",
             f"attachment; filename=\"{fallback}\"; "
             f"filename*=UTF-8''{urllib.parse.quote(p.name)}")
+        self._private_headers()
         self.end_headers()
         try:
             with f:
@@ -461,17 +621,29 @@ class Handler(BaseHTTPRequestHandler):
             pass
 
     def do_POST(self):
+        if not self._require_user():
+            return
         path = urllib.parse.urlsplit(self.path).path
         if path not in ("/download", "/settings"):
             self._send(404, "not found", "text/plain")
             return
-        length = int(self.headers.get("Content-Length", 0))
+        try:
+            length = int(self.headers.get("Content-Length", 0))
+        except ValueError:
+            self._send(400, "Invalid Content-Length", "text/plain")
+            return
+        if not 0 <= length <= main.MAX_REQUEST_BODY:
+            self._send(413, "Request body too large", "text/plain")
+            return
+        self.connection.settimeout(main.REQUEST_BODY_TIMEOUT)
         raw = self.rfile.read(length).decode("utf-8", "replace")
         ctype = self.headers.get("Content-Type", "")
         if "application/json" in ctype:
             try:
                 data = json.loads(raw or "{}")
-            except json.JSONDecodeError:
+                if not isinstance(data, dict):
+                    raise ValueError("Expected a JSON object")
+            except ValueError:
                 data = {}
         else:
             data = dict(urllib.parse.parse_qsl(raw))
@@ -481,35 +653,42 @@ class Handler(BaseHTTPRequestHandler):
             except (TypeError, ValueError):
                 minutes = 0
             if not 1 <= minutes <= 7 * 24 * 60:
-                self._send(400, render_page().replace(
+                self._send(400, render_page(self.user).replace(
                     "<h1>YouTube Download</h1>",
                     '<h1>YouTube Download</h1><div class="job err">'
                     "Aufbewahrungsfrist zwischen 1 und 10080 Minuten"
                     "</div>"))
                 return
             with _settings_lock:
-                _settings["ttl_minutes"] = minutes
+                _settings["users"][self.user] = minutes
                 save_settings()
             self.send_response(303)
             self.send_header("Location", "/")
+            self._private_headers()
             self.end_headers()
             return
         url = str(data.get("url", "")).strip()
         preset = data.get("preset", "video")
         if not URL_RE.match(url) or preset not in PRESETS:
-            self._send(400, render_page().replace(
+            self._send(400, render_page(self.user).replace(
                 "<h1>YouTube Download</h1>",
                 '<h1>YouTube Download</h1><div class="job err">ungültige '
                 "URL oder Format</div>"))
             return
-        job_id = f"{int(time.time() * 1000):x}"
+        try:
+            user_directory(self.user, create=True)
+        except (OSError, ValueError):
+            self._send(500, "Private download folder unavailable", "text/plain")
+            return
+        job_id = uuid.uuid4().hex
         with _jobs_lock:
-            _jobs[job_id] = {"url": url, "preset": preset, "ts": time.time(),
+            _jobs[job_id] = {"user": self.user, "url": url, "preset": preset, "ts": time.time(),
                              "status": "starting", "error": ""}
         threading.Thread(target=run_download,
-                         args=(job_id, url, preset), daemon=True).start()
+                         args=(job_id, url, preset, self.user), daemon=True).start()
         self.send_response(303)
         self.send_header("Location", "/")
+        self._private_headers()
         self.end_headers()
 
     def log_message(self, fmt, *args):  # quieter journal
@@ -518,7 +697,11 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main_():
-    TEMP_DIR.mkdir(parents=True, exist_ok=True)
+    if TEMP_DIR.resolve().is_relative_to(Path("/srv/files/static").resolve()):
+        raise RuntimeError("Private downloads must be stored outside /srv/files/static")
+    if not AUTH_USERS_FILE.is_file():
+        raise RuntimeError(f"Missing bcrypt login accounts: {AUTH_USERS_FILE}")
+    TEMP_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
     load_access()
     load_settings()
     threading.Thread(target=cleanup_loop, daemon=True).start()

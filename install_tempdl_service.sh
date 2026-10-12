@@ -11,17 +11,24 @@ UNIT_FILE="/etc/systemd/system/$SERVICE_NAME.service"
 # unit's PATH really contains ~/.local/bin (deno lives there).
 USER_HOME="$(getent passwd "${SUDO_USER:-$USER}" | cut -d: -f6)"
 # Where finished downloads land; on the NAS at home, local disk on a VPS.
-TEMP_DIR="${YT_TEMP_DIR:-/srv/files/static/temp}"
+TEMP_DIR="${YT_TEMP_DIR:-/srv/files/yt-dl-private}"
+USERS_FILE="${YT_TEMP_USERS_FILE:-$PROJECT_DIR/.web-users}"
 
 if [ ! -x "$VENV_PYTHON" ]; then
     echo "ERROR: $VENV_PYTHON not found. Create the venv first." >&2
     exit 1
 fi
 
+if [ ! -s "$USERS_FILE" ]; then
+    echo "ERROR: $USERS_FILE must contain the same username/bcrypt-hash accounts as Caddy." >&2
+    exit 1
+fi
+"$PROJECT_DIR/.venv/bin/pip" install -r "$PROJECT_DIR/requirements-tempdl.txt"
+
 echo "Installing $SERVICE_NAME..."
 sudo tee "$UNIT_FILE" > /dev/null <<EOF
 [Unit]
-Description=Mini YouTube download page (static/temp, 10-min TTL)
+Description=Private YouTube downloader with per-user files
 Wants=network-online.target
 After=network-online.target
 
@@ -35,6 +42,7 @@ Environment=PATH=$USER_HOME/.local/bin:/usr/local/bin:/usr/bin:/bin
 # yt-dlp writes its cache under XDG_CACHE_HOME.
 Environment=XDG_CACHE_HOME=$PROJECT_DIR/.cache
 Environment=YT_TEMP_DIR=$TEMP_DIR
+Environment=YT_TEMP_USERS_FILE=$USERS_FILE
 Environment=YT_TEMP_TTL=3600
 Environment=YT_TEMP_PORT=8792
 ExecStart=$VENV_PYTHON yt_dl_temp.py

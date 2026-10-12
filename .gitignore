@@ -14,5 +14,9 @@ downloads/
 *.log
 *.log.*
 .env
+.web-users
+.web-users.*
+.web-password
+.web-password.*
 *.swp
 .cache/
