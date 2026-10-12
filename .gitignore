@@ -20,3 +20,7 @@ downloads/
 .web-password.*
 *.swp
 .cache/
+
+# Downloader account-management activation and proxy migration
+.account-management-enabled
+.tempdl-Caddyfile.*

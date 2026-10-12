@@ -3,12 +3,13 @@
 
 Each authenticated account downloads into its own private folder. Files
 expire after that user's retention period since their last access. Run
-behind Frankfurt Caddy (basic auth); verify the same accounts locally so
+behind Frankfurt Caddy; the app verifies login credentials itself so
 both the listing and direct file URLs enforce ownership.
 """
 import base64
 import binascii
 import hashlib
+import fcntl
 import hmac
 import html
 import json
@@ -20,6 +21,7 @@ import threading
 import time
 import urllib.parse
 import uuid
+from http.cookies import SimpleCookie, CookieError
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -30,6 +32,9 @@ import main  # same project: yt-dlp path + quality presets
 TEMP_DIR = Path(os.environ.get("YT_TEMP_DIR", "/srv/files/yt-dl-private"))
 AUTH_USERS_FILE = Path(os.environ.get(
     "YT_TEMP_USERS_FILE", str(Path(__file__).with_name(".web-users"))))
+ADMIN_USER = "justin"
+ACCOUNT_MANAGEMENT_FILE = Path(os.environ.get(
+    "YT_TEMP_ACCOUNT_MANAGEMENT_FILE", str(Path(__file__).with_name(".account-management-enabled"))))
 TTL_SECONDS = int(os.environ.get("YT_TEMP_TTL", "3600"))
 PORT = int(os.environ.get("YT_TEMP_PORT", "8792"))
 BIND = os.environ.get("YT_TEMP_BIND", "")
@@ -50,13 +55,38 @@ _auth_cache = {}
 _auth_secret = os.urandom(32)
 
 
-def authenticated_user(authorization):
-    """Verify Basic credentials against the same bcrypt accounts as Caddy.
+def _read_accounts():
+    accounts = {}
+    for line in AUTH_USERS_FILE.read_text(encoding="utf-8").splitlines():
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        name, hashed = line.split()
+        if name in accounts or not hashed.startswith(("$2a$", "$2b$", "$2y$")):
+            raise ValueError("Invalid bcrypt account file")
+        accounts[name] = hashed.encode("ascii")
+    return accounts
 
-    Never trust a browser-supplied username/header. Cache only successful
-    password checks, using an HMAC rather than storing plaintext passwords.
-    Credential-file changes invalidate all cached authentications.
-    """
+
+def _refresh_accounts():
+    """Called with _auth_lock held; fail closed if credentials disappear."""
+    global _auth_version, _auth_accounts
+    try:
+        stat = AUTH_USERS_FILE.stat()
+        version = (stat.st_mtime_ns, stat.st_size, stat.st_ino)
+        if version != _auth_version:
+            _auth_accounts = _read_accounts()
+            _auth_version = version
+            _auth_cache.clear()
+        return True
+    except (OSError, ValueError, UnicodeError):
+        _auth_cache.clear()
+        _auth_accounts = {}
+        _auth_version = None
+        return False
+
+
+def authenticated_user(authorization):
+    """Verify Basic credentials; file changes invalidate cached passwords."""
     if not authorization or len(authorization) > 4096:
         return None
     scheme, _, encoded = authorization.partition(" ")
@@ -72,27 +102,8 @@ def authenticated_user(authorization):
     password = password.encode("utf-8")
     if len(password) > 72:
         return None
-    global _auth_version, _auth_accounts
     with _auth_lock:
-        try:
-            stat = AUTH_USERS_FILE.stat()
-            version = (stat.st_mtime_ns, stat.st_size, stat.st_ino)
-            if version != _auth_version:
-                accounts = {}
-                for line in AUTH_USERS_FILE.read_text(encoding="utf-8").splitlines():
-                    if not line.strip() or line.lstrip().startswith("#"):
-                        continue
-                    name, hashed = line.split()
-                    if not hashed.startswith(("$2a$", "$2b$", "$2y$")):
-                        raise ValueError("Expected bcrypt password hash")
-                    accounts[name] = hashed.encode("ascii")
-                _auth_accounts = accounts
-                _auth_version = version
-                _auth_cache.clear()
-        except (OSError, ValueError, UnicodeError):
-            _auth_cache.clear()
-            _auth_accounts = {}
-            _auth_version = None
+        if not _refresh_accounts():
             return None
         hashed = _auth_accounts.get(user)
         if hashed is None:
@@ -110,6 +121,127 @@ def authenticated_user(authorization):
             _auth_cache.clear()
         _auth_cache[key] = time.monotonic() + 300
         return user
+
+
+def account_token(user):
+    # Bound to the current password hash, and never accepted as login credentials.
+    with _auth_lock:
+        if not _refresh_accounts() or user not in _auth_accounts:
+            return ""
+        return hmac.digest(_auth_secret, b"csrf:" + user.encode() + b":" +
+                           _auth_accounts[user], "sha256").hex()
+
+
+def make_session(user):
+    with _auth_lock:
+        if not _refresh_accounts() or user not in _auth_accounts:
+            raise ValueError("Account unavailable")
+        payload = json.dumps([user, int(time.time()) + 43200,
+                              hashlib.sha256(_auth_accounts[user]).hexdigest()]).encode()
+    encoded = base64.urlsafe_b64encode(payload).decode()
+    signature = hmac.digest(_auth_secret, b"session:" + encoded.encode(), "sha256").hex()
+    return encoded + "." + signature
+
+
+def session_user(cookie_header):
+    if not cookie_header or len(cookie_header) > 8192:
+        return None
+    try:
+        cookies = SimpleCookie(cookie_header)
+        token = cookies["yt_session"].value
+        encoded, signature = token.split(".", 1)
+        expected = hmac.digest(_auth_secret, b"session:" + encoded.encode(), "sha256").hex()
+        if not hmac.compare_digest(signature, expected):
+            return None
+        user, expires, fingerprint = json.loads(base64.urlsafe_b64decode(encoded))
+        if not isinstance(user, str) or not isinstance(expires, int) or expires <= time.time():
+            return None
+        with _auth_lock:
+            if not _refresh_accounts() or user not in _auth_accounts:
+                return None
+            if not hmac.compare_digest(fingerprint, hashlib.sha256(_auth_accounts[user]).hexdigest()):
+                return None
+        return user
+    except (CookieError, KeyError, ValueError, TypeError, UnicodeError, binascii.Error):
+        return None
+
+
+def update_account(actor, username, password, *, current_password=None, csrf=""):
+    """Serialize updates across threads/processes; write only bcrypt hashes."""
+    if not ACCOUNT_MANAGEMENT_FILE.is_file():
+        raise ValueError("Account management has not been activated yet.")
+    if not isinstance(password, str) or (len(password) < 8 or len(password.encode("utf-8")) > 72):
+        raise ValueError("Password must contain at least 8 characters and at most 72 UTF-8 bytes.")
+    if current_password is None:
+        if actor != ADMIN_USER:
+            raise PermissionError("Only justin can add users.")
+        if not isinstance(username, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}", username):
+            raise ValueError("Username: 1–64 letters, digits, dots, underscores or hyphens.")
+    else:
+        username = actor
+        if not isinstance(current_password, str) or len(current_password.encode()) > 72:
+            raise ValueError("Current password is incorrect.")
+    with _auth_lock:
+        lock_path = AUTH_USERS_FILE.with_name(AUTH_USERS_FILE.name + ".lock")
+        with open(lock_path, "a", encoding="utf-8") as lock:
+            os.chmod(lock_path, 0o600)
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            accounts = _read_accounts()
+            if actor not in accounts:
+                raise PermissionError("Account unavailable.")
+            expected = hmac.digest(_auth_secret, b"csrf:" + actor.encode() + b":" +
+                                   accounts[actor], "sha256").hex()
+            if not isinstance(csrf, str) or not re.fullmatch(r"[0-9a-f]{64}", csrf) or not hmac.compare_digest(csrf, expected):
+                raise PermissionError("Form expired. Reload and try again.")
+            if current_password is None:
+                if username in accounts:
+                    raise ValueError("This username already exists.")
+            elif not bcrypt.checkpw(current_password.encode(), accounts[actor]):
+                raise ValueError("Current password is incorrect.")
+            accounts[username] = bcrypt.hashpw(password.encode(), bcrypt.gensalt())
+            tmp = main._tmp_path(AUTH_USERS_FILE)
+            try:
+                with open(tmp, "x", encoding="utf-8", opener=lambda path, flags: os.open(path, flags, 0o600)) as out:
+                    out.write("".join(name + " " + hashed.decode("ascii") + "\n"
+                                      for name, hashed in sorted(accounts.items())))
+                    out.flush()
+                    os.fsync(out.fileno())
+                tmp.replace(AUTH_USERS_FILE)
+            finally:
+                tmp.unlink(missing_ok=True)
+            _refresh_accounts()
+
+
+def render_account_page(user, message="", error=False):
+    token = html.escape(account_token(user), quote=True)
+    notice = ('<p role="status" class="' + ("err" if error else "meta") + '">' +
+              html.escape(message) + '</p>') if message else ""
+    forms = f'''<h2>Passwort ändern</h2>
+<form method="post" action="/account/password">
+<input type="hidden" name="csrf" value="{token}">
+<label>Aktuelles Passwort <input type="password" name="current_password" autocomplete="current-password" required></label>
+<label>Neues Passwort <input type="password" name="password" autocomplete="new-password" minlength="8" required></label>
+<label>Passwort bestätigen <input type="password" name="confirm_password" autocomplete="new-password" minlength="8" required></label>
+<button type="submit">Passwort ändern</button></form>'''
+    if user == ADMIN_USER:
+        with _auth_lock:
+            _refresh_accounts()
+            names = ", ".join(html.escape(name) for name in sorted(_auth_accounts))
+        forms += f'''<h2>Benutzer hinzufügen</h2><p class="meta">Benutzer: {names}</p>
+<form method="post" action="/account/users">
+<input type="hidden" name="csrf" value="{token}">
+<label>Benutzername <input name="username" autocomplete="off" maxlength="64" pattern="[A-Za-z0-9][A-Za-z0-9_.-]*" required></label>
+<label>Passwort <input type="password" name="password" autocomplete="new-password" minlength="8" required></label>
+<label>Passwort bestätigen <input type="password" name="confirm_password" autocomplete="new-password" minlength="8" required></label>
+<button type="submit">Benutzer hinzufügen</button></form>'''
+    return ('''<!doctype html><html lang="de"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1"><title>Konto</title>
+<style>body{background:#141414;color:#eee;font-family:sans-serif;max-width:44rem;margin:2rem auto;padding:0 1rem}
+form,label{display:flex;flex-direction:column;gap:.5rem}form{margin-bottom:2rem}
+input,button{padding:.6rem;background:#222;color:#fff;border:1px solid #555;border-radius:4px}
+a{color:#8ab4f8}.err{color:#ff7b72}.meta{color:#bbb}</style></head><body>
+<a href="/">← Downloads</a><h1>Konto: ''' + html.escape(user) + '</h1>' + notice + forms +
+            '<p class="meta">Mindestens 8 Zeichen, maximal 72 UTF-8 Bytes. Änderungen gelten sofort.</p></body></html>')
 
 
 def user_key(user):
@@ -339,7 +471,7 @@ PAGE = """<!doctype html>
         max-width:44rem; margin:2rem auto; padding:0 .8rem; }}
  h1 {{ font-size:1.3rem; }}
  form {{ display:flex; gap:.5rem; flex-wrap:wrap; margin:1rem 0; }}
- input[type=url] {{ flex:1; min-width:14rem; padding:.5rem;
+ input[type=url], input[type=password], input[name=username] {{ flex:1; min-width:14rem; padding:.5rem;
         background:#1e1e1e; border:1px solid #444; border-radius:4px;
         color:#e0e0e0; }}
  select, button {{ padding:.5rem .8rem; background:#2a6f2a;
@@ -353,6 +485,7 @@ PAGE = """<!doctype html>
  a:hover {{ text-decoration:underline; }}
 </style></head><body>
 <h1>YouTube Download</h1>
+{account_link}
 <form method="post" action="/download">
  <input type="url" name="url" placeholder="https://www.youtube.com/watch?v=..."
         required autofocus>
@@ -451,7 +584,9 @@ def render_page(user):
     files_html = ("<h2>Dateien</h2>" + "".join(file_rows)) if file_rows else ""
     minutes = ttl // 60
     return PAGE.format(jobs=jobs_html, files=files_html, ttl=minutes,
-                       ttl_minutes=minutes)
+                       ttl_minutes=minutes, account_link=(
+                           '<p><a href="/account">Konto / Passwort ändern</a></p>'
+                           if ACCOUNT_MANAGEMENT_FILE.is_file() else ""))
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -463,7 +598,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def _require_user(self):
         credentials = self.headers.get_all("Authorization") or []
-        self.user = authenticated_user(credentials[0]) if len(credentials) == 1 else None
+        self.user = session_user(self.headers.get("Cookie"))
+        if self.user is None:
+            self.user = authenticated_user(credentials[0]) if len(credentials) == 1 else None
         if self.user is not None:
             return True
         body = b"Authentication required"
@@ -491,6 +628,10 @@ class Handler(BaseHTTPRequestHandler):
         path = urllib.parse.urlsplit(self.path).path
         if path in ("/", "/index.html"):
             self._send(200, render_page(self.user))
+        elif path == "/account" and ACCOUNT_MANAGEMENT_FILE.is_file():
+            self._send(200, render_account_page(self.user,
+                "Password changed. Use the new password for your next login."
+                if urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query).get("changed") == ["1"] else ""))
         elif path.startswith("/files/"):
             name = urllib.parse.unquote(path[len("/files/"):])
             self._serve_file(name)
@@ -624,7 +765,7 @@ class Handler(BaseHTTPRequestHandler):
         if not self._require_user():
             return
         path = urllib.parse.urlsplit(self.path).path
-        if path not in ("/download", "/settings"):
+        if path not in ("/download", "/settings", "/account/password", "/account/users"):
             self._send(404, "not found", "text/plain")
             return
         try:
@@ -647,6 +788,43 @@ class Handler(BaseHTTPRequestHandler):
                 data = {}
         else:
             data = dict(urllib.parse.parse_qsl(raw))
+        if path in ("/account/password", "/account/users"):
+            if not ACCOUNT_MANAGEMENT_FILE.is_file():
+                self._send(503, "Account management has not been activated yet.", "text/plain")
+                return
+            if path == "/account/users" and self.user != ADMIN_USER:
+                self._send(403, "Only justin can add users.", "text/plain")
+                return
+            origin = self.headers.get("Origin")
+            if self.headers.get("Sec-Fetch-Site") == "cross-site" or (origin and
+                    urllib.parse.urlsplit(origin).netloc != self.headers.get("Host")):
+                self._send(403, "Cross-site account update denied.", "text/plain")
+                return
+            try:
+                password = data.get("password", "")
+                if password != data.get("confirm_password"):
+                    raise ValueError("Passwords do not match.")
+                update_account(self.user, data.get("username", ""), password,
+                               current_password=(data.get("current_password", "")
+                                                 if path == "/account/password" else None),
+                               csrf=data.get("csrf", ""))
+            except (ValueError, PermissionError) as exc:
+                self._send(403 if isinstance(exc, PermissionError) else 400,
+                           render_account_page(self.user, str(exc), error=True))
+                return
+            except OSError:
+                self._send(500, render_account_page(self.user, "Could not save account. Try again.", error=True))
+                return
+            if path == "/account/password":
+                self.send_response(303)
+                self.send_header("Set-Cookie", "yt_session=" + make_session(self.user) +
+                                 "; Path=/; Secure; HttpOnly; SameSite=Strict; Max-Age=43200")
+                self.send_header("Location", "/account?changed=1")
+                self._private_headers()
+                self.end_headers()
+            else:
+                self._send(200, render_account_page(self.user, "User added. They can log in immediately."))
+            return
         if path == "/settings":
             try:
                 minutes = int(data.get("ttl_minutes", ""))

@@ -163,12 +163,43 @@ account's filename does not grant access. Responses are private and are
 not stored in browser/proxy caches.
 
 Install its extra dependency with
-`.venv/bin/pip install -r requirements-tempdl.txt`. Keep the same
-`username bcrypt-hash` records as the Caddy `basic_auth` block in `.web-users`
-beside the script, or set `YT_TEMP_USERS_FILE` to that file. This file is
-gitignored. Caddy must pass the original `Authorization` header to the app,
-which is the default reverse-proxy behavior. Account-file changes take effect
-without restarting the app.
+`.venv/bin/pip install -r requirements-tempdl.txt`. Store `username bcrypt-hash`
+records in `.web-users` beside the script, or set `YT_TEMP_USERS_FILE` to that
+file. This file is gitignored and should have mode `600`. Caddy passes the
+original `Authorization` header to the app (its default proxy behavior).
+Account-file changes take effect without restarting the app.
+
+### Account management
+
+`justin` is the only administrator. The **Konto / Passwort ändern** page lets
+justin add users and lets everyone change their own password by entering their
+current password and confirming the new one. Usernames are case-sensitive;
+new usernames accept 1–64 ASCII letters, digits, dots, underscores or hyphens.
+Passwords must contain at least 8 characters and at most 72 UTF-8 bytes. Only bcrypt hashes are saved, using
+atomic writes and a lock; duplicate accounts cannot overwrite existing users.
+Account forms have CSRF protection. Changing a password immediately invalidates
+the old credentials and sessions, and keeps that browser signed in using a
+Secure, HttpOnly, SameSite cookie for up to 12 hours. After expiry or a backend
+restart, log in with the new password if prompted. Each new account starts with
+its own private downloads and the default retention setting.
+
+Caddy must not keep a separate `basic_auth` password list for this site.
+For the existing Frankfurt deployment, first deploy the updated backend, then
+prepare the narrow proxy migration with:
+
+```sh
+.venv/bin/python enable_tempdl_accounts.py --stage
+sudo .venv/bin/python enable_tempdl_accounts.py
+```
+
+The helper validates the complete Caddyfile, checks that it has not changed
+since staging, backs it up outside the configuration directory, removes only
+this site's duplicate Basic auth, persists the change and reloads Caddy.
+It then creates `.account-management-enabled`; the UI and account mutations
+stay disabled until this marker exists. Other routes remain unchanged. This
+one-time activation requires sudo; later account changes require no reload
+or restart. New installations should proxy directly to the authenticated app
+and create the marker after configuring HTTPS.
 
 `YT_TEMP_DIR` defaults to `/srv/files/yt-dl-private` and must be outside the
 shared `/srv/files/static` root. Each login uses a separate private subfolder.

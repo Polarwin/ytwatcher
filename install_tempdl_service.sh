@@ -20,7 +20,7 @@ if [ ! -x "$VENV_PYTHON" ]; then
 fi
 
 if [ ! -s "$USERS_FILE" ]; then
-    echo "ERROR: $USERS_FILE must contain the same username/bcrypt-hash accounts as Caddy." >&2
+    echo "ERROR: $USERS_FILE must contain username/bcrypt-hash login accounts." >&2
     exit 1
 fi
 "$PROJECT_DIR/.venv/bin/pip" install -r "$PROJECT_DIR/requirements-tempdl.txt"
