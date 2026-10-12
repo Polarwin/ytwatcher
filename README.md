@@ -59,6 +59,12 @@ the real file is gitignored):
     mark as watched are moved into a `watched` subdirectory of the
     channel folder instead of being deleted.
 
+If a listing title does not match, ytwatcher checks the single-video title
+before rejecting it. This catches original-language keywords when YouTube
+translates a channel's listing. If that lookup fails, the video stays eligible
+for a later retry. Exclusion keywords still take precedence, and the original
+title lookup is reused for exclusions rather than fetched twice.
+
 ## Usage
 
 Static folder links are configured separately from subscriptions:

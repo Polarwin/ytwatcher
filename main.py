@@ -5297,13 +5297,15 @@ def fetch_original_title(video_id):
 
     Channel listings sometimes serve a translated title (YouTube
     localizes metadata per client language), which original-language
-    exclude keywords can't match. The single-video metadata query
+    match/exclude keywords can't match. The single-video metadata query
     returns the original title — the same one the download uses for the
     filename. One extra metadata query per call.
     """
     cmd = [
         YT_DLP,
         "--skip-download",
+        "--no-playlist",
+        "--ignore-no-formats-error",
         "--print", "%(title)s",
         f"https://www.youtube.com/watch?v={video_id}",
     ]
@@ -5318,7 +5320,8 @@ def fetch_original_title(video_id):
             video_id, result.stderr.strip()[:200],
         )
         return None
-    return result.stdout.strip()
+    title = result.stdout.strip()
+    return title if title and title != "NA" else None
 
 
 def is_too_old(video, settings, now):
@@ -5425,7 +5428,31 @@ def process_subscription(sub, settings, seen, failed, scan_only=False):
             if not scan_only:
                 seen.add(video["id"])
             continue
-        if not matches(sub, video["title"]):
+        original_title = None
+        if any(kw.lower() in video["title"].lower() for kw in sub.get("exclude", [])):
+            log.info("[%s] excluded by listing title: %s", name, video["title"])
+            if not scan_only:
+                seen.add(video["id"])
+            continue
+        title_matched = matches(sub, video["title"])
+        if not title_matched:
+            # YouTube can translate the listing title. Check single-video
+            # metadata before permanently rejecting original-language keywords.
+            original_title = fetch_original_title(video["id"])
+            if original_title is None:
+                log.info("[%s] original title unavailable, will retry: %s", name, video["title"])
+                continue
+            if any(kw.lower() in original_title.lower() for kw in sub.get("exclude", [])):
+                log.info("[%s] excluded by original title: %s (%s)", name,
+                         video["title"], original_title)
+                if not scan_only:
+                    seen.add(video["id"])
+                continue
+            title_matched = matches(sub, original_title)
+            if title_matched:
+                log.info("[%s] matched original title: %s (listing: %s)", name,
+                         original_title, video["title"])
+        if not title_matched:
             # Title didn't match. Keyword-based subscriptions can get a
             # second chance via the video description (one extra metadata
             # query); enable per subscription with match_description: true.
@@ -5449,7 +5476,8 @@ def process_subscription(sub, settings, seen, failed, scan_only=False):
             # language exclude keywords can't match; re-check candidates
             # against the video's original title (one extra metadata
             # query, only for subscriptions with exclude rules).
-            original_title = fetch_original_title(video["id"])
+            if original_title is None:
+                original_title = fetch_original_title(video["id"])
             if original_title and original_title != video["title"] and any(
                     kw.lower() in original_title.lower()
                     for kw in sub["exclude"]):
