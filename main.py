@@ -1485,7 +1485,7 @@ def scan_downloads(download_dir, files=None):
 # Bump when the index.html template changes: the fingerprint below only
 # covers the file listing, so without this an existing index.html would
 # keep the old template until some video is added or removed.
-INDEX_TEMPLATE_VERSION = 97
+INDEX_TEMPLATE_VERSION = 96
 
 
 def static_folder_url(item):
@@ -1705,7 +1705,6 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "      padding: .15rem .5rem; }",
         "    #pl-empty { color: #999; font-size: .9rem; }",
         "    #pl-video { width: 100%; max-height: 70vh; margin-top: .75rem; background: #000; }",
-        "    #pl-video:fullscreen { max-height: none; height: 100%; margin-top: 0; }",
         "    #pl-video::cue { background: rgba(0, 0, 0, .75); text-shadow: 0 0 4px #000; }",
         # Custom subtitle line for audio-only playback: native cue
         # rendering misplaces and oversizes text on small/mobile players,
@@ -1826,7 +1825,7 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         '      <h2>Playlist</h2>',
         '      <p id="pl-empty">Empty &mdash; add videos with the + Playlist buttons below.</p>',
         '      <div id="pl-player" hidden>',
-        '        <video id="pl-video" controls></video>',
+        '        <video id="pl-video" controls playsinline></video>',
         '        <div id="pl-subs" hidden></div>',
         '        <div id="pl-dict" hidden></div>',
         '        <button id="pl-copy-subs" type="button" hidden>Copy subtitles</button>',
@@ -1846,9 +1845,6 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         '      </div>',
         '      <div class="pl-controls">',
         '        <button type="button" id="pl-play">Play</button>',
-        '        <button type="button" id="pl-fullscreen" '
-        'title="Fullscreen play; on the phone the video rotates with the '
-        'device">&#x26F6;</button>',
         '        <button type="button" id="pl-add-all" '
         'title="Shuffle the current playlist (keeps the playing item first)">Shuffle all</button>',
         '        <button type="button" id="pl-add-latest" '
@@ -2815,18 +2811,11 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "      plSave();",
         "    }",
         "    if (isAudio) {",
-        "      // Audio stays inline: the custom subtitle overlay below the",
-        "      // player must stay visible (and there is nothing to rotate).",
-        '      plVideo.setAttribute("playsinline", "");',
         "      // Custom overlay instead of native <track> cues (those break",
         "      // on small/mobile players); the native control bar stays.",
         '      plVideo.querySelectorAll("track").forEach(function (t) { t.remove(); });',
         "      plLoadSubs(pl[plIndex]);",
         "    } else {",
-        "      // Videos drop playsinline, so iPhone Safari plays them in the",
-        "      // native fullscreen (which rotates with the device); the native",
-        "      // <track> subtitles remain available there via the CC button.",
-        '      plVideo.removeAttribute("playsinline");',
         "      plSubCues = null;",
         "      plUpdateSubs();",
         "    }",
@@ -2890,27 +2879,6 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "  document.getElementById(\"pl-play\").addEventListener(\"click\", function () {",
         "    if (plIndex < 0) plNewCycle();",
         "    plPlayAt(plIndex >= 0 ? plIndex : 0);",
-        "  });",
-        "  function plToggleFullscreen() {",
-        "    if (document.fullscreenElement) { document.exitFullscreen(); return; }",
-        "    if (plVideo.requestFullscreen) {",
-        "      var r = plVideo.requestFullscreen();",
-        "      if (r && r.catch) r.catch(function () {});",
-        "    } else if (plVideo.webkitEnterFullscreen) {",
-        "      plVideo.webkitEnterFullscreen(); // iPhone (native, auto-rotates)",
-        "    }",
-        "  }",
-        '  document.getElementById("pl-fullscreen").addEventListener("click", plToggleFullscreen);',
-        '  plVideo.addEventListener("dblclick", plToggleFullscreen);',
-        '  document.addEventListener("fullscreenchange", function () {',
-        "    if (!document.fullscreenElement) return;",
-        "    // Best effort: lock to landscape for videos (Android; unsupported",
-        "    // or rejected without a user gesture -> silently ignored).",
-        "    if (plVideo.classList.contains(\"audio-only\")) return;",
-        '    try {',
-        "      if (screen.orientation && screen.orientation.lock)",
-        '        screen.orientation.lock("landscape").catch(function () {});',
-        "    } catch (e) {}",
         "  });",
         "  function plQueueFrom(selector, shuffle, autoplay, includeHidden) {",
         "    // Queue every matching listed video that isn't queued yet.",
