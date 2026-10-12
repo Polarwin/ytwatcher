@@ -1485,7 +1485,7 @@ def scan_downloads(download_dir, files=None):
 # Bump when the index.html template changes: the fingerprint below only
 # covers the file listing, so without this an existing index.html would
 # keep the old template until some video is added or removed.
-INDEX_TEMPLATE_VERSION = 97
+INDEX_TEMPLATE_VERSION = 98
 
 
 def static_folder_url(item):
@@ -1710,10 +1710,12 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         # rendering misplaces and oversizes text on small/mobile players,
         # so audio-only items render subtitles in this div instead.
         "    #pl-video.audio-only { height: 5.5rem; }",
-        "    #pl-subs { margin-top: .4rem; padding: .35rem .6rem; min-height: 1.4em;",
+        "    #pl-subs { margin-top: .4rem; padding: .35rem .6rem; height: 3.9em;",
         "      text-align: center; font-size: 1.05rem; line-height: 1.3; color: #fff;",
+        "      box-sizing: border-box; overflow: hidden;",
         "      background: #000; border-radius: 4px; white-space: pre-line;",
         "      user-select: text; -webkit-user-select: text; cursor: text; }",
+        "    #pl-video.audio-only + #pl-subs { height: auto; min-height: 1.4em; }",
         "    .pl-sub-word { cursor: pointer; }",
         "    .pl-sub-word:hover { text-decoration: underline; }",
         "    #pl-dict { margin-top: .4rem; padding: .45rem .6rem; position: relative;",
@@ -2338,9 +2340,7 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "      }",
         '      plCopyStatus.textContent = "";',
         "    }",
-        "    plSubsEl.hidden = !text;",
-        "    plCopySubs.hidden = !text;",
-        "    plDictToSel.hidden = !text;",
+        '    plSubsEl.style.visibility = text ? "visible" : "hidden";',
         "    if (!text) plDictEl.hidden = true;",
         "  }",
         "  function plDictShow(word, html) {",
@@ -2426,6 +2426,10 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "    plSubCues = null;",
         "    plSubForHref = null;",
         '    plSetSubtitleText("");',
+        '    plSubsEl.hidden = !item.subs;',
+        '    plSubsEl.style.visibility = "hidden";',
+        '    plCopySubs.hidden = !item.subs;',
+        '    plDictToSel.hidden = !item.subs;',
         '    plVideo.classList.remove("audio-only");',
         '    plVideo.querySelectorAll("track").forEach(function (t) { t.remove(); });',
         "    if (!item.subs) return;",
@@ -2517,10 +2521,18 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "  }",
         "  function plUpdateSubs() {",
         '    if (!plVideo.classList.contains("audio-only")) {',
-        "      // Let the browser render video captions natively. Mirroring each",
-        "      // cue change into page DOM makes mobile browsers repaint the",
-        "      // video layer and can flash the whole screen. The custom text",
-        "      // block is only needed for audio-only playback below.",
+        "      // Mirror video cues for copy and word lookup, but keep the caption",
+        "      // panel's height reserved between cues to avoid mobile reflow.",
+        "      var lines = [];",
+        '      plSubLang = "";',
+        "      Array.from(plVideo.textTracks).forEach(function (track) {",
+        '        if (track.mode !== "showing") return;',
+        '        if (!plSubLang) plSubLang = track.language || "";',
+        "        Array.from(track.activeCues || []).forEach(function (cue) {",
+        "          lines.push(cue.getCueAsHTML ? cue.getCueAsHTML().textContent : cue.text);",
+        "        });",
+        "      });",
+        '      plSetSubtitleText(lines.join("\\n"));',
         "      return;",
         "    }",
         "    if (!plSubCues || plIndex < 0 || !pl[plIndex]",
