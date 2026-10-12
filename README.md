@@ -200,6 +200,14 @@ item jumps to it; the ✕ button removes it. The queue and the repeat
 setting survive page reloads, but are per-browser, like the watched
 marks.
 
+During playback, **Landscape** opens a landscape view of the player and
+its subtitle tools. When the screen stays portrait because rotation is
+locked, the view rotates sideways. Android uses browser fullscreen when
+available; iPhone uses an overlay within the page, so Safari's bars may
+remain visible. Original subtitles, text selection/copy, and word translation
+remain available. **Exit landscape** returns to the normal page. The view
+is optional and is not enabled automatically or saved across page reloads.
+
 Manually downloaded videos work too: drop the file anywhere under
 `download_dir` and it appears in the index after the next rebuild. Since
 its filename has no YouTube `[id]`, it gets a stable pseudo-ID derived

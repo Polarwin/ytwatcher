@@ -1485,7 +1485,7 @@ def scan_downloads(download_dir, files=None):
 # Bump when the index.html template changes: the fingerprint below only
 # covers the file listing, so without this an existing index.html would
 # keep the old template until some video is added or removed.
-INDEX_TEMPLATE_VERSION = 98
+INDEX_TEMPLATE_VERSION = 99
 
 
 def static_folder_url(item):
@@ -1716,6 +1716,26 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "      background: #000; border-radius: 4px; white-space: pre-line;",
         "      user-select: text; -webkit-user-select: text; cursor: text; }",
         "    #pl-video.audio-only + #pl-subs { height: auto; min-height: 1.4em; }",
+        "    #pl-view-tools { margin-top: .5rem; }",
+        "    body.pl-landscape-open { overflow: hidden; }",
+        "    #pl-player.pl-landscape { position: fixed; z-index: 1000; inset: 0; background: #000; }",
+        "    #pl-player.pl-landscape #pl-stage { position: fixed;",
+        "      left: var(--pl-view-x, 50vw); top: var(--pl-view-y, 50vh);",
+        "      width: var(--pl-view-width, 100vw); height: var(--pl-view-height, 100vh);",
+        "      transform: translate(-50%, -50%) rotate(var(--pl-view-angle, 0deg));",
+        "      box-sizing: border-box; padding: .4rem max(.6rem, env(safe-area-inset-left), env(safe-area-inset-top));",
+        "      background: #000; overflow: hidden; overscroll-behavior: contain; }",
+        "    #pl-player.pl-landscape:not([hidden]) #pl-stage { display: flex; flex-direction: column; gap: .25rem; }",
+        "    #pl-player.pl-landscape::backdrop { background: #000; }",
+        "    #pl-player.pl-landscape #pl-view-tools { margin: 0; flex-shrink: 0; }",
+        "    #pl-player.pl-landscape #pl-video { flex: 1; min-height: 0; height: 0;",
+        "      max-height: none; margin: 0; object-fit: contain; }",
+        "    #pl-player.pl-landscape #pl-subs { flex-shrink: 0; margin: 0; }",
+        "    #pl-player.pl-landscape #pl-sub-tools { flex-shrink: 0; }",
+        "    #pl-player.pl-landscape #pl-now { margin: 0; flex-shrink: 0;",
+        "      white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }",
+        "    #pl-player.pl-landscape #pl-dict { position: absolute; z-index: 1;",
+        "      left: .6rem; right: .6rem; bottom: 5rem; max-height: 45%; overflow: auto; }",
         "    .pl-sub-word { cursor: pointer; }",
         "    .pl-sub-word:hover { text-decoration: underline; }",
         "    #pl-dict { margin-top: .4rem; padding: .45rem .6rem; position: relative;",
@@ -1827,9 +1847,15 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         '      <h2>Playlist</h2>',
         '      <p id="pl-empty">Empty &mdash; add videos with the + Playlist buttons below.</p>',
         '      <div id="pl-player" hidden>',
+        '        <div id="pl-stage">',
+        '        <div id="pl-view-tools">',
+        '          <button id="pl-landscape" type="button" aria-pressed="false" '
+        'title="Landscape view with subtitles, copy, and word translation">Landscape</button>',
+        '        </div>',
         '        <video id="pl-video" controls playsinline></video>',
         '        <div id="pl-subs" hidden></div>',
         '        <div id="pl-dict" hidden></div>',
+        '        <div id="pl-sub-tools">',
         '        <button id="pl-copy-subs" type="button" hidden>Copy subtitles</button>',
         '        <select id="pl-dict-to" title="Dictionary target language" hidden>',
         '          <option value="en">to English</option>',
@@ -1843,7 +1869,9 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         '          <option value="ru">to Русский</option>',
         '        </select>',
         '        <span id="pl-copy-status" role="status"></span>',
+        '        </div>',
         '        <div id="pl-now"></div>',
+        '        </div>',
         '      </div>',
         '      <div class="pl-controls">',
         '        <button type="button" id="pl-play">Play</button>',
@@ -2314,6 +2342,81 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         '  var plCopyStatus = document.getElementById("pl-copy-status");',
         "  var plDictEl = document.getElementById(\"pl-dict\");",
         '  var plDictToSel = document.getElementById("pl-dict-to");',
+        *r"""
+  // Rotate the whole player when the viewport stays portrait (rotation
+  // lock), retaining the actual caption nodes and all their tools.
+  // Android can fullscreen this container; iPhone uses the page overlay.
+  var plLandscapeBtn = document.getElementById("pl-landscape");
+  var plStage = document.getElementById("pl-stage");
+  var plLandscapeOn = false;
+  var plLandscapeFullscreen = false;
+  function plSizeLandscape() {
+    if (!plLandscapeOn) return;
+    var vp = window.visualViewport;
+    var fullscreen = document.fullscreenElement === plPlayer;
+    var w = !fullscreen && vp ? vp.width : window.innerWidth;
+    var h = !fullscreen && vp ? vp.height : window.innerHeight;
+    var x = !fullscreen && vp ? vp.offsetLeft : 0;
+    var y = !fullscreen && vp ? vp.offsetTop : 0;
+    var portrait = h > w;
+    plStage.style.setProperty("--pl-view-x", (x + w / 2) + "px");
+    plStage.style.setProperty("--pl-view-y", (y + h / 2) + "px");
+    plStage.style.setProperty("--pl-view-width", (portrait ? h : w) + "px");
+    plStage.style.setProperty("--pl-view-height", (portrait ? w : h) + "px");
+    plStage.style.setProperty("--pl-view-angle", portrait ? "90deg" : "0deg");
+  }
+  function plExitLandscape() {
+    plLandscapeOn = false;
+    plLandscapeFullscreen = false;
+    plPlayer.classList.remove("pl-landscape");
+    document.body.classList.remove("pl-landscape-open");
+    plLandscapeBtn.textContent = "Landscape";
+    plLandscapeBtn.setAttribute("aria-pressed", "false");
+    if (document.fullscreenElement === plPlayer && document.exitFullscreen) {
+      document.exitFullscreen().catch(function () {});
+    }
+  }
+  plLandscapeBtn.addEventListener("click", function () {
+    if (plLandscapeOn) { plExitLandscape(); return; }
+    plLandscapeOn = true;
+    plPlayer.classList.add("pl-landscape");
+    document.body.classList.add("pl-landscape-open");
+    plLandscapeBtn.textContent = "Exit landscape";
+    plLandscapeBtn.setAttribute("aria-pressed", "true");
+    plSizeLandscape();
+    // Fullscreen the container, so copy and translation remain available.
+    // A denied/unsupported request still leaves a usable landscape overlay.
+    if (plPlayer.requestFullscreen && !document.fullscreenElement) {
+      try {
+        plPlayer.requestFullscreen().then(function () {
+          if (!plLandscapeOn) { plExitLandscape(); return; }
+          plLandscapeFullscreen = document.fullscreenElement === plPlayer;
+          plSizeLandscape();
+        }).catch(function () { plSizeLandscape(); });
+      } catch (e) { plSizeLandscape(); }
+    }
+  });
+  document.addEventListener("fullscreenchange", function () {
+    if (document.fullscreenElement === plPlayer) {
+      plLandscapeFullscreen = true;
+      plSizeLandscape();
+    } else if (plLandscapeFullscreen) {
+      plExitLandscape();
+    }
+  });
+  document.addEventListener("keydown", function (ev) {
+    if (ev.key === "Escape" && plLandscapeOn) plExitLandscape();
+  });
+  window.addEventListener("resize", plSizeLandscape);
+  if (window.visualViewport) {
+    window.visualViewport.addEventListener("resize", plSizeLandscape);
+    window.visualViewport.addEventListener("scroll", plSizeLandscape);
+  }
+  // Empty/stopped playlists hide the player: also restore the page view.
+  new MutationObserver(function () {
+    if (plPlayer.hidden && plLandscapeOn) plExitLandscape();
+  }).observe(plPlayer, { attributes: true, attributeFilter: ["hidden"] });
+""".strip().splitlines(),
         '  try {',
         '    var savedDictTo = localStorage.getItem("ytwatcher:dict-to");',
         '    if (savedDictTo) plDictToSel.value = savedDictTo;',
