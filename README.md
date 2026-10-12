@@ -267,6 +267,24 @@ remain visible. Original subtitles, text selection/copy, and word translation
 remain available. **Exit landscape** returns to the normal page. The view
 is optional and is not enabled automatically or saved across page reloads.
 
+**Translate sentence** pauses playback and translates the sentence at the
+current position using the local LLM gateway. Sentences are assembled from
+subtitle punctuation across cue boundaries; their position within a cue is
+estimated from its timing. The original Spanish text stays available alongside
+the translation, and word lookup/copy continue to work. Changing the target
+language immediately requests a new translation for the displayed sentence.
+Caption and translation panels reserve their height to avoid page movement on
+mobile. This also works with audio-only captions and Landscape view.
+
+Sentence translations are requested only on button clicks or target-language
+changes for an already requested sentence. No sentence translation jobs run on
+download or offline preload. Results are reused in memory for up to an hour;
+they are not added to the offline cache. The gateway is configured through
+`YTWATCHER_LLM_URL` (default `http://127.0.0.1:8349`), with
+`YTWATCHER_SENTENCE_MODEL` defaulting to `SmolLM3-Q4_K_M.gguf`. The app uses
+short job-status requests while generation runs, so loading the model does not
+hold the web proxy connection open.
+
 Manually downloaded videos work too: drop the file anywhere under
 `download_dir` and it appears in the index after the next rebuild. Since
 its filename has no YouTube `[id]`, it gets a stable pseudo-ID derived
