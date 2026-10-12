@@ -1485,7 +1485,7 @@ def scan_downloads(download_dir, files=None):
 # Bump when the index.html template changes: the fingerprint below only
 # covers the file listing, so without this an existing index.html would
 # keep the old template until some video is added or removed.
-INDEX_TEMPLATE_VERSION = 100
+INDEX_TEMPLATE_VERSION = 101
 
 
 def static_folder_url(item):
@@ -1715,7 +1715,7 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "      box-sizing: border-box; overflow: hidden;",
         "      background: #000; border-radius: 4px; white-space: pre-line;",
         "      user-select: text; -webkit-user-select: text; cursor: text; }",
-        "    #pl-video.audio-only + #pl-subs { height: auto; min-height: 1.4em; }",
+        "    #pl-video.audio-only + #pl-subs { height: 6.5em; overflow-y: auto; scrollbar-gutter: stable; }",
         "    #pl-view-tools { margin-top: .5rem; }",
         "    body.pl-landscape-open { overflow: hidden; }",
         "    #pl-player.pl-landscape { position: fixed; z-index: 1000; inset: 0; background: #000; }",
@@ -2442,6 +2442,7 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "          plSubsEl.appendChild(span);",
         "        });",
         "      }",
+        "      plSubsEl.scrollTop = 0;",
         '      plCopyStatus.textContent = "";',
         "    }",
         '    plSubsEl.style.visibility = text ? "visible" : "hidden";',
@@ -2548,7 +2549,8 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         '    plSubsEl.style.visibility = "hidden";',
         '    plCopySubs.hidden = !item.subs;',
         '    plDictToSel.hidden = !item.subs;',
-        '    plVideo.classList.remove("audio-only");',
+        "    // Keep audio mode during subtitle/library refreshes; metadata",
+        "    // selects the mode when a different media file is loaded.",
         '    plVideo.querySelectorAll("track").forEach(function (t) { t.remove(); });',
         "    if (!item.subs) return;",
         "    var subs;",
@@ -2567,9 +2569,8 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "    });",
         "  }",
         "  // Custom subtitle overlay for audio-only playback (native cues",
-        "  // break on small/mobile players). YouTube auto-caption VTTs",
-        "  // repeat rolling context lines and mark the new line with '>>';",
-        "  // the parser keeps only that newest line per cue.",
+        "  // break on small/mobile players). Preserve complete normal cues;",
+        "  // only rolling auto-captions need the newest context line.",
         "  var plSubCues = null;",
         "  var plSubForHref = null;",
         # VTT cue payloads carry HTML entities (&amp;, &#39;, ...). Decode
@@ -2581,6 +2582,7 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "  function plDecodeEntities(s) { plDecodeTa.innerHTML = s; return plDecodeTa.value; }",
         "  function plParseVtt(text) {",
         "    var cues = [];",
+        "    var rolling = /<\\d{2}:\\d{2}(?::\\d{2})?\\.\\d{3}>/.test(text);",
         "    text.split(/\\r?\\n\\r?\\n/).forEach(function (block) {",
         "      var blines = block.split(/\\r?\\n/);",
         "      var ti = -1;",
@@ -2594,11 +2596,17 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "      var start = (+(m[1] || 0)) * 3600 + (+m[2]) * 60 + (+m[3]) + (+m[4]) / 1000;",
         "      var end = (+(m[5] || 0)) * 3600 + (+m[6]) * 60 + (+m[7]) + (+m[8]) / 1000;",
         "      var lines = [];",
+        "      var marked = [];",
         "      for (var j = ti + 1; j < blines.length; j++) {",
         '        var l = plDecodeEntities(blines[j].replace(/<[^>]+>/g, "").replace(/^>+\\s*/, "")).trim();',
-        "        if (l) lines.push(l);",
+        "        if (l) {",
+        "          lines.push(l);",
+        "          if (/^\\s*>>/.test(blines[j])) marked.push(l);",
+        "        }",
         "      }",
-        "      if (lines.length) cues.push({ start: start, end: end, text: lines[lines.length - 1] });",
+        "      var caption = marked.length ? marked.join(\"\\n\") :",
+        "        (rolling ? lines[lines.length - 1] : lines.join(\"\\n\"));",
+        "      if (caption) cues.push({ start: start, end: end, text: caption });",
         "    });",
         "    return cues;",
         "  }",
