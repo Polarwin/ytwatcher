@@ -280,8 +280,8 @@ Sentence translations are requested only on button clicks or target-language
 changes for an already requested sentence. No sentence translation jobs run on
 download or offline preload. Results are reused in memory for up to an hour;
 they are not added to the offline cache. The gateway is configured through
-`YTWATCHER_LLM_URL` (default `http://127.0.0.1:8349`), with
-`YTWATCHER_SENTENCE_MODEL` defaulting to `SmolLM3-Q4_K_M.gguf`. The app uses
+`YTWATCHER_LLM_URL` (default `http://127.0.0.1:8349`). Sentence requests omit
+the model name so the gateway chooses its configured default model. The app uses
 short job-status requests while generation runs, so loading the model does not
 hold the web proxy connection open.
 

@@ -520,7 +520,6 @@ LANGUAGE_NAMES = {
 }
 _dictionary_cache = None
 _dictionary_lock = threading.Lock()
-SENTENCE_MODEL = os.environ.get("YTWATCHER_SENTENCE_MODEL", "SmolLM3-Q4_K_M.gguf")
 _sentence_jobs = {}
 _sentence_lock = threading.Lock()
 _sentence_gate = threading.BoundedSemaphore(1)
@@ -538,7 +537,6 @@ def _sentence_worker(job_id, text, src, dst):
         if base.endswith("/v1"):
             base = base[:-3]
         payload = {
-            "model": SENTENCE_MODEL,
             "messages": [
                 {"role": "system", "content": (
                     f"Translate the user's subtitle text from {_language_name(src)} "
