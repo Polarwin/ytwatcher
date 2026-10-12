@@ -24,3 +24,6 @@ downloads/
 # Downloader account-management activation and proxy migration
 .account-management-enabled
 .tempdl-Caddyfile.*
+
+# Private vocabulary/sentence decks and lookup/review history
+.flashcards.sqlite3*

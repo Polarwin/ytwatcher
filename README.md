@@ -285,6 +285,42 @@ the model name so the gateway chooses its configured default model. The app uses
 short job-status requests while generation runs, so loading the model does not
 hold the web proxy connection open.
 
+### Vocabulary and sentence flashcards
+
+Every successful word lookup (including offline/cached dictionary answers) and
+displayed sentence translation is automatically recorded. Repeated lookups
+update the same card and its lookup count; target languages and word/sentence
+cards are kept separate. Records include the original subtitle context and
+video title, shown after revealing a quiz answer. Only user lookups are recorded;
+building or preloading a dictionary does not fill the deck with unstudied words.
+
+Open **Flashcards** above the playlist or beside the subtitle tools, then choose
+**Random quiz**. Filter words/sentences or target languages, and optionally
+reverse the translation direction. Type an answer or recall it mentally, reveal
+the saved answer, and rate your recall: **Forgot**, **Hard**, **Remembered**, or
+**Easy**. Quiz answers use saved translations and do not call the LLM. Due cards
+are randomized with extra weight for forgotten/frequently consulted cards;
+when nothing is due, extra practice remains available. Forgot schedules another
+review in 10 minutes; first Remembered/Easy reviews schedule 1/4 days, and later
+intervals grow with successful recall. Looking a card up again brings it due.
+
+Decks and the complete lookup/review event history are saved in SQLite at
+`.flashcards.sqlite3` beside the app, outside the served media directory and
+gitignored (`YTWATCHER_FLASHCARDS_DB` overrides the path). Each browser gets a
+separate random deck key; APIs require that key and never expose other decks.
+**Copy sync link for another device** shares the same deck and progress with
+that device. The key is in the link fragment, not the HTTP URL, and is sent to
+the API in a private header. Anyone who has the link can access that deck.
+Opening a sync link selects that deck; it does not merge existing decks.
+
+Lookup records and recall ratings waiting to sync are saved in browser storage
+and retried on reconnect, later page visits, or while the page is visible.
+Unique event IDs make retries idempotent. Quizzes and the saved-card browser
+need a connection to ytwatcher. Playback pauses when opening the review dialog;
+caption nodes, word tools, sentence translation, and Landscape playback remain
+available. Save-status space is reserved so recording a lookup does not move
+the player on mobile.
+
 Manually downloaded videos work too: drop the file anywhere under
 `download_dir` and it appears in the index after the next rebuild. Since
 its filename has no YouTube `[id]`, it gets a stable pseudo-ID derived

@@ -36,6 +36,8 @@ import requests
 import yaml
 from dotenv import load_dotenv
 
+import flashcards
+
 CONFIG_FILE = Path(__file__).parent / "subscriptions.yaml"
 STATE_FILE = Path(__file__).parent / "state.json"
 WATCHED_FILE = Path(__file__).parent / "watched.json"
@@ -1566,7 +1568,7 @@ def scan_downloads(download_dir, files=None):
 # Bump when the index.html template changes: the fingerprint below only
 # covers the file listing, so without this an existing index.html would
 # keep the old template until some video is added or removed.
-INDEX_TEMPLATE_VERSION = 102
+INDEX_TEMPLATE_VERSION = 103
 
 
 def static_folder_url(item):
@@ -1824,6 +1826,25 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "      scrollbar-gutter: stable; padding: .45rem .6rem; margin-top: .4rem;",
         "      background: #16213a; color: #eee; border-radius: 4px; white-space: pre-line; }",
         "    .pl-sentence-original { font-size: .85em; color: #bbb; margin-bottom: .35em; }",
+        "    #study-dialog { width: min(44rem, 92vw); height: 80vh; max-height: 85vh;",
+        "      box-sizing: border-box; overflow: auto; color: #eee; background: #181818;",
+        "      border: 1px solid #555; border-radius: .6rem; padding: 1rem; }",
+        "    #study-dialog::backdrop { background: rgba(0,0,0,.7); }",
+        "    #study-dialog.study-fallback { display: block; position: fixed; z-index: 1001;",
+        "      inset: 5vh 0 auto; margin: auto; }",
+        "    #study-dialog h2 { margin-top: 0; }",
+        "    #study-close { float: right; }",
+        "    #study-dialog select, #study-dialog button { margin: .2rem; padding: .4rem .55rem; }",
+        "    #study-question, #study-solution { white-space: pre-line; padding: .7rem;",
+        "      border-radius: .3rem; background: #232323; overflow-wrap: anywhere; }",
+        "    #study-solution { background: #16213a; }",
+        "    #study-answer-input { width: 100%; box-sizing: border-box; margin: .5rem 0;",
+        "      padding: .5rem; background: #222; color: #eee; border: 1px solid #555; }",
+        "    .study-card { border-bottom: 1px solid #444; padding: .5rem 0; overflow-wrap: anywhere; }",
+        "    #study-library { max-height: 18rem; overflow: auto; }",
+        "    #study-status, #study-save-status { color: #aaa; font-size: .85rem; }",
+        "    .study-shortcut { display: flex; align-items: center; gap: .5rem; }",
+        "    #study-save-status { flex: 1; min-width: 0; height: 3em; overflow: auto; }",
         "    #pl-dict { margin-top: .4rem; padding: .45rem .6rem; position: relative;",
         "      background: #16213a; border: 1px solid #3a5a9a; border-radius: 4px;",
         "      max-width: 40rem; }",
@@ -1929,6 +1950,42 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
     ])
 
     lines.extend([
+        '    <section class="study-shortcut"><button type="button" class="study-open">Flashcards</button>',
+        '      <span id="study-save-status" role="status">Lookups are saved automatically.</span></section>',
+        '    <dialog id="study-dialog" aria-labelledby="study-title">',
+        '      <button type="button" id="study-close" aria-label="Close flashcards">×</button>',
+        '      <h2 id="study-title">Vocabulary &amp; sentence flashcards</h2>',
+        '      <p id="study-stats"></p>',
+        '      <div><select id="study-kind" aria-label="Card type">',
+        '        <option value="all">Words &amp; sentences</option><option value="word">Words</option>',
+        '        <option value="sentence">Sentences</option></select>',
+        '      <select id="study-target" aria-label="Translation language">',
+        '        <option value="all">All languages</option><option value="en">English</option>',
+        '        <option value="de">Deutsch</option><option value="es">Español</option>',
+        '        <option value="fr">Français</option><option value="zh">中文</option>',
+        '        <option value="it">Italiano</option><option value="pt">Português</option>',
+        '        <option value="ja">日本語</option><option value="ru">Русский</option></select>',
+        '      <select id="study-direction" aria-label="Quiz direction">',
+        '        <option value="forward">Translate from original</option>',
+        '        <option value="reverse">Recall original</option><option value="mixed">Mix directions</option></select>',
+        '      <button type="button" id="study-next">Random quiz</button></div>',
+        '      <section id="study-quiz" hidden><p id="study-prompt"></p>',
+        '        <div id="study-question"></div>',
+        '        <textarea id="study-answer-input" rows="2" placeholder="Your answer (optional)" aria-label="Your answer"></textarea>',
+        '        <button type="button" id="study-reveal">Show answer</button>',
+        '        <div id="study-solution" hidden></div><p id="study-comparison"></p>',
+        '        <p id="study-context" hidden></p>',
+        '        <div id="study-ratings" hidden>',
+        '          <button type="button" data-study-rating="again">Forgot</button>',
+        '          <button type="button" data-study-rating="hard">Hard</button>',
+        '          <button type="button" data-study-rating="good">Remembered</button>',
+        '          <button type="button" data-study-rating="easy">Easy</button></div></section>',
+        '      <p id="study-status" role="status"></p>',
+        '      <details id="study-saved"><summary>Saved vocabulary &amp; sentences</summary>',
+        '        <input id="study-search" type="search" placeholder="Search your cards" aria-label="Search cards">',
+        '        <div id="study-library"></div></details>',
+        '      <p><button type="button" id="study-sync">Copy sync link for another device</button></p>',
+        '    </dialog>',
         '    <section class="playlist">',
         '      <h2>Playlist</h2>',
         '      <p id="pl-empty">Empty &mdash; add videos with the + Playlist buttons below.</p>',
@@ -1945,6 +2002,7 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         '        <div id="pl-sub-tools">',
         '        <button id="pl-copy-subs" type="button" hidden>Copy subtitles</button>',
         '        <button id="pl-translate-sentence" type="button" hidden disabled>Translate sentence</button>',
+        '        <button type="button" class="study-open">Flashcards</button>',
         '        <select id="pl-dict-to" title="Translation target language" hidden>',
         '          <option value="en">to English</option>',
         '          <option value="de">to Deutsch</option>',
@@ -2432,6 +2490,8 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         '  var plDictToSel = document.getElementById("pl-dict-to");',
         '  var plSentenceEl = document.getElementById("pl-sentence");',
         '  var plSentenceBtn = document.getElementById("pl-translate-sentence");',
+        *Path(__file__).with_name("flashcards_ui.js").read_text(encoding="utf-8").splitlines(),
+        '  var study = initStudy(API, function () { plVideo.pause(); if (plLandscapeOn) plExitLandscape(); });',
         *r"""
   // Rotate the whole player when the viewport stays portrait (rotation
   // lock), retaining the actual caption nodes and all their tools.
@@ -2629,6 +2689,10 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
       if (request !== plSentenceRequest) return;
       if (job.status !== "done") throw new Error(job.error || "Translation failed. Try again.");
       plSentenceShow(text, job.translation);
+      study.record({kind: "sentence", source: text, translation: job.translation,
+        src: from, dst: plDictToSel.value || "en", context: text,
+        video_title: plIndex >= 0 && pl[plIndex] ? pl[plIndex].name : "",
+        video_href: plIndex >= 0 && pl[plIndex] ? pl[plIndex].href : ""});
     } catch (e) {
       if (request === plSentenceRequest) plSentenceShow(text, e.message || "Translation unavailable");
     }
@@ -2701,6 +2765,11 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "    if (d.pos) body += '<span class=\"pl-dict-pos\">' + d.pos + \"</span>\";",
         "    if (d.inf) body += '<span class=\"pl-dict-inf\">\\u2190 ' + d.inf + \"</span>\";",
         "    plDictShow(word, body);",
+        '    study.record({kind: "word", source: word, translation: d.en,',
+        '      src: plDictFrom || plSubLang || "es", dst: plDictToSel.value || "en",',
+        '      pos: d.pos || "", inf: d.inf || "", meanings: Array.isArray(d.meanings) ? d.meanings.slice(0, 10) : [],',
+        '      context: plSubsEl.textContent, video_title: plIndex >= 0 && pl[plIndex] ? pl[plIndex].name : "",',
+        '      video_href: plIndex >= 0 && pl[plIndex] ? pl[plIndex].href : ""});',
         "  }",
         "  function plDictLookup(word, source) {",
         "    if (!word) return;",
@@ -4133,13 +4202,16 @@ class ApiHandler(BaseHTTPRequestHandler):
     def _cors(self):
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, X-Study-Deck")
 
     def _json(self, status, data):
         body = json.dumps(data).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
+        if self.path.startswith("/flashcards"):
+            self.send_header("Cache-Control", "private, no-store")
+            self.send_header("Vary", "X-Study-Deck")
         self._cors()
         self.end_headers()
         self.wfile.write(body)
@@ -4205,6 +4277,8 @@ class ApiHandler(BaseHTTPRequestHandler):
                 job = _sentence_jobs.get(job_id)
                 result = {k: v for k, v in job.items() if k != "key"} if job else None
             self._json(200 if result else 404, result or {"error": "Translation expired. Try again."})
+        elif self.path == "/flashcards":
+            self._study_api("list")
         elif self.path == "/watched":
             # The page merges this into its localStorage watched set, so
             # marks sync across browsers and the server stays the source
@@ -4267,10 +4341,44 @@ class ApiHandler(BaseHTTPRequestHandler):
             self._post_build_dict()
         elif self.path == "/translate-sentence":
             self._post_sentence_translation()
+        elif self.path in ("/flashcards/record", "/flashcards/quiz", "/flashcards/review"):
+            self._study_api(self.path.rsplit("/", 1)[-1])
         elif self.path == "/cookies":
             self._post_cookies()
         else:
             self._json(404, {"error": "not found"})
+
+    def _study_api(self, action):
+        try:
+            keys = self.headers.get_all("X-Study-Deck") or []
+            deck = flashcards.check_deck(keys[0] if len(keys) == 1 else None)
+            data = {}
+            if action != "list":
+                body = self._read_body()
+                if body is None:
+                    return
+                data = json.loads(body or b"{}")
+                if not isinstance(data, dict):
+                    raise ValueError("Expected an object")
+            if action == "list":
+                result = flashcards.list_cards(deck)
+            elif action == "record":
+                result = flashcards.record(deck, data.get("events"))
+            elif action == "quiz":
+                result = flashcards.next_card(deck, data.get("kind", "all"),
+                                             data.get("target", "all"), data.get("exclude", []))
+            else:
+                result = flashcards.review(deck, data.get("card"), data.get("rating"), data.get("id"))
+            self._json(200, result)
+        except PermissionError as exc:
+            self._json(403, {"error": str(exc)})
+        except (ValueError, TypeError) as exc:
+            self._json(400, {"error": str(exc)})
+        except LookupError as exc:
+            self._json(404, {"error": str(exc)})
+        except Exception as exc:
+            log.warning("flashcard storage failed: %s", type(exc).__name__)
+            self._json(503, {"error": "Could not save or load flashcards. Please try again."})
 
     def _post_sentence_translation(self):
         body = self._read_body()
