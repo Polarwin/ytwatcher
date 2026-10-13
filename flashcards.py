@@ -166,6 +166,42 @@ def list_cards(deck):
                 'cards': [_card(row) for row in db.execute('SELECT * FROM cards WHERE deck=? ORDER BY last_lookup DESC', (deck,))]}
 
 
+def _answer_key(text):
+    return ' '.join(unicodedata.normalize('NFC', text).split()).casefold().rstrip('.!?。！？').rstrip()
+
+
+def _choices(card, rows, reverse=False):
+    """Use other saved cards with the same type/languages as distractors."""
+    expected = card['source'] if reverse else card['translation']
+    answers = {_answer_key(card['translation'])}
+    answers.update(_answer_key(value) for value in json.loads(card['meanings']))
+    used = {_answer_key(expected)}
+    if not reverse:
+        used.update(answers)
+    candidates = list(rows)
+    random.shuffle(candidates)
+    options = [expected]
+    for other in candidates:
+        if (other['id'] == card['id'] or other['kind'] != card['kind']
+                or other['src'] != card['src'] or other['dst'] != card['dst']
+                or _answer_key(other['source']) == _answer_key(card['source'])):
+            continue
+        other_answers = {_answer_key(other['translation'])}
+        other_answers.update(_answer_key(value) for value in json.loads(other['meanings']))
+        if answers & other_answers:
+            continue  # Avoid known synonyms/duplicate translations as wrong answers.
+        value = other['source'] if reverse else other['translation']
+        key = _answer_key(value)
+        if not key or key in used:
+            continue
+        options.append(value)
+        used.add(key)
+        if len(options) == 4:
+            break
+    random.shuffle(options)
+    return options
+
+
 def next_card(deck, kind='all', target='all', exclude=None):
     check_deck(deck)
     if kind not in ('all', 'word', 'sentence') or (target != 'all' and not _LANG_RE.fullmatch(target)):
@@ -189,15 +225,27 @@ def next_card(deck, kind='all', target='all', exclude=None):
     # receive extra weight. When nothing is due, allow deliberate extra practice.
     weights = [1 + min(8, row['lapses']) * 2 + min(5, row['lookups'] / (row['reviews'] + 1)) for row in pool]
     card = random.choices(pool, weights=weights, k=1)[0]
-    return {'card': _card(card), 'stats': stats, 'practice': not bool(due)}
+    return {'card': _card(card), 'stats': stats, 'practice': not bool(due),
+            'choices': {'forward': _choices(card, rows), 'reverse': _choices(card, rows, reverse=True)}}
 
 
-def review(deck, card_id, rating, event_id):
+def review(deck, card_id, rating, event_id, assessment=None):
     check_deck(deck)
     if not isinstance(card_id, str) or not re.fullmatch(r'[a-f0-9]{64}', card_id):
         raise ValueError('Invalid card')
-    if rating not in ('again', 'hard', 'good', 'easy'):
+    if rating not in ('auto', 'again', 'hard', 'good', 'easy'):
         raise ValueError('Invalid rating')
+    if assessment is not None:
+        if not isinstance(assessment, dict):
+            raise ValueError('Invalid answer assessment')
+        seconds = assessment.get('seconds')
+        if (type(assessment.get('correct')) is not bool
+                or type(seconds) not in (int, float) or not math.isfinite(seconds)
+                or not 0 <= seconds <= 86400 or assessment.get('mode') not in ('choice', 'typed')):
+            raise ValueError('Invalid answer assessment')
+        assessment = {'correct': assessment['correct'], 'seconds': seconds, 'mode': assessment['mode']}
+    if rating == 'auto' and assessment is None:
+        raise ValueError('Automatic scoring requires an answer assessment')
     if not isinstance(event_id, str) or not _KEY_RE.fullmatch(event_id):
         raise ValueError('Invalid review record')
     now = time.time()
@@ -208,6 +256,12 @@ def review(deck, card_id, rating, event_id):
             raise LookupError('Card not found in your deck')
         if db.execute('SELECT 1 FROM events WHERE deck=? AND id=?', (deck, event_id)).fetchone():
             return {'card': _card(row), 'stats': _stats(db, deck)}
+        automatic = rating == 'auto'
+        if automatic:
+            fast, normal = (5, 15) if row['kind'] == 'word' else (15, 45)
+            rating = ('again' if not assessment['correct'] else
+                      'easy' if assessment['seconds'] <= fast else
+                      'good' if assessment['seconds'] <= normal else 'hard')
         interval, ease, streak, lapses = row['interval'], row['ease'], row['streak'], row['lapses']
         if rating == 'again':
             interval, ease, streak, lapses = 600, max(1.3, ease - .2), 0, lapses + 1
@@ -221,7 +275,10 @@ def review(deck, card_id, rating, event_id):
         interval = min(interval, 365 * 86400)
         db.execute('''UPDATE cards SET due=?,interval=?,ease=?,streak=?,lapses=?,reviews=reviews+1,
             last_review=? WHERE deck=? AND id=?''', (now + interval, interval, ease, streak, lapses, now, deck, card_id))
+        details = {'rating': rating, 'automatic': automatic}
+        if assessment is not None:
+            details['assessment'] = assessment
         db.execute('INSERT INTO events VALUES (?,?,?,?,?,?)',
-                   (deck, event_id, card_id, 'review', json.dumps({'rating': rating}), now))
+                   (deck, event_id, card_id, 'review', json.dumps(details), now))
         card = db.execute('SELECT * FROM cards WHERE deck=? AND id=?', (deck, card_id)).fetchone()
         return {'card': _card(card), 'stats': _stats(db, deck)}

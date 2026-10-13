@@ -1574,7 +1574,7 @@ def scan_downloads(download_dir, files=None):
 # Bump when the index.html template changes: the fingerprint below only
 # covers the file listing, so without this an existing index.html would
 # keep the old template until some video is added or removed.
-INDEX_TEMPLATE_VERSION = 103
+INDEX_TEMPLATE_VERSION = 105
 
 
 def static_folder_url(item):
@@ -1844,6 +1844,10 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "    #study-question, #study-solution { white-space: pre-line; padding: .7rem;",
         "      border-radius: .3rem; background: #232323; overflow-wrap: anywhere; }",
         "    #study-solution { background: #16213a; }",
+        "    #study-choices button { display: block; width: 100%; margin: .4rem 0;",
+        "      min-height: 2.8rem; text-align: left; white-space: pre-wrap; overflow-wrap: anywhere; }",
+        "    #study-choices button.study-correct { border: 2px solid #6c6; color: #bfb; }",
+        "    #study-choices button.study-wrong { border: 2px solid #e88; color: #faa; }",
         "    #study-answer-input { width: 100%; box-sizing: border-box; margin: .5rem 0;",
         "      padding: .5rem; background: #222; color: #eee; border: 1px solid #555; }",
         "    .study-card { border-bottom: 1px solid #444; padding: .5rem 0; overflow-wrap: anywhere; }",
@@ -1974,12 +1978,17 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         '      <select id="study-direction" aria-label="Quiz direction">',
         '        <option value="forward">Translate from original</option>',
         '        <option value="reverse">Recall original</option><option value="mixed">Mix directions</option></select>',
+        '      <select id="study-mode" aria-label="Quiz mode">',
+        '        <option value="choice">Multiple choice</option><option value="recall">Recall answer</option></select>',
+        '      <select id="study-scoring" aria-label="Quiz scoring">',
+        '        <option value="auto">Automatic scoring</option><option value="manual">Manual ratings</option></select>',
         '      <button type="button" id="study-next">Random quiz</button></div>',
         '      <section id="study-quiz" hidden><p id="study-prompt"></p>',
         '        <div id="study-question"></div>',
+        '        <div id="study-choices" role="group" aria-label="Answer choices" hidden></div>',
         '        <textarea id="study-answer-input" rows="2" placeholder="Your answer (optional)" aria-label="Your answer"></textarea>',
         '        <button type="button" id="study-reveal">Show answer</button>',
-        '        <div id="study-solution" hidden></div><p id="study-comparison"></p>',
+        '        <div id="study-solution" hidden></div><p id="study-comparison" role="status"></p>',
         '        <p id="study-context" hidden></p>',
         '        <div id="study-ratings" hidden>',
         '          <button type="button" data-study-rating="again">Forgot</button>',
@@ -4374,7 +4383,8 @@ class ApiHandler(BaseHTTPRequestHandler):
                 result = flashcards.next_card(deck, data.get("kind", "all"),
                                              data.get("target", "all"), data.get("exclude", []))
             else:
-                result = flashcards.review(deck, data.get("card"), data.get("rating"), data.get("id"))
+                result = flashcards.review(deck, data.get("card"), data.get("rating"), data.get("id"),
+                                           data.get("assessment"))
             self._json(200, result)
         except PermissionError as exc:
             self._json(403, {"error": str(exc)})

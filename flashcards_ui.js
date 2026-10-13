@@ -7,6 +7,9 @@ function initStudy(api, beforeOpen) {
   var kindEl = document.getElementById("study-kind");
   var targetEl = document.getElementById("study-target");
   var directionEl = document.getElementById("study-direction");
+  var modeEl = document.getElementById("study-mode");
+  var scoringEl = document.getElementById("study-scoring");
+  var choicesEl = document.getElementById("study-choices");
   var quizEl = document.getElementById("study-quiz");
   var questionEl = document.getElementById("study-question");
   var solutionEl = document.getElementById("study-solution");
@@ -19,6 +22,7 @@ function initStudy(api, beforeOpen) {
   var pendingKey = "ytwatcher:study-pending:v1", deckKey = "ytwatcher:study-deck:v1";
   var pending = [], flushing = null, pendingDurable = true, cards = [], current = null;
   var recent = [], expected = "", alternatives = [], serial = 0, revealed = false;
+  var assessment = null, answered = false, elapsedMs = 0, startedAt = null;
   function hex() {
     var bytes = new Uint8Array(16);
     crypto.getRandomValues(bytes);
@@ -27,6 +31,7 @@ function initStudy(api, beforeOpen) {
   function stored(key, fallback) {
     try { return localStorage.getItem(key) || fallback; } catch (e) { return fallback; }
   }
+  scoringEl.value = stored("ytwatcher:study-scoring:v1", "auto") === "manual" ? "manual" : "auto";
   var incoming = new URLSearchParams(location.hash.slice(1)).get("study");
   var previousDeck = stored(deckKey, "");
   var deck = incoming && /^[a-f0-9]{32}$/.test(incoming) ? incoming : previousDeck;
@@ -167,6 +172,11 @@ function initStudy(api, beforeOpen) {
   function resetQuiz() {
     current = null;
     revealed = false;
+    assessment = null;
+    answered = false;
+    startedAt = null;
+    elapsedMs = 0;
+    nextEl.textContent = "Random quiz";
     quizEl.hidden = true;
     ratingsEl.hidden = true;
   }
@@ -194,44 +204,113 @@ function initStudy(api, beforeOpen) {
       document.getElementById("study-prompt").textContent = (current.kind === "word" ? "Word" : "Sentence") +
         " · " + language(reverse ? current.dst : current.src) + " → " + language(reverse ? current.src : current.dst);
       answerEl.value = "";
+      answerEl.readOnly = false;
       solutionEl.hidden = true;
       revealEl.hidden = false;
       document.getElementById("study-comparison").textContent = "";
       document.getElementById("study-context").hidden = true;
       quizEl.hidden = false;
       ratingsEl.querySelectorAll("button").forEach(function (button) { button.disabled = false; });
-      status.textContent = data.practice ? "Extra practice: no cards are due for these filters." : "Try recalling the answer, then reveal it.";
+      choicesEl.replaceChildren();
+      var options = data.choices && data.choices[reverse ? "reverse" : "forward"] || [];
+      var multiple = modeEl.value === "choice" && options.length >= 2;
+      choicesEl.hidden = !multiple;
+      answerEl.hidden = multiple;
+      revealEl.hidden = multiple;
+      if (multiple) options.forEach(function (value, index) {
+        var button = document.createElement("button");
+        button.type = "button";
+        button.textContent = String.fromCharCode(65 + index) + ". " + value;
+        button.addEventListener("click", function () {
+          if (revealed) return;
+          var correct = normalized(value) === normalized(expected);
+          choicesEl.querySelectorAll("button").forEach(function (option, optionIndex) {
+            option.disabled = true;
+            if (normalized(options[optionIndex]) === normalized(expected)) option.classList.add("study-correct");
+          });
+          if (!correct) button.classList.add("study-wrong");
+          assessment = {correct: correct, seconds: answerSeconds(), mode: "choice"};
+          revealAnswer(correct ? "Correct." : "Incorrect. This card will return sooner.");
+          if (!correct && scoringEl.value === "manual") ratingsEl.querySelectorAll("button").forEach(function (rating) {
+            rating.disabled = rating.dataset.studyRating !== "again";
+          });
+        });
+        choicesEl.appendChild(button);
+      });
+      var instruction = multiple ? "Choose the correct answer." :
+        modeEl.value === "choice" ? "Not enough distinct saved answers yet. Type an answer to check it." :
+        scoringEl.value === "auto" ? "Type an answer to check it against the saved translation." :
+        "Try recalling the answer, then reveal it.";
+      revealEl.textContent = scoringEl.value === "auto" ? "Check answer" : "Show answer";
+      startedAt = document.hidden ? null : performance.now();
+      status.textContent = (data.practice ? "Extra practice: no cards are due. " : "") + instruction;
     } catch (e) {
       if (requestSerial === serial) status.textContent = e.message || "Review unavailable. Try again when connected.";
     } finally {
       if (requestSerial === serial) nextEl.disabled = false;
     }
   }
-  function normalized(text) { return text.trim().toLocaleLowerCase().replace(/[.!?。！？]+$/g, "").replace(/\s+/g, " "); }
-  revealEl.addEventListener("click", function () {
-    if (!current) return;
+  function normalized(text) { return text.normalize("NFC").trim().toLocaleLowerCase().replace(/[.!?。！？]+$/g, "").replace(/\s+/g, " ").trim(); }
+  function answerSeconds() {
+    return Math.min(86400, (elapsedMs + (startedAt === null ? 0 : performance.now() - startedAt)) / 1000);
+  }
+  document.addEventListener("visibilitychange", function () {
+    if (!current || revealed) return;
+    if (document.hidden && startedAt !== null) {
+      elapsedMs += performance.now() - startedAt;
+      startedAt = null;
+    } else if (!document.hidden && startedAt === null) startedAt = performance.now();
+  });
+  function saveReview(rating) {
+    if (answered) return;
+    var event = {id: hex(), card: current.id, rating: rating};
+    if (assessment) event.assessment = assessment;
+    pending.push({action: "review", deck: deck, event: event});
+    answered = true;
+    savePending();
+    flush();
+  }
+  function revealAnswer(feedback) {
+    if (!current || revealed) return;
+    var typed = normalized(answerEl.value);
+    if (!assessment && scoringEl.value === "auto" && !typed) {
+      status.textContent = "Type an answer first, or select Manual ratings for mental recall.";
+      answerEl.focus();
+      return;
+    }
+    if (!assessment && typed) assessment = {
+      correct: [expected].concat(alternatives).some(function (v) { return normalized(v) === typed; }),
+      seconds: answerSeconds(), mode: "typed"
+    };
     revealed = true;
     solutionEl.textContent = expected + (alternatives.length ? "\nAlso: " + alternatives.join(" · ") : "") +
       (current.pos ? "\n" + current.pos : "") + (current.inf ? " · " + current.inf : "");
     solutionEl.hidden = false;
     revealEl.hidden = true;
-    ratingsEl.hidden = false;
-    var typed = normalized(answerEl.value);
-    document.getElementById("study-comparison").textContent = typed && [expected].concat(alternatives).some(function (v) {
+    ratingsEl.hidden = scoringEl.value === "auto";
+    answerEl.readOnly = true;
+    document.getElementById("study-comparison").textContent = feedback || (typed && [expected].concat(alternatives).some(function (v) {
       return normalized(v) === typed;
-    }) ? "Your answer matches. Rate how easily you recalled it." : "Compare your answer, then rate your recall.";
+    }) ? "Your answer matches. Rate how easily you recalled it." : "Compare your answer, then rate your recall.");
     var context = document.getElementById("study-context");
     context.textContent = (current.context ? "Subtitle context: " + current.context : "") +
       (current.video_title ? "\nFrom: " + current.video_title : "");
     context.hidden = !context.textContent;
-  });
+    if (scoringEl.value === "auto") {
+      document.getElementById("study-comparison").textContent = (assessment.correct ? "Correct" :
+        assessment.mode === "typed" ? "Does not match the saved answer" : "Incorrect") +
+        " · " + assessment.seconds.toFixed(1) + " seconds";
+      saveReview("auto");
+      nextEl.textContent = "Next card";
+      status.textContent = "Result recorded automatically. Choose Next card to continue.";
+    } else status.textContent = "Choose a recall rating to save this result and continue.";
+  }
+  revealEl.addEventListener("click", function () { revealAnswer(); });
   ratingsEl.addEventListener("click", async function (event) {
     var button = event.target.closest("[data-study-rating]");
     if (!button || !current || !revealed || button.disabled) return;
     ratingsEl.querySelectorAll("button").forEach(function (b) { b.disabled = true; });
-    pending.push({action: "review", deck: deck,
-      event: {id: hex(), card: current.id, rating: button.dataset.studyRating}});
-    savePending();
+    saveReview(button.dataset.studyRating);
     status.textContent = "Saving your recall…";
     await next();
   });
@@ -258,8 +337,11 @@ function initStudy(api, beforeOpen) {
     });
   });
   nextEl.addEventListener("click", next);
-  [kindEl, targetEl, directionEl].forEach(function (select) {
+  [kindEl, targetEl, directionEl, modeEl, scoringEl].forEach(function (select) {
     select.addEventListener("change", function () { clearRequest(); renderLibrary(); status.textContent = "Choose Random quiz to start."; });
+  });
+  scoringEl.addEventListener("change", function () {
+    try { localStorage.setItem("ytwatcher:study-scoring:v1", scoringEl.value); } catch (e) {}
   });
   searchEl.addEventListener("input", renderLibrary);
   document.getElementById("study-saved").addEventListener("toggle", function () {

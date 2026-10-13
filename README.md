@@ -300,9 +300,22 @@ building or preloading a dictionary does not fill the deck with unstudied words.
 
 Open **Flashcards** above the playlist or beside the subtitle tools, then choose
 **Random quiz**. Filter words/sentences or target languages, and optionally
-reverse the translation direction. Type an answer or recall it mentally, reveal
-the saved answer, and rate your recall: **Forgot**, **Hard**, **Remembered**, or
-**Easy**. Quiz answers use saved translations and do not call the LLM. Due cards
+reverse the translation direction. **Multiple choice** offers up to four shuffled
+answers from your own saved cards of the same type and language pair. Known
+duplicate translations and overlapping meanings are excluded as distractors.
+With fewer than two distinct answers, the quiz falls back to typed recall.
+**Automatic scoring** is the default: choosing an option or checking a typed
+answer records correctness and response time immediately, without a rating step.
+Time spent with the page hidden is excluded. Incorrect answers use **Forgot**;
+correct word answers within 5/15 seconds use **Easy**/**Remembered**, with slower
+answers using **Hard**. Sentence thresholds are 15/45 seconds. Choose **Next card**
+after reading the feedback. Typed answers are compared with the saved answer and
+known alternative meanings, ignoring case, whitespace, and trailing sentence
+punctuation; other valid paraphrases may not match.
+Choose **Manual ratings** for optional self-assessment or mental recall, then
+rate **Forgot**, **Hard**, **Remembered**, or **Easy**. Incorrect multiple-choice
+answers only offer **Forgot**. The scoring preference is saved on the device.
+Quiz answers use saved translations and do not call the LLM. Due cards
 are randomized with extra weight for forgotten/frequently consulted cards;
 when nothing is due, extra practice remains available. Forgot schedules another
 review in 10 minutes; first Remembered/Easy reviews schedule 1/4 days, and later
