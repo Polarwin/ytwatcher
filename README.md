@@ -55,6 +55,10 @@ the real file is gitignored):
     keyword appears in its title (case-insensitive). Takes precedence
     over `match`.
   - `quality` — yt-dlp format string passed via `-f`.
+  - `skip_shorts` — when `true`, skip titles tagged `#shorts`, `#short`,
+    `#shortvideo`, or `#shortsfeed` (case-insensitive), regardless of duration.
+    Also skip videos at or below `shorts_max_duration` seconds (default `60`).
+    Original titles are checked too when fetched for matching or exclusions.
   - `keep_watched` — optional (default `false`); when `true`, files you
     mark as watched are moved into a `watched` subdirectory of the
     channel folder instead of being deleted.

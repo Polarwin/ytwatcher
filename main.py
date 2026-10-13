@@ -1241,16 +1241,22 @@ def matches(sub, title):
     return matches_keywords(sub, title)
 
 
+SHORTS_TITLE_TAG = re.compile(
+    r"[#＃](?:shortsfeed|shortvideo|shorts|short)(?![\w])", re.IGNORECASE
+)
+
+
 def is_short(video, sub):
     """Return True if the video looks like a YouTube Short.
 
-    Based on duration only: anything at or below the subscription's
-    shorts_max_duration (default 60s) counts as a Short. Unknown
-    durations are not treated as Shorts, to avoid skipping normal
-    videos on missing metadata.
+    Explicit Shorts hashtags take precedence over duration: Shorts can
+    exceed the subscription's shorts_max_duration. Otherwise use that
+    threshold (default 60s); missing duration alone does not imply a Short.
     """
     if not sub.get("skip_shorts", False):
         return False
+    if SHORTS_TITLE_TAG.search(video.get("title") or ""):
+        return True
     duration = video.get("duration")
     if duration is None:
         return False
@@ -5861,6 +5867,12 @@ def process_subscription(sub, settings, seen, failed, scan_only=False):
                 if not scan_only:
                     seen.add(video["id"])
                 continue
+        if original_title and is_short({**video, "title": original_title}, sub):
+            log.info("[%s] skipped (short, original title): %s (%s)",
+                     name, video["title"], original_title)
+            if not scan_only:
+                seen.add(video["id"])
+            continue
         if scan_only:
             log.info("[%s] new, MATCHED (would download): %s", name, video["title"])
             continue
