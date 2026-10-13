@@ -1574,7 +1574,7 @@ def scan_downloads(download_dir, files=None):
 # Bump when the index.html template changes: the fingerprint below only
 # covers the file listing, so without this an existing index.html would
 # keep the old template until some video is added or removed.
-INDEX_TEMPLATE_VERSION = 105
+INDEX_TEMPLATE_VERSION = 106
 
 
 def static_folder_url(item):
@@ -1828,6 +1828,10 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "      left: .6rem; right: .6rem; bottom: 5rem; max-height: 45%; overflow: auto; }",
         "    .pl-sub-word { cursor: pointer; }",
         "    .pl-sub-word:hover { text-decoration: underline; }",
+        "    .pl-copy-fallback { position: fixed; z-index: 10; left: .6rem; right: .6rem;",
+        "      bottom: .6rem; padding: .5rem; background: #16213a; border: 1px solid #555; }",
+        "    .pl-copy-fallback textarea { width: 100%; height: 6em; box-sizing: border-box;",
+        "      background: #222; color: #eee; font-size: 1rem; }",
         "    #pl-sentence { height: 5.6em; box-sizing: border-box; overflow: auto;",
         "      scrollbar-gutter: stable; padding: .45rem .6rem; margin-top: .4rem;",
         "      background: #16213a; color: #eee; border-radius: 4px; white-space: pre-line; }",
@@ -2016,6 +2020,7 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         '        <div id="pl-sentence" role="status" aria-live="polite" hidden style="visibility:hidden"></div>',
         '        <div id="pl-sub-tools">',
         '        <button id="pl-copy-subs" type="button" hidden>Copy subtitles</button>',
+        '        <button id="pl-copy-sentence" type="button" hidden disabled>Copy sentence</button>',
         '        <button id="pl-translate-sentence" type="button" hidden disabled>Translate sentence</button>',
         '        <button type="button" class="study-open">Flashcards</button>',
         '        <select id="pl-dict-to" title="Translation target language" hidden>',
@@ -2500,6 +2505,7 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "  var plNow = document.getElementById(\"pl-now\");",
         "  var plSubsEl = document.getElementById(\"pl-subs\");",
         '  var plCopySubs = document.getElementById("pl-copy-subs");',
+        '  var plCopySentence = document.getElementById("pl-copy-sentence");',
         '  var plCopyStatus = document.getElementById("pl-copy-status");',
         "  var plDictEl = document.getElementById(\"pl-dict\");",
         '  var plDictToSel = document.getElementById("pl-dict-to");',
@@ -2747,6 +2753,7 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "    }",
         '    plSubsEl.style.visibility = text ? "visible" : "hidden";',
         '    plSentenceBtn.disabled = !text;',
+        '    plCopySentence.disabled = !text;',
         '    if (plSentenceWanted && (!text || plCurrentSentence() !== plSentenceWanted)) plSentenceClear();',
         "    if (!text) plDictClear();",
         "  }",
@@ -2842,12 +2849,51 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         '      plCopyStatus.textContent = "Copied";',
         "    }).catch(selectText);",
         "  });",
+        *r"""
+  var plCopyFallback = null;
+  function plClearCopyFallback() {
+    if (plCopyFallback) plCopyFallback.remove();
+    plCopyFallback = null;
+  }
+  plCopySentence.addEventListener("click", function () {
+    plVideo.pause();
+    var text = plCurrentSentence();
+    if (!text) return;
+    plClearCopyFallback();
+    function selectSentence() {
+      plClearCopyFallback();
+      var panel = document.createElement("div");
+      panel.className = "pl-copy-fallback";
+      var close = document.createElement("button");
+      close.type = "button";
+      close.textContent = "Close";
+      close.setAttribute("aria-label", "Close sentence copy selection");
+      close.addEventListener("click", plClearCopyFallback);
+      var field = document.createElement("textarea");
+      field.readOnly = true;
+      field.value = text;
+      field.setAttribute("aria-label", "Whole subtitle sentence to copy");
+      panel.append(close, field);
+      plStage.appendChild(panel);
+      plCopyFallback = panel;
+      field.focus({preventScroll: true});
+      field.select();
+      field.setSelectionRange(0, text.length);
+      plCopyStatus.textContent = "Sentence selected — use Copy from your browser menu.";
+    }
+    if (!navigator.clipboard || !navigator.clipboard.writeText) { selectSentence(); return; }
+    navigator.clipboard.writeText(text).then(function () {
+      plCopyStatus.textContent = "Sentence copied";
+    }).catch(selectSentence);
+  });
+""".strip().splitlines(),
         "  var plRepeat = document.getElementById(\"pl-repeat\");",
         "  var plAutowatch = document.getElementById(\"pl-autowatch\");",
         "  var plAutolatest = document.getElementById(\"pl-autolatest\");",
         "  // Attach subtitle tracks stored on the playlist item",
         "  // (data-subs on the source li, see scan_downloads).",
         "  function plApplyTracks(item) {",
+        '    plClearCopyFallback();',
         '    plSentenceClear();',
         '    plSentenceCueSource = null;',
         '    plSentenceTimeline = null;',
@@ -2860,6 +2906,7 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         '    plSubsEl.hidden = !item.subs;',
         '    plSubsEl.style.visibility = "hidden";',
         '    plCopySubs.hidden = !item.subs;',
+        '    plCopySentence.hidden = !item.subs;',
         '    plDictToSel.hidden = !item.subs;',
         "    // Keep audio mode during subtitle/library refreshes; metadata",
         "    // selects the mode when a different media file is loaded.",

@@ -280,6 +280,13 @@ language immediately requests a new translation for the displayed sentence.
 Caption and translation panels reserve their height to avoid page movement on
 mobile. This also works with audio-only captions and Landscape view.
 
+**Copy sentence** pauses playback and copies the complete original sentence
+at the current position, joining subtitle cues up to punctuation boundaries.
+It uses the same sentence selection as translation and needs no LLM request.
+**Copy subtitles** still copies the currently displayed cue. If clipboard
+access is unavailable, a selectable field offers the complete sentence for
+manual copying without replacing the subtitle text.
+
 Sentence translations are requested only on button clicks or target-language
 changes for an already requested sentence. No sentence translation jobs run on
 download or offline preload. Results are reused in memory for up to an hour;
