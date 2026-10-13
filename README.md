@@ -273,15 +273,16 @@ is optional and is not enabled automatically or saved across page reloads.
 
 **Translate sentence** pauses playback and translates the sentence at the
 current position using the local LLM gateway. Sentences are assembled from
-subtitle punctuation across cue boundaries; their position within a cue is
-estimated from its timing. The original Spanish text stays available alongside
+subtitle punctuation across cue boundaries. Every complete sentence touched
+by the current subtitle is included, even when a cue contains the end of one
+sentence and the beginning of another. The original Spanish text stays available alongside
 the translation, and word lookup/copy continue to work. Changing the target
 language immediately requests a new translation for the displayed sentence.
 Caption and translation panels reserve their height to avoid page movement on
 mobile. This also works with audio-only captions and Landscape view.
 
-**Copy sentence** pauses playback and copies the complete original sentence
-at the current position, joining subtitle cues up to punctuation boundaries.
+**Copy sentence** pauses playback and copies all complete original sentences
+covered by the current subtitle, joining cues up to punctuation boundaries.
 It uses the same sentence selection as translation and needs no LLM request.
 **Copy subtitles** still copies the currently displayed cue. If clipboard
 access is unavailable, a selectable field offers the complete sentence for

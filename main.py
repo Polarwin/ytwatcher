@@ -1574,7 +1574,7 @@ def scan_downloads(download_dir, files=None):
 # Bump when the index.html template changes: the fingerprint below only
 # covers the file listing, so without this an existing index.html would
 # keep the old template until some video is added or removed.
-INDEX_TEMPLATE_VERSION = 106
+INDEX_TEMPLATE_VERSION = 107
 
 
 def static_folder_url(item):
@@ -2627,15 +2627,18 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
     }
     if (!cues || !cues.length) return null;
     if (cues === plSentenceCueSource && language === plSentenceCueLanguage && cues.length === plSentenceCueCount) return plSentenceTimeline;
-    var text = "", ranges = [];
-    Array.from(cues).forEach(function (cue) {
+    var text = "", ranges = [], cueList = Array.from(cues);
+    // Rolling tracks also contain brief transition cues without inline timestamps.
+    var rollingTrack = cueList.some(function (cue) {
+      return cue.rolling || /<\d{2}:\d{2}(?::\d{2})?\.\d{3}>/.test(cue.text || "");
+    });
+    cueList.forEach(function (cue) {
       var raw = cue.text || "";
       var line = plDecodeEntities(raw.replace(/<[^>]+>/g, "").replace(/(^|\n)>+\s*/g, "$1"));
       line = line.replace(/\s+/g, " ").trim();
       if (!line) return;
-      var rolling = cue.rolling || /<\d{2}:\d{2}(?::\d{2})?\.\d{3}>/.test(raw);
       var next = line.split(" "), overlap = 0;
-      if (rolling && text) {
+      if (rollingTrack && text) {
         var previous = text.split(" ");
         for (var count = Math.min(previous.length, next.length); count > 0; --count) {
           if (previous.slice(-count).join(" ") === next.slice(0, count).join(" ")) {
@@ -2674,15 +2677,17 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
   function plCurrentSentence() {
     var data = plSentenceData(), now = plVideo.currentTime;
     if (!data) return plSubsEl.textContent.trim();
-    var range = null;
-    data.ranges.forEach(function (r) { if (r.from <= now && now < r.to) range = r; });
-    if (!range) return plSubsEl.textContent.trim();
-    // Caption timing covers a whole cue. Approximate the spoken position
-    // inside it, then expand to punctuation boundaries across nearby cues.
-    var progress = Math.max(0, Math.min(.999, (now - range.from) / Math.max(.001, range.to - range.from)));
-    var position = range.start + progress * (range.end - range.start);
-    var sentence = data.sentences.find(function (s) { return s.start <= position && position < s.end; });
-    return sentence ? sentence.text : plSubsEl.textContent.trim();
+    var active = data.ranges.filter(function (r) { return r.from <= now && now < r.to; });
+    // Audio captions display the last active cue; video mirrors all active cues.
+    if (plVideo.classList.contains("audio-only")) active = active.slice(-1);
+    if (!active.length) return plSubsEl.textContent.trim();
+    // Include every sentence touched by the displayed subtitle, expanding
+    // fragments backward/forward to punctuation across surrounding cues.
+    var sentences = data.sentences.filter(function (sentence) {
+      return active.some(function (range) { return sentence.start < range.end && range.start < sentence.end; });
+    });
+    return sentences.length ? sentences.map(function (sentence) { return sentence.text; }).join(" ") :
+      plSubsEl.textContent.trim();
   }
   async function plTranslateSentence(text, from) {
     if (!text) return;
