@@ -514,14 +514,13 @@ still exported with a warning; export the same selection again to retry. Existin
 media is reused. No LLM work is triggered automatically by downloads or preload.
 Unpunctuated passages are divided into shorter review sections instead.
 
-**Download package ZIP** contains the independent media and all lesson assets for
-archiving or hosting elsewhere. For microphone recording and browser offline
-saving, use a trusted HTTPS origin (or localhost), allow microphone permission,
-and save the hosted page offline. Opening extracted files directly is suitable
-for basic reading/media but does not provide the full offline browser workflow.
+Lessons open directly in the browser, including on phones. No ZIP download or
+unzipping is needed. Use **Save offline** on the hosted HTTPS page to keep the
+lesson on the device. Microphone recording needs a trusted HTTPS origin (or
+localhost) and microphone permission.
 
 Voice recordings and answers stay in IndexedDB on the device. They are not
-uploaded or included in the exported ZIP, and clearing browser storage can remove
+uploaded, and clearing browser storage can remove
 them. Download important recordings separately. There is no automatic
 pronunciation score: compare the original and your recording by listening.
 
@@ -529,3 +528,35 @@ Exports live outside the watcher’s download cleanup. Identical completed expor
 are reused; dictionaries are extracted from the existing local lexicons. Only
 explicit export requests create packages; at most two jobs can be pending and
 one media conversion runs at a time. Export errors are recorded in the server log.
+
+### Temporary Frankfurt links
+
+On an exported lesson, or in the finished export dialog, choose **Create temporary
+link**. This copies only that lesson to Frankfurt and returns an unguessable HTTPS
+URL. No downloader login is needed to open that link. Existing private downloader
+files, accounts and API routes still require authentication.
+
+Links default to **5 days** (also selectable: 1 day). Five days is the maximum;
+opening a link never extends its lifetime. Expired files are removed by the
+Frankfurt cleanup loop within about 30 seconds. **Revoke link** removes the copy
+early. Offline copies recipients already saved cannot be revoked.
+Frankfurt holds at most 2 GB of learning shares; revoke old links or choose shorter
+clips if that limit is reached. The original home export remains available. Only lesson files are stored; no
+duplicate ZIP archives are created.
+
+Shared pages include only the exported media, subtitles, reading, dictionary and
+included exercises/translations. Recordings, answers, progress and flashcard deck
+keys are never uploaded. Recipients’ recording/practice works locally; the shared
+page does not use the home translation or flashcard API. Include desired reading
+translations during export before sharing.
+
+The home API publishes/revokes through the existing `frankfurt` SSH alias, using
+`learning_share.py`. The SSH destination can be overridden with
+`YTWATCHER_SHARE_SSH`. Link tokens/expiry are kept in gitignored
+`.learning-shares.json`. On Frankfurt, `learning_share_server.py` stores copies in
+`.learning-shares/` alongside the downloader project and serves only whitelisted
+assets under `/learn/<token>/`. It is mounted in the existing `yt_dl_temp.py`
+HTTP handler, behind the existing `ytwatcher.duckdns.org` HTTPS proxy. No home
+API or library route is exposed. Deploy both Python files together; the remote
+module uses only the Python standard library. Public links are excluded from
+indexing and send a no-referrer policy.

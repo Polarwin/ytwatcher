@@ -1,7 +1,7 @@
 'use strict';
 const ROOT = new URL('./', self.location.href).href;
 const CACHE = 'ytwatcher-lesson:' + ROOT + ':v1';
-const SHELL = ['index.html', 'learning_page.css', 'learning_page.js', 'pack.json', 'manifest.webmanifest', 'offline-files.json', 'subtitles.vtt'];
+const SHELL = ['index.html', 'learning_page.css', 'learning_page.js', 'learning_share_ui.js', 'pack.json', 'manifest.webmanifest', 'offline-files.json', 'subtitles.vtt'];
 self.addEventListener('install', event => event.waitUntil((async () => {
   const cache = await caches.open(CACHE);
   await cache.addAll(SHELL.map(file => new Request(new URL(file, ROOT), {cache: 'reload'})));
@@ -10,7 +10,7 @@ self.addEventListener('install', event => event.waitUntil((async () => {
 self.addEventListener('activate', event => event.waitUntil(self.clients.claim()));
 self.addEventListener('fetch', event => {
   const req = event.request, url = new URL(req.url);
-  if (!['GET', 'HEAD'].includes(req.method) || !url.href.startsWith(ROOT) || url.pathname.endsWith('/material.zip')) return;
+  if (!['GET', 'HEAD'].includes(req.method) || !url.href.startsWith(ROOT)) return;
   event.respondWith((async () => {
     const cache = await caches.open(CACHE);
     const target = req.mode === 'navigate' ? new URL('index.html', ROOT).href : req;

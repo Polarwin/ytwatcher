@@ -26,6 +26,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import bcrypt
+import learning_share_server
 
 import main  # same project: yt-dlp path + quality presets
 
@@ -411,6 +412,10 @@ def cleanup_once(now=None):
 def cleanup_loop():
     while True:
         cleanup_once()
+        try:
+            learning_share_server.cleanup()
+        except OSError as exc:
+            main.log.warning("Learning share cleanup failed: %s", exc)
         time.sleep(30)
 
 
@@ -622,7 +627,13 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def do_HEAD(self):
+        if not learning_share_server.serve(self):
+            self.send_error(405, "Method not allowed")
+
     def do_GET(self):
+        if learning_share_server.serve(self):
+            return
         if not self._require_user():
             return
         path = urllib.parse.urlsplit(self.path).path

@@ -2,7 +2,7 @@
 (() => {
   const pack = JSON.parse(document.getElementById('pack-data').textContent);
   const $ = id => document.getElementById(id), media = $('media'), own = $('my-voice');
-  const API = '/ytwatcher/api', sentences = pack.sentences;
+  const API = '/ytwatcher/api', sentences = pack.sentences, shared = !!pack.shared;
   const root = new URL('./', location.href).href, cacheName = 'ytwatcher-lesson:' + root + ':v1';
   const labels = {en: 'English', de: 'Deutsch', es: 'Español', zh: '中文', fr: 'Français', it: 'Italiano', pt: 'Português'};
   const uid = () => Array.from(crypto.getRandomValues(new Uint8Array(16)), b => b.toString(16).padStart(2, '0')).join('');
@@ -77,6 +77,7 @@
     return value;
   }
   async function remember(data) {
+    if (shared) return;
     const event = {id: uid(), created: Date.now() / 1000, kind: data.kind,
       source: data.source, translation: data.translation, src: pack.source, dst: target,
       pos: (data.pos || '').slice(0, 100), inf: (data.inf || '').slice(0, 100),
@@ -89,7 +90,7 @@
     flushLookups();
   }
   function flushLookups() {
-    if (flushing || !navigator.onLine || location.protocol === 'file:') return flushing;
+    if (shared || flushing || !navigator.onLine || location.protocol === 'file:') return flushing;
     flushing = (async () => {
       let rows;
       try { rows = await transaction('queue', false, store => store.getAll()); }
@@ -133,7 +134,7 @@
     pauseAll();
     const chosenTarget = target, chosenSentence = selected, serial = ++lookupSerial;
     let value = dictionaryEntry(word);
-    if (!value && navigator.onLine && location.protocol !== 'file:') {
+    if (!value && !shared && navigator.onLine && location.protocol !== 'file:') {
       try {
         const response = await fetch(API + '/dictionary?' + new URLSearchParams({word, from: pack.source, to: target}));
         if (response.ok) value = await response.json();
@@ -141,7 +142,7 @@
     }
     if (serial !== lookupSerial || chosenTarget !== target || chosenSentence !== selected) return;
     const message = value ? value.en + (value.meanings?.length ? '\nAlso: ' + value.meanings.join(' · ') : '') +
-      (value.pos ? '\n' + value.pos : '') + (value.inf ? ' ← ' + value.inf : '') : 'Not in this clip’s offline dictionary. Connect to look up this word.';
+      (value.pos ? '\n' + value.pos : '') + (value.inf ? ' ← ' + value.inf : '') : (shared ? 'Not in this shared clip’s dictionary.' : 'Not in this clip’s offline dictionary. Connect to look up this word.');
     if (dialog) {
       $('word-dialog-title').textContent = word;
       $('word-dialog-body').textContent = message;
@@ -307,8 +308,8 @@
     let text = language === pack.target && sentences[index].translation || await getValue(translationKey(index, language));
     if (serial !== translationSerial) return;
     if (!text) {
-      if (!navigator.onLine || location.protocol === 'file:') {
-        $('play-status').textContent = 'No saved translation for this sentence. Translate while connected to keep it offline.'; return;
+      if (shared || !navigator.onLine || location.protocol === 'file:') {
+        $('play-status').textContent = shared ? 'This sentence has no translation in the shared package. Ask the sender to include translations when exporting.' : 'No saved translation for this sentence. Translate while connected to keep it offline.'; return;
       }
       $('sentence-translation').textContent = 'Translating…';
       try {
@@ -679,6 +680,16 @@
     media.addEventListener('loadedmetadata', () => seek(sentences[selected].start), {once: true});
     $('clip-summary').textContent = `${sentences.length} sentences · ${clock(pack.duration)} clip · original ${clock(pack.source_start)}–${clock(pack.source_end)}`;
     renderReading(); renderVocabulary(); select(selected, false);
+    if (shared) {
+      document.querySelectorAll('header > a').forEach(link => { link.hidden = true; });
+      const note = document.createElement('p'); note.className = 'muted';
+      note.textContent = 'Shared learning clip · Link expires ' + new Date(pack.share_expires * 1000).toLocaleString() + '. Save offline before expiry. Your voice and progress stay on this device.';
+      document.querySelector('header').append(note);
+      const wordsNote = $('tab-words').querySelector('.muted');
+      if (wordsNote) wordsNote.textContent = 'Dictionary entries are included in this lesson. Your practice stays on this device.';
+    } else if (location.protocol !== 'file:' && window.ytLearningShare) {
+      window.ytLearningShare($('learning-share-tools'), pack.id);
+    }
     if (!storageAvailable) $('record-status').textContent = 'Browser storage is unavailable. You can still record and download attempts, but progress may not survive closing this page.';
     if ('serviceWorker' in navigator && window.isSecureContext && location.protocol !== 'file:') navigator.serviceWorker.register('learning_sw.js', {scope: './', updateViaCache: 'none'}).catch(() => {});
     offlineState().catch(() => {}); flushLookups();

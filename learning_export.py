@@ -16,7 +16,6 @@ import time
 import unicodedata
 import urllib.parse
 import uuid
-import zipfile
 
 import requests
 
@@ -27,7 +26,7 @@ log = logging.getLogger("ytwatcher.learning")
 ASSETS = Path(__file__).parent
 OUTPUT = Path('/srv/files/static/LearningClips')
 PUBLIC = '/ytwatcher/static/LearningClips/'
-VERSION = 1
+VERSION = 3
 MAX_SECONDS = 7200
 MAX_ACTIVE = 2
 _jobs = {}
@@ -295,7 +294,7 @@ def start(data, download_dir, static_roots, llm_url, llm_gate):
                 pack = json.loads(manifest.read_text())
                 if not exercises or not pack.get('generation_error'):
                     job = {'id': job_id, 'created': time.time(), 'status': 'done', 'stage': 'Ready',
-                           'url': PUBLIC + job_id + '/index.html', 'zip_url': PUBLIC + job_id + '/material.zip',
+                           'url': PUBLIC + job_id + '/index.html',
                            'sentences': len(pack['sentences']), 'reused': True, 'warnings': []}
                     _jobs[job_id] = job
                     return public_job(job)
@@ -403,19 +402,23 @@ def generate_exercises(pack, llm_url, llm_gate):
             translated[entry['id']] = entry['text'].strip()
         if set(translated) != {s['id'] for s in pack['sentences']}:
             raise ValueError('Generated sentence IDs did not match the source.')
+        # Keep valid translations even if one optional exercise is malformed.
+        for sentence in pack['sentences']:
+            sentence['translation'] = translated[sentence['id']]
+        pack['generated'] = True
         questions = value.get('questions', [])
         if not isinstance(questions, list) or not 1 <= len(questions) <= 8:
             raise ValueError('The model returned no usable comprehension questions.')
-        for question in questions:
-            if not isinstance(question, dict) or any(not isinstance(question.get(k), str) or not 1 <= len(question[k]) <= 2000 for k in ('question', 'answer')):
-                raise ValueError('Invalid generated question.')
+        questions = [question for question in questions if isinstance(question, dict) and
+                     all(isinstance(question.get(k), str) and 1 <= len(question[k].strip()) <= 2000
+                         for k in ('question', 'answer'))]
+        if not questions:
+            raise ValueError('Reading translations were saved, but the model returned no usable comprehension questions. Export again later to retry.')
         notes = value.get('vocabulary', [])
         if not isinstance(notes, list):
             notes = []
         notes = [v for v in notes[:20] if isinstance(v, dict) and isinstance(v.get('word'), str)
                  and isinstance(v.get('explanation'), str) and len(v['word']) < 100 and len(v['explanation']) < 1000]
-        for sentence in pack['sentences']:
-            sentence['translation'] = translated[sentence['id']]
         pack['questions'], pack['vocabulary_notes'] = questions, notes
         pack['generated'] = True
     finally:
@@ -445,7 +448,7 @@ def publish_library():
     for created, name, pack in sorted(cards, reverse=True):
         title = html.escape(pack['title'])
         summary = f"{len(pack['sentences'])} sentences · {pack['duration'] / 60:.1f} minutes"
-        rows.append(f'<article><h2><a href="{name}/index.html">{title}</a></h2><p>{summary}</p><a href="{name}/material.zip" download>Download ZIP</a></article>')
+        rows.append(f'<article><h2><a href="{name}/index.html">{title}</a></h2><p>{summary}</p></article>')
     atomic(OUTPUT / 'index.html', '<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Learning clips</title><style>body{font:17px/1.6 system-ui;max-width:850px;margin:2rem auto;padding:1rem;background:#111;color:#eee}a{color:#9cd7bf}article{padding:1rem;border-bottom:1px solid #555}h2{font-size:1.1rem}</style><a href="/ytwatcher/">← ytwatcher</a><h1>Learning clips</h1>' + ''.join(rows))
 
 
@@ -512,7 +515,7 @@ def _worker(job_id, media, subtitle, begin, end, target, exercises, llm_url, llm
             page = template.replace('__PACK_DATA__', data).replace('__TITLE__', html.escape(pack['title']))
             atomic(temporary / 'index.html', page)
             atomic(temporary / 'pack.json', json.dumps(pack, ensure_ascii=False))
-            for name in ('learning_page.js', 'learning_page.css', 'learning_sw.js'):
+            for name in ('learning_page.js', 'learning_page.css', 'learning_sw.js', 'learning_share_ui.js'):
                 shutil.copyfile(ASSETS / name, temporary / name)
             manifest = {'name': pack['title'], 'short_name': 'Learning clip', 'start_url': './index.html',
                         'scope': './', 'display': 'standalone', 'background_color': '#111b20', 'theme_color': '#111b20'}
@@ -520,14 +523,11 @@ def _worker(job_id, media, subtitle, begin, end, target, exercises, llm_url, llm
             vtt = 'WEBVTT\n\n' + '\n\n'.join(f"{_vtt_time(s['start'])} --> {_vtt_time(s['end'])}\n{s['text']}" for s in sentences) + '\n'
             atomic(temporary / 'subtitles.vtt', vtt)
             files = ['index.html', 'pack.json', 'learning_page.js', 'learning_page.css', 'learning_sw.js',
-                     'manifest.webmanifest', 'subtitles.vtt', pack['media']]
+                     'learning_share_ui.js', 'manifest.webmanifest', 'subtitles.vtt', pack['media']]
             atomic(temporary / 'offline-files.json', json.dumps({'version': VERSION, 'id': job_id, 'files': files}))
             files.append('offline-files.json')
-            atomic(temporary / 'README.txt', 'Open index.html from the hosted HTTPS page and choose Save offline before disconnecting.\nThe ZIP also contains the independent clip, subtitles, reading and vocabulary.\nMicrophone recording requires browser permission and a trusted secure origin; use the hosted page offline.\nVoice recordings and practice progress stay in browser storage, not in this ZIP.\nDownload recordings separately to keep backups.\n')
+            atomic(temporary / 'README.txt', 'Open index.html from the hosted HTTPS page and choose Save offline before disconnecting.\nMicrophone recording requires browser permission and a trusted secure origin; use the hosted page offline.\nVoice recordings and practice progress stay in browser storage, not on the server.\nDownload recordings separately to keep backups.\n')
             files.append('README.txt')
-            with zipfile.ZipFile(temporary / 'material.zip', 'w', compression=zipfile.ZIP_STORED, allowZip64=True) as archive:
-                for name in files:
-                    archive.write(temporary / name, arcname=f'learning-{job_id[:8]}/{name}')
             with _publish_lock:
                 final = OUTPUT / job_id
                 if final.exists():
@@ -539,7 +539,7 @@ def _worker(job_id, media, subtitle, begin, end, target, exercises, llm_url, llm
                 temporary = None
                 publish_library()
             update(job_id, status='done', stage='Ready', url=PUBLIC + job_id + '/index.html',
-                   zip_url=PUBLIC + job_id + '/material.zip', warnings=warnings, duration=pack['duration'])
+                   warnings=warnings, duration=pack['duration'])
         except Exception as exc:
             log.exception('Learning export %s failed', job_id)
             update(job_id, status='failed', stage='Export failed', error=str(exc)[:800])

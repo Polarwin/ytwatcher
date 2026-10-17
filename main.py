@@ -39,6 +39,7 @@ from dotenv import load_dotenv
 import flashcards
 import lexicon_data
 import learning_export
+import learning_share
 from dictionary_corrections import CORRECTIONS as DICTIONARY_CORRECTIONS
 
 CONFIG_FILE = Path(__file__).parent / "subscriptions.yaml"
@@ -1590,7 +1591,7 @@ def scan_downloads(download_dir, files=None):
 # Bump when the index.html template changes: the fingerprint below only
 # covers the file listing, so without this an existing index.html would
 # keep the old template until some video is added or removed.
-INDEX_TEMPLATE_VERSION = 112
+INDEX_TEMPLATE_VERSION = 114
 
 
 def static_folder_url(item):
@@ -3042,6 +3043,7 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "  var plSubRequest = 0;",
         '  plVideo.textTracks.addEventListener("change", plUpdateSubs);',
         "  var plIndex = -1;",
+        *Path(__file__).with_name("learning_share_ui.js").read_text(encoding="utf-8").splitlines(),
         *Path(__file__).with_name("learning_export_ui.js").read_text(encoding="utf-8").splitlines(),
         "  var plDragIndex = -1;",
         "  function plItemId(item) {",
@@ -4298,7 +4300,7 @@ class ApiHandler(BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
-        if self.path.startswith("/flashcards"):
+        if self.path.startswith(("/flashcards", "/learning-share")):
             self.send_header("Cache-Control", "private, no-store")
             self.send_header("Vary", "X-Study-Deck")
         self._cors()
@@ -4357,7 +4359,13 @@ class ApiHandler(BaseHTTPRequestHandler):
         if not self._origin_allowed():
             self._json(403, {"error": "cross-origin request forbidden"})
             return
-        if urllib.parse.urlsplit(self.path).path == "/learning-export":
+        if urllib.parse.urlsplit(self.path).path == "/learning-share":
+            query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+            try:
+                self._json(200, learning_share.status((query.get("id") or [""])[0]))
+            except ValueError as exc:
+                self._json(400, {"error": str(exc)})
+        elif urllib.parse.urlsplit(self.path).path == "/learning-export":
             query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
             result = learning_export.status((query.get("id") or [""])[0])
             self._json(200 if result else 404, result or {"error": "Export status expired. Open All exported learning clips, or export again."})
@@ -4418,7 +4426,9 @@ class ApiHandler(BaseHTTPRequestHandler):
         if not self._origin_allowed():
             self._json(403, {"error": "cross-origin request forbidden"})
             return
-        if self.path == "/learning-export":
+        if self.path in ("/learning-share", "/learning-share/revoke"):
+            self._post_learning_share()
+        elif self.path == "/learning-export":
             self._post_learning_export()
         elif self.path == "/watched":
             self._post_watched()
@@ -4444,6 +4454,19 @@ class ApiHandler(BaseHTTPRequestHandler):
             self._post_cookies()
         else:
             self._json(404, {"error": "not found"})
+
+    def _post_learning_share(self):
+        body = self._read_body()
+        if body is None:
+            return
+        try:
+            result = learning_share.start(json.loads(body or b"{}"), revoke=self.path.endswith("/revoke"))
+            self._json(202 if result["status"] in ("uploading", "revoking") else 200, result)
+        except (ValueError, TypeError) as exc:
+            self._json(400, {"error": str(exc)})
+        except Exception:
+            log.exception("Could not start learning share")
+            self._json(503, {"error": "Could not start sharing. Try again."})
 
     def _post_learning_export(self):
         body = self._read_body()

@@ -31,6 +31,7 @@
     if (!learnJob) {
       document.getElementById('learning-export-status').textContent = selector.options.length ? '' : 'Download subtitles for this video first.';
       document.getElementById('learning-export-result').hidden = true;
+      document.getElementById('learning-export-share').hidden = true;
     }
     learnDialog.showModal();
   }
@@ -61,8 +62,8 @@
       (job.sentences ? '\n' + job.sentences + ' sentences' : '') + (job.warnings?.length ? '\n' + job.warnings.join('\n') : '');
     if (job.status === 'done') {
       document.getElementById('learning-export-open').href = job.url;
-      document.getElementById('learning-export-zip').href = job.zip_url;
       document.getElementById('learning-export-result').hidden = false;
+      window.ytLearningShare(document.getElementById('learning-export-share'), job.id);
     }
     if (['done', 'failed'].includes(job.status)) {
       learnJob = null; document.getElementById('learning-export-submit').disabled = false;

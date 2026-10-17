@@ -27,3 +27,7 @@ downloads/
 
 # Private vocabulary/sentence decks and lookup/review history
 .flashcards.sqlite3*
+
+# Private temporary lesson link tokens and copied public packages
+.learning-shares.json*
+.learning-shares/
