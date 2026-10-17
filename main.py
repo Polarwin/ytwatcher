@@ -991,6 +991,20 @@ def build_subtitle_dictionary(rel_vtt, download_dir):
             return job
         if job and job["status"] == "done" and job.get("revision") == revision and dict_path_for(vtt).is_file():
             return job
+        # A saved word list remains valid across server restarts. Refresh only
+        # when its source subtitle, lexicons, or payload format has changed.
+        try:
+            saved = json.loads(dict_path_for(vtt).read_text(encoding="utf-8"))
+            meta = saved.get("_meta", {})
+            if (meta.get("version") == 2 and meta.get("source") == lexicon_data.language(subtitle_language(vtt))
+                    and meta.get("revision") == revision["lexicons"] and meta.get("subtitle") == revision["subtitle"]):
+                total = meta.get("words", 0) * len(meta.get("coverage", {}))
+                job = {"status": "done", "total": total, "done": total,
+                       "revision": revision, "coverage": meta.get("coverage", {})}
+                _dict_jobs[rel_vtt] = job
+                return job
+        except (OSError, ValueError, AttributeError):
+            pass
         job = {"status": "running", "total": 0, "done": 0, "revision": revision}
         _dict_jobs[rel_vtt] = job
     threading.Thread(target=_run_dict_job,
@@ -1005,8 +1019,10 @@ def _run_dict_job(vtt, rel_vtt, job):
         words = subtitle_words(vtt, preserve_case=src == "de")
         targets = lexicon_data.TARGETS.get(src, ("en",))
         job["total"] = len(words) * len(targets)
+        subtitle_stat = Path(vtt).stat()
         out = {"_targets": {}, "_meta": {"version": 2, "source": src,
-               "revision": lexicon_data.revision(src), "words": len(words), "coverage": {}}}
+               "revision": lexicon_data.revision(src), "words": len(words), "coverage": {},
+               "subtitle": f"{subtitle_stat.st_mtime_ns}:{subtitle_stat.st_size}"}}
         for dst in targets:
             lexicon = _lexicon_for(src, dst)
             translated = {}

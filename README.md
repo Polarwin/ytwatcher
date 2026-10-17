@@ -321,6 +321,9 @@ newer dump, remove the corresponding cached JSONL file before rebuilding.
 Built files replace the previous versions atomically and load lazily on use;
 the server notices updated files without a restart. The old `lexicon-es.json`
 is retained only as a fallback when the new English pair is absent.
+Full lexicons rebuild only when the build command is explicitly run. Saved
+per-video word lists are reused across server restarts and preload requests;
+they refresh only when their subtitles, lexicon revision, or format changes.
 
 English meanings use ordered definitions from the Spanish entries. Other pairs
 prefer explicit translations; fallbacks align translations within the same
