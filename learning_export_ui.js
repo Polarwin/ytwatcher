@@ -1,3 +1,4 @@
+  var learnI = window.YtLessonI18n, learnText = learnI.text;
   // Independent exporter: keeps the current playlist/subtitle UI intact.
   var learnDialog = document.getElementById('learning-export-dialog');
   var learnItem = null, learnDuration = 0, learnJob = null, learnPoll = 0;
@@ -29,7 +30,7 @@
     if (!document.getElementById('learning-export-target').value) document.getElementById('learning-export-target').value = 'en';
     document.getElementById('learning-export-submit').disabled = !selector.options.length || !!learnJob;
     if (!learnJob) {
-      document.getElementById('learning-export-status').textContent = selector.options.length ? '' : 'Download subtitles for this video first.';
+      learnText(document.getElementById('learning-export-status'), selector.options.length ? '' : 'Download subtitles for this video first.');
       document.getElementById('learning-export-result').hidden = true;
       document.getElementById('learning-export-share').hidden = true;
     }
@@ -49,7 +50,7 @@
   document.querySelectorAll('li[data-subs]').forEach(function (li) {
     var link = li.querySelector('.entry-row a') || li.querySelector('a[href]');
     if (!link || li.querySelector('.learning-export-row')) return;
-    var button = document.createElement('button'); button.type = 'button'; button.className = 'watch-btn learning-export-row'; button.textContent = 'Learn';
+    var button = document.createElement('button'); button.type = 'button'; button.className = 'watch-btn learning-export-row'; learnText(button, 'Learn');
     button.onclick = function (event) {
       event.stopPropagation();
       learnShow({href: link.getAttribute('href'), name: link.textContent, subs: li.dataset.subs, dur: li.dataset.dur}, 0, Number(li.dataset.dur));
@@ -58,8 +59,8 @@
     controls.append(button);
   });
   function learnDisplay(job) {
-    document.getElementById('learning-export-status').textContent = (job.error || job.stage || job.status) +
-      (job.sentences ? '\n' + job.sentences + ' sentences' : '') + (job.warnings?.length ? '\n' + job.warnings.join('\n') : '');
+    learnI.raw(document.getElementById('learning-export-status'), function () { return learnI.t(job.error || job.stage || job.status) +
+      (job.sentences ? '\n' + learnI.t('{n} sentences', {n: job.sentences}) : '') + (job.warnings?.length ? '\n' + job.warnings.map(function (warning) { return learnI.t(warning); }).join('\n') : ''); });
     if (job.status === 'done') {
       document.getElementById('learning-export-open').href = job.url;
       document.getElementById('learning-export-result').hidden = false;
@@ -80,7 +81,7 @@
       }
       learnDisplay(job);
     } catch (error) {
-      document.getElementById('learning-export-status').textContent = error.message + (learnJob ? '. Status will retry when connected.' : '');
+      learnI.raw(document.getElementById('learning-export-status'), function () { return learnI.t(error.message) + (learnJob ? '. ' + learnI.t('Status will retry when connected.') : ''); });
     }
     if (learnJob) learnPoll = setTimeout(learnCheck, 1500);
   }
@@ -89,9 +90,9 @@
     var begin = learnSeconds(document.getElementById('learning-export-start').value), end = learnSeconds(document.getElementById('learning-export-end').value);
     var status = document.getElementById('learning-export-status'), submit = document.getElementById('learning-export-submit');
     if (!Number.isFinite(begin) || !Number.isFinite(end) || begin < 0 || end <= begin || end - begin > 7200) {
-      status.textContent = 'Choose a valid start and end, up to 2 hours apart.'; return;
+      learnText(status, 'Choose a valid start and end, up to 2 hours apart.'); return;
     }
-    submit.disabled = true; status.textContent = 'Starting export…'; document.getElementById('learning-export-result').hidden = true;
+    submit.disabled = true; learnText(status, 'Starting export…'); document.getElementById('learning-export-result').hidden = true;
     try {
       var response = await fetch('/ytwatcher/api/learning-export', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({
         rel: learnItem.href, subtitle: document.getElementById('learning-export-subtitle').value, start: begin, end: end,
@@ -101,5 +102,5 @@
       if (!response.ok) throw new Error(job.error || 'Could not start export');
       learnJob = job.id; learnDisplay(job);
       clearTimeout(learnPoll); if (learnJob) learnPoll = setTimeout(learnCheck, 700);
-    } catch (error) { status.textContent = error.message; submit.disabled = false; }
+    } catch (error) { learnText(status, error.message); submit.disabled = false; }
   };

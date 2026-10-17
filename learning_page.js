@@ -2,8 +2,9 @@
 (() => {
   const pack = JSON.parse(document.getElementById('pack-data').textContent);
   const $ = id => document.getElementById(id), media = $('media'), own = $('my-voice');
+  const I = window.YtLessonI18n, t = I.t, ui = I.text;
   const API = '/ytwatcher/api', sentences = pack.sentences, shared = !!pack.shared;
-  const root = new URL('./', location.href).href, cacheName = 'ytwatcher-lesson:' + root + ':v1';
+  const root = new URL('./', location.href).href, cacheName = 'ytwatcher-lesson:' + root + ':v2';
   const labels = {en: 'English', de: 'Deutsch', es: 'Español', zh: '中文', fr: 'Français', it: 'Italiano', pt: 'Português'};
   const uid = () => Array.from(crypto.getRandomValues(new Uint8Array(16)), b => b.toString(16).padStart(2, '0')).join('');
   const normalize = value => value.normalize('NFC').trim().toLocaleLowerCase().replace(/\s+/g, ' ').replace(/[.!?。！？]+$/g, '');
@@ -18,6 +19,7 @@
   let recordingUrl = null, activeAttempt = null, recordStopPromise = null, recordingGeneration = 0;
   let flushing = null, quizCard = null, quizStarted = 0, quizAnswered = false, lastQuiz = '';
   let landscape = false, landscapeFullscreen = false;
+  function option(key, value, variables = {}) { const node = new Option('', value); ui(node, key, variables); return node; }
   const sentenceButtons = [], memoryKV = new Map(), memoryRecordings = new Map(), memoryQueue = new Map();
   let storageAvailable = true;
   const dbPromise = new Promise((resolve, reject) => {
@@ -141,15 +143,15 @@
       } catch (error) {}
     }
     if (serial !== lookupSerial || chosenTarget !== target || chosenSentence !== selected) return;
-    const message = value ? value.en + (value.meanings?.length ? '\nAlso: ' + value.meanings.join(' · ') : '') +
-      (value.pos ? '\n' + value.pos : '') + (value.inf ? ' ← ' + value.inf : '') : (shared ? 'Not in this shared clip’s dictionary.' : 'Not in this clip’s offline dictionary. Connect to look up this word.');
+    const message = () => value ? value.en + (value.meanings?.length ? '\n' + t('Also: {meanings}', {meanings: value.meanings.join(' · ')}) : '') +
+      (value.pos ? '\n' + t(value.pos) : '') + (value.inf ? ' ← ' + value.inf : '') : t(shared ? 'Not in this shared clip’s dictionary.' : 'Not in this clip’s offline dictionary. Connect to look up this word.');
     if (dialog) {
       $('word-dialog-title').textContent = word;
-      $('word-dialog-body').textContent = message;
+      I.raw($('word-dialog-body'), message);
       if (!$('word-dialog').open) $('word-dialog').showModal ? $('word-dialog').showModal() : $('word-dialog').setAttribute('open', '');
     } else {
       $('dictionary-word').textContent = word;
-      $('dictionary-result').textContent = message;
+      I.raw($('dictionary-result'), message);
       $('dictionary-panel').style.visibility = 'visible';
       $('dictionary-close').hidden = false;
     }
@@ -175,7 +177,7 @@
   }
   function guardRecording() {
     if (!recording && !startingRecord) return false;
-    $('record-status').textContent = 'Stop and save the recording before changing sentences or playing audio.';
+    ui($('record-status'), 'Stop and save the recording before changing sentences or playing audio.');
     return true;
   }
   function select(index, move = true) {
@@ -188,22 +190,22 @@
     if (move && media.readyState) seek(sentences[selected].start);
     makeWordText($('sentence-text'), sentences[selected].text);
     $('sentence-panel').scrollTop = 0;
-    $('sentence-counter').textContent = `${selected + 1} / ${sentences.length} sentences`;
+    ui($('sentence-counter'), '{n} / {total} sentences', {n: selected + 1, total: sentences.length});
     $('previous').disabled = selected === 0;
     $('next').disabled = $('continue').disabled = selected === sentences.length - 1;
     $('dictionary-panel').style.visibility = 'hidden';
-    $('play-status').textContent = '';
+    ui($('play-status'), '');
     sentenceButtons.forEach((button, i) => button.setAttribute('aria-current', String(i === selected)));
-    $('mark-reviewed').textContent = progress.reviewed.includes(selected) ? '✓ Reviewed' : 'Mark reviewed';
-    $('sentence-translation').textContent = '';
+    ui($('mark-reviewed'), progress.reviewed.includes(selected) ? '✓ Reviewed' : 'Mark reviewed');
+    ui($('sentence-translation'), '');
     loadTranslation(); loadAttempts(); saveProgress();
     return true;
   }
   function markReviewed() {
     if (!progress.reviewed.includes(selected)) progress.reviewed.push(selected);
-    $('mark-reviewed').textContent = '✓ Reviewed';
+    ui($('mark-reviewed'), '✓ Reviewed');
     sentenceButtons[selected]?.classList.add('reviewed');
-    $('review-progress').textContent = `· ${progress.reviewed.length}/${sentences.length} reviewed`;
+    ui($('review-progress'), '· {n}/{total} reviewed', {n: progress.reviewed.length, total: sentences.length});
     saveProgress();
   }
   function boundary() {
@@ -213,7 +215,7 @@
     media.pause(); clearMonitor(); holding = true;
     seek(sentences[selected].end);
     markReviewed();
-    $('play-status').textContent = 'Sentence finished. Review, repeat, or continue.';
+    ui($('play-status'), 'Sentence finished. Review, repeat, or continue.');
     if (callback) callback();
     else if ($('loop-sentence').checked) loopTimer = setTimeout(() => playSelected(true), 200);
     return true;
@@ -228,13 +230,13 @@
         selected = index; ++translationSerial; ++lookupSerial; translationWanted = false;
         makeWordText($('sentence-text'), sentences[index].text);
         $('sentence-panel').scrollTop = 0;
-        $('sentence-counter').textContent = `${selected + 1} / ${sentences.length} sentences`;
+        ui($('sentence-counter'), '{n} / {total} sentences', {n: selected + 1, total: sentences.length});
         $('previous').disabled = index === 0;
         $('next').disabled = $('continue').disabled = index === sentences.length - 1;
         $('dictionary-panel').style.visibility = 'hidden';
         sentenceButtons.forEach((button, i) => button.setAttribute('aria-current', String(i === index)));
-        $('mark-reviewed').textContent = progress.reviewed.includes(index) ? '✓ Reviewed' : 'Mark reviewed';
-        $('sentence-translation').textContent = '';
+        ui($('mark-reviewed'), progress.reviewed.includes(index) ? '✓ Reviewed' : 'Mark reviewed');
+        ui($('sentence-translation'), '');
         loadTranslation(); loadAttempts(); saveProgress();
       }
     }
@@ -249,7 +251,7 @@
     pauseAll(); forceOne = one; holding = false; afterOriginal = callback;
     seek(sentences[selected].start); issuedPlay = true;
     try { await media.play(); }
-    catch (error) { issuedPlay = false; $('play-status').textContent = 'Tap the player to start audio on this device.'; }
+    catch (error) { issuedPlay = false; ui($('play-status'), 'Tap the player to start audio on this device.'); }
   }
   media.addEventListener('play', () => {
     if (recording || startingRecord) { media.pause(); return; }
@@ -277,7 +279,7 @@
     }
   });
   media.addEventListener('ratechange', () => { saveProgress(); if (!media.paused) monitor(); });
-  media.addEventListener('ended', () => { clearMonitor(); markReviewed(); $('play-status').textContent = 'Clip finished. Choose a sentence to review.'; });
+  media.addEventListener('ended', () => { clearMonitor(); markReviewed(); ui($('play-status'), 'Clip finished. Choose a sentence to review.'); });
   $('previous').onclick = () => select(selected - 1);
   $('next').onclick = () => select(selected + 1);
   $('play-sentence').onclick = () => playSelected(true);
@@ -287,10 +289,10 @@
   $('speed').onchange = () => { media.playbackRate = Number($('speed').value); saveProgress(); };
   $('copy-sentence').onclick = async () => {
     pauseAll(); const text = sentences[selected].text;
-    try { await navigator.clipboard.writeText(text); $('play-status').textContent = 'Sentence copied.'; }
+    try { await navigator.clipboard.writeText(text); ui($('play-status'), 'Sentence copied.'); }
     catch (error) {
       $('copy-field').value = text; $('copy-dialog').showModal(); $('copy-field').focus(); $('copy-field').select();
-      $('play-status').textContent = 'Sentence selected. Use Copy from the browser menu.';
+      ui($('play-status'), 'Sentence selected. Use Copy from the browser menu.');
     }
   };
   $('copy-dialog-close').onclick = () => $('copy-dialog').close();
@@ -299,7 +301,7 @@
     const index = selected, language = target, serial = translationSerial;
     const text = language === pack.target && sentences[index].translation || await getValue(translationKey(index, language));
     if (serial !== translationSerial || selected !== index || target !== language) return;
-    $('sentence-translation').textContent = text || '';
+    I.raw($('sentence-translation'), text || '');
   }
   $('translate-sentence').onclick = async () => {
     translationWanted = true;
@@ -309,9 +311,9 @@
     if (serial !== translationSerial) return;
     if (!text) {
       if (shared || !navigator.onLine || location.protocol === 'file:') {
-        $('play-status').textContent = shared ? 'This sentence has no translation in the shared package. Ask the sender to include translations when exporting.' : 'No saved translation for this sentence. Translate while connected to keep it offline.'; return;
+        ui($('play-status'), shared ? 'This sentence has no translation in the shared package. Ask the sender to include translations when exporting.' : 'No saved translation for this sentence. Translate while connected to keep it offline.'); return;
       }
-      $('sentence-translation').textContent = 'Translating…';
+      ui($('sentence-translation'), 'Translating…');
       try {
         let response = await fetch(API + '/translate-sentence', {method: 'POST', headers: {'Content-Type': 'application/json'},
           body: JSON.stringify({text: sentences[index].text, from: pack.source, to: language})});
@@ -329,20 +331,21 @@
         if (job.status !== 'done') throw new Error(job.error || 'Translation unavailable');
         text = job.translation; await putValue(translationKey(index, language), text);
       } catch (error) {
-        if (serial === translationSerial) $('sentence-translation').textContent = error.message;
+        if (serial === translationSerial) ui($('sentence-translation'), error.message);
         return;
       }
     }
     if (serial !== translationSerial || selected !== index || target !== language) return;
-    $('sentence-translation').textContent = text;
+    I.raw($('sentence-translation'), text);
     remember({kind: 'sentence', source: sentences[index].text, translation: text}).catch(() => {});
   };
   $('target').onchange = () => {
     target = $('target').value; ++translationSerial; ++lookupSerial;
+    $('sentence-translation').lang = $('full-translation').lang = target;
     loadTranslation(); renderVocabulary(); renderReadingTranslation(); saveProgress();
     if (translationWanted) setTimeout(() => $('translate-sentence').onclick(), 0);
     $('dictionary-panel').style.visibility = 'hidden';
-    if (quizCard) { quizCard = null; $('quiz-question').textContent = ''; $('quiz-choices').replaceChildren(); $('quiz-result').textContent = ''; }
+    if (quizCard) { quizCard = null; ui($('quiz-question'), ''); $('quiz-choices').replaceChildren(); ui($('quiz-result'), ''); }
   };
   function recordingButtons() {
     $('record').disabled = recording || startingRecord;
@@ -368,8 +371,8 @@
     if (index !== selected || recording) return;
     rows.sort((a, b) => a.created - b.created);
     $('attempts').replaceChildren();
-    if (!rows.length) $('attempts').append(new Option('No recording yet', ''));
-    rows.forEach((row, i) => $('attempts').append(new Option(`Attempt ${i + 1} · ${new Date(row.created).toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'})}`, row.id)));
+    if (!rows.length) $('attempts').append(option('No recording yet', ''));
+    rows.forEach((row, i) => $('attempts').append(option('Attempt {n} · {time}', row.id, {n: i + 1, time: new Date(row.created).toLocaleTimeString(I.language, {hour: '2-digit', minute: '2-digit'})})));
     const preferred = progress.attempts[index];
     activeAttempt = rows.find(row => row.id === preferred) || rows.at(-1) || null;
     $('attempts').value = activeAttempt?.id || '';
@@ -401,14 +404,14 @@
     const id = activeAttempt.id;
     memoryRecordings.delete(id);
     try { await transaction('recordings', true, store => store.delete(id)); }
-    catch (error) { $('record-status').textContent = 'Could not delete this recording from browser storage.'; return; }
+    catch (error) { ui($('record-status'), 'Could not delete this recording from browser storage.'); return; }
     delete progress.attempts[selected]; saveProgress(); await loadAttempts();
-    $('record-status').textContent = 'Recording deleted.';
+    ui($('record-status'), 'Recording deleted.');
   };
   $('record').onclick = async () => {
     if (recording || startingRecord) return;
     if (!window.isSecureContext || !navigator.mediaDevices?.getUserMedia || !window.MediaRecorder) {
-      $('record-status').textContent = 'Recording needs a trusted HTTPS page and microphone support. Open the hosted page, then save it offline.'; return;
+      ui($('record-status'), 'Recording needs a trusted HTTPS page and microphone support. Open the hosted page, then save it offline.'); return;
     }
     pauseAll(); startingRecord = true; recordingButtons();
     const generation = ++recordingGeneration, index = selected;
@@ -421,7 +424,7 @@
       let finishStop;
       recordStopPromise = new Promise(resolve => { finishStop = resolve; });
       recorder.ondataavailable = event => { if (event.data.size) chunks.push(event.data); };
-      recorder.onerror = () => { $('record-status').textContent = 'Recording failed. Your previous attempts are still saved.'; stopRecording(); };
+      recorder.onerror = () => { ui($('record-status'), 'Recording failed. Your previous attempts are still saved.'); stopRecording(); };
       recorder.onstop = async () => {
         clearInterval(recordClock); clearTimeout(recordLimit);
         currentStream.getTracks().forEach(track => track.stop());
@@ -434,19 +437,19 @@
           try { await transaction('recordings', true, store => store.put(row)); } catch (error) { saved = false; }
           progress.attempts[index] = id; saveProgress();
           if (selected === index) await loadAttempts();
-          $('record-status').textContent = saved ? 'Recording saved on this device. Compare it with the original.' :
-            'Recording is ready, but browser storage is unavailable. Download it now to keep it.';
-        } else $('record-status').textContent = 'No audio was captured. Check microphone access and try again.';
+          ui($('record-status'), saved ? 'Recording saved on this device. Compare it with the original.' :
+            'Recording is ready, but browser storage is unavailable. Download it now to keep it.');
+        } else ui($('record-status'), 'No audio was captured. Check microphone access and try again.');
         startingRecord = false; recordingButtons();
         finishStop();
       };
       recorder.start(); recording = true; startingRecord = false; recordingButtons();
-      $('record-status').textContent = 'Recording… 0:00';
-      recordClock = setInterval(() => { $('record-status').textContent = 'Recording… ' + clock((Date.now() - started) / 1000); }, 500);
+      ui($('record-status'), 'Recording… {time}', {time: '0:00'});
+      recordClock = setInterval(() => { ui($('record-status'), 'Recording… {time}', {time: clock((Date.now() - started) / 1000)}); }, 500);
       recordLimit = setTimeout(stopRecording, 180000);
     } catch (error) {
       stream?.getTracks().forEach(track => track.stop());
-      $('record-status').textContent = error.name === 'NotAllowedError' ? 'Microphone access was not allowed. Enable it for this page and try again.' : 'Could not start recording: ' + error.message;
+      ui($('record-status'), error.name === 'NotAllowedError' ? 'Microphone access was not allowed. Enable it for this page and try again.' : 'Could not start recording: {error}', {error: error.message});
     } finally { if (!recording) { startingRecord = false; recordingButtons(); } }
   };
   function stopRecording() {
@@ -466,7 +469,7 @@
     playSelected(true, () => {
       if (activeAttempt?.id !== id) return;
       own.currentTime = 0;
-      own.play().catch(() => { $('record-status').textContent = 'Tap Play on your recording to hear it.'; });
+      own.play().catch(() => { ui($('record-status'), 'Tap Play on your recording to hear it.'); });
     });
   };
   document.addEventListener('visibilitychange', () => {
@@ -487,7 +490,7 @@
       const row = document.createElement('article'); row.className = 'reading-row';
       const text = document.createElement('p'); makeWordText(text, sentence.text);
       text.addEventListener('click', event => { const word = event.target.closest('[data-word]'); if (word) lookup(word.dataset.word, true); });
-      const listen = document.createElement('button'); listen.type = 'button'; listen.textContent = `Listen · ${clock(sentence.start)}`;
+      const listen = document.createElement('button'); listen.type = 'button'; ui(listen, 'Listen · {time}', {time: clock(sentence.start)});
       listen.onclick = () => { showTab('listen'); if (select(sentence.id)) playSelected(true); };
       row.append(text, listen); $('reading').append(row);
       const li = document.createElement('li'), button = document.createElement('button');
@@ -498,17 +501,17 @@
     }
     const hasSections = sentences.some(sentence => sentence.section);
     $('timing-note').hidden = !hasSections;
-    $('timing-note').textContent = 'Long subtitle passages without sentence punctuation are divided into short review sections. Timing follows subtitle word timestamps where available.';
-    $('question-note').textContent = pack.questions.length ? 'Answer in your own words, then compare with the suggested answer.' :
-      'This package includes the original reading and vocabulary exercises. Select the optional local-LLM exercises when exporting to include comprehension questions and a reading translation.';
+    ui($('timing-note'), 'Long subtitle passages without sentence punctuation are divided into short review sections. Timing follows subtitle word timestamps where available.');
+    ui($('question-note'), pack.questions.length ? 'Answer in your own words, then compare with the suggested answer.' :
+      'This package includes the original reading and vocabulary exercises. Select the optional local-LLM exercises when exporting to include comprehension questions and a reading translation.');
     $('generated-note').hidden = !pack.generated;
     for (let i = 0; i < pack.questions.length; i++) {
       const question = pack.questions[i], box = document.createElement('article'); box.className = 'question';
       const prompt = document.createElement('strong'); prompt.textContent = `${i + 1}. ${question.question}`;
-      const answer = document.createElement('textarea'); answer.rows = 3; answer.setAttribute('aria-label', 'Your answer to question ' + (i + 1));
+      const answer = document.createElement('textarea'); answer.rows = 3; I.attribute(answer, 'aria-label', 'Your answer to question {n}', {n: i + 1});
       answer.value = progress.answers[i] || '';
       answer.oninput = () => { progress.answers[i] = answer.value; saveProgress(); };
-      const reveal = document.createElement('button'); reveal.type = 'button'; reveal.textContent = 'Show suggested answer';
+      const reveal = document.createElement('button'); reveal.type = 'button'; ui(reveal, 'Show suggested answer');
       const solution = document.createElement('p'); solution.className = 'answer'; solution.hidden = true; solution.textContent = question.answer;
       reveal.onclick = () => { solution.hidden = !solution.hidden; };
       box.append(prompt, answer, reveal, solution); $('questions').append(box);
@@ -516,25 +519,25 @@
     for (let i = 0; i < pack.practice.length; i++) {
       const item = pack.practice[i], box = document.createElement('article'); box.className = 'cloze-row';
       const prompt = document.createElement('p'); prompt.textContent = item.prompt;
-      const input = document.createElement('input'); input.type = 'text'; input.setAttribute('aria-label', 'Missing word ' + (i + 1)); input.value = progress.cloze[i] || '';
+      const input = document.createElement('input'); input.type = 'text'; I.attribute(input, 'aria-label', 'Missing word {n}', {n: i + 1}); input.value = progress.cloze[i] || '';
       input.oninput = () => { progress.cloze[i] = input.value; saveProgress(); };
-      const check = document.createElement('button'); check.type = 'button'; check.textContent = 'Check word';
+      const check = document.createElement('button'); check.type = 'button'; ui(check, 'Check word');
       const result = document.createElement('p'); result.className = 'answer';
-      check.onclick = () => { result.textContent = normalize(input.value) === normalize(item.answer) ? 'Correct.' : 'Saved subtitle word: ' + item.answer; };
+      check.onclick = () => { ui(result, normalize(input.value) === normalize(item.answer) ? 'Correct.' : 'Saved subtitle word: {word}', {word: item.answer}); };
       box.append(prompt, input, check, result); $('cloze').append(box);
     }
-    $('review-progress').textContent = `· ${progress.reviewed.length}/${sentences.length} reviewed`;
+    ui($('review-progress'), '· {n}/{total} reviewed', {n: progress.reviewed.length, total: sentences.length});
     renderReadingTranslation();
   }
   async function renderReadingTranslation() {
     const language = target;
     const texts = await Promise.all(sentences.map(sentence => language === pack.target && sentence.translation || getValue(translationKey(sentence.id, language))));
     if (language !== target) return;
-    const container = $('full-translation'); container.replaceChildren();
-    if (!texts.some(Boolean)) { container.textContent = 'No saved reading translation for this language. Translate sentences while connected, or export with optional LLM exercises.'; return; }
+    const container = $('full-translation'); I.forget(container); container.replaceChildren();
+    if (!texts.some(Boolean)) { ui(container, 'No saved reading translation for this language. Translate sentences while connected, or export with optional LLM exercises.'); return; }
     texts.forEach((text, i) => {
       const paragraph = document.createElement('p'); paragraph.className = 'translated';
-      paragraph.textContent = text || `[Sentence ${i + 1}: translation not saved]`; container.append(paragraph);
+      if (text) I.raw(paragraph, text); else ui(paragraph, '[Sentence {n}: translation not saved]', {n: i + 1}); container.append(paragraph);
     });
   }
   function renderVocabulary() {
@@ -547,12 +550,12 @@
       const row = document.createElement('tr'), source = document.createElement('td'), meaning = document.createElement('td'), note = document.createElement('td');
       const button = document.createElement('button'); button.type = 'button'; button.textContent = word; button.onclick = () => lookup(word, true);
       source.append(button); meaning.textContent = entry.en + (entry.meanings?.length ? '\n' + entry.meanings.join(' · ') : '');
-      note.textContent = [notes.get(word.toLowerCase()), entry.pos, entry.inf ? '← ' + entry.inf : ''].filter(Boolean).join(' · ');
+      I.raw(note, () => [notes.get(word.toLowerCase()), t(entry.pos || ''), entry.inf ? '← ' + entry.inf : ''].filter(Boolean).join(' · '));
       row.append(source, meaning, note); rows.push(row);
       if (rows.length >= 300) break;
     }
     if (!rows.length) {
-      const row = document.createElement('tr'), cell = document.createElement('td'); cell.colSpan = 3; cell.textContent = 'No saved dictionary entries match this language or search.'; row.append(cell); rows.push(row);
+      const row = document.createElement('tr'), cell = document.createElement('td'); cell.colSpan = 3; ui(cell, 'No saved dictionary entries match this language or search.'); row.append(cell); rows.push(row);
     }
     $('vocabulary').replaceChildren(...rows);
     quizStats();
@@ -560,11 +563,11 @@
   $('word-search').oninput = renderVocabulary;
   function quizStats() {
     const values = Object.values(progress.quiz), correct = values.reduce((sum, value) => sum + value.correct, 0), wrong = values.reduce((sum, value) => sum + value.wrong, 0);
-    $('quiz-stats').textContent = `${correct} correct · ${wrong} to practise again · progress saved on this device`;
+    ui($('quiz-stats'), '{correct} correct · {wrong} to practise again · progress saved on this device', {correct, wrong});
   }
   function nextQuiz() {
     const entries = pack.dictionary[target] || {}, words = Object.keys(entries);
-    if (words.length < 2) { $('quiz-result').textContent = 'Not enough distinct vocabulary for this language yet.'; return; }
+    if (words.length < 2) { ui($('quiz-result'), 'Not enough distinct vocabulary for this language yet.'); return; }
     const weights = words.map(word => {
       const score = progress.quiz[target + ':' + word] || {correct: 0, wrong: 0};
       return word === lastQuiz && words.length > 1 ? 0 : 1 + score.wrong * 3 + 2 / (score.correct + 1) + Math.min(3, (score.seconds || 0) / 10);
@@ -576,10 +579,10 @@
     wrong.sort(() => Math.random() - .5);
     const options = [expected];
     for (const word of wrong) { const value = entries[word].en; if (!options.some(option => normalize(option) === normalize(value))) options.push(value); if (options.length === 4) break; }
-    if (options.length < 2) { $('quiz-result').textContent = 'These words share the same meaning. Try another language or review the vocabulary table.'; return; }
+    if (options.length < 2) { ui($('quiz-result'), 'These words share the same meaning. Try another language or review the vocabulary table.'); return; }
     for (let i = options.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [options[i], options[j]] = [options[j], options[i]]; }
     quizCard = chosen; lastQuiz = chosen; quizStarted = performance.now(); quizAnswered = false;
-    $('quiz-question').textContent = chosen + ' → ' + (labels[target] || target); $('quiz-result').textContent = ''; $('quiz-choices').replaceChildren();
+    I.raw($('quiz-question'), chosen + ' → ' + (labels[target] || target)); ui($('quiz-result'), ''); $('quiz-choices').replaceChildren();
     options.forEach(value => {
       const button = document.createElement('button'); button.type = 'button'; button.textContent = value;
       button.onclick = () => {
@@ -590,7 +593,7 @@
         const key = target + ':' + chosen, score = progress.quiz[key] || {correct: 0, wrong: 0};
         if (correct) score.correct++; else score.wrong++;
         score.seconds = elapsed; progress.quiz[key] = score; saveProgress(); quizStats();
-        $('quiz-result').textContent = (correct ? 'Correct' : 'Answer: ' + expected) + ` · ${elapsed.toFixed(1)} seconds. ` + (correct ? 'Choose Random question to continue.' : 'This word will appear more often.');
+        ui($('quiz-result'), '{result} · {seconds} seconds. {next}', () => ({result: t(correct ? 'Correct' : 'Answer: {answer}', {answer: expected}), seconds: elapsed.toFixed(1), next: t(correct ? 'Choose Random question to continue.' : 'This word will appear more often.')}));
       };
       $('quiz-choices').append(button);
     });
@@ -606,8 +609,7 @@
     }
     if (!files) return;
     const saved = await Promise.all(files.map(file => cache.match(new URL(file, root).href, {ignoreSearch: true})));
-    $('offline-status').textContent = saved.every(Boolean) ? 'Saved offline on this device: player, media, reading and vocabulary. Recordings stay in browser storage.' :
-      `${saved.filter(Boolean).length}/${files.length} files saved. Choose Save offline to complete this clip.`;
+    ui($('offline-status'), saved.every(Boolean) ? 'Saved offline on this device: player, media, reading and vocabulary. Recordings stay in browser storage.' : '{n}/{total} files saved. Choose Save offline to complete this clip.', {n: saved.filter(Boolean).length, total: files.length});
   }
   $('save-offline').onclick = async () => {
     const button = $('save-offline'); button.disabled = true;
@@ -620,23 +622,23 @@
       if (!files) { const response = await fetch('offline-files.json'); if (!response.ok) throw new Error('The package file list is unavailable.'); files = (await response.json()).files; }
       const cache = await caches.open(cacheName);
       for (let i = 0; i < files.length; i++) {
-        $('offline-status').textContent = `Saving offline ${i + 1}/${files.length}: ${files[i]}…`;
+        ui($('offline-status'), 'Saving offline {n}/{total}: {file}…', {n: i + 1, total: files.length, file: files[i]});
         const url = new URL(files[i], root).href;
         if (await cache.match(url, {ignoreSearch: true})) continue;
         const response = await fetch(url, {cache: 'reload'});
-        if (!response.ok || response.status !== 200) throw new Error('Could not save ' + files[i]);
+        if (!response.ok || response.status !== 200) throw new Error(t('Could not save {file}', {file: files[i]}));
         await cache.put(url, response);
       }
       await putValue('offline-files:' + pack.id, files);
       if (navigator.storage?.persist) await navigator.storage.persist().catch(() => false);
       await offlineState();
-    } catch (error) { $('offline-status').textContent = 'Offline save incomplete. ' + error.message; }
+    } catch (error) { ui($('offline-status'), 'Offline save incomplete. {error}', {error: t(error.message)}); }
     finally { button.disabled = false; }
   };
   $('remove-offline').onclick = async () => {
     if (!('caches' in window)) return;
     await caches.delete(cacheName);
-    $('offline-status').textContent = 'Offline copy removed. Voice recordings and study progress have been kept.';
+    ui($('offline-status'), 'Offline copy removed. Voice recordings and study progress have been kept.');
   };
   function sizeLandscape() {
     if (!landscape) return;
@@ -649,12 +651,12 @@
   }
   function exitLandscape() {
     landscape = false; landscapeFullscreen = false; $('lesson-player').classList.remove('landscape'); document.body.classList.remove('landscape-open');
-    $('landscape').textContent = 'Landscape'; $('landscape').setAttribute('aria-pressed', 'false');
+    ui($('landscape'), 'Landscape'); $('landscape').setAttribute('aria-pressed', 'false');
     if (document.fullscreenElement === $('lesson-player') && document.exitFullscreen) document.exitFullscreen().catch(() => {});
   }
   $('landscape').onclick = () => {
     if (landscape) { exitLandscape(); return; }
-    landscape = true; $('lesson-player').classList.add('landscape'); document.body.classList.add('landscape-open'); $('landscape').textContent = 'Exit landscape'; $('landscape').setAttribute('aria-pressed', 'true'); sizeLandscape();
+    landscape = true; $('lesson-player').classList.add('landscape'); document.body.classList.add('landscape-open'); ui($('landscape'), 'Exit landscape'); $('landscape').setAttribute('aria-pressed', 'true'); sizeLandscape();
     if ($('lesson-player').requestFullscreen && !document.fullscreenElement) $('lesson-player').requestFullscreen().then(() => { landscapeFullscreen = true; sizeLandscape(); }).catch(() => {});
   };
   document.addEventListener('fullscreenchange', () => { if (landscapeFullscreen && document.fullscreenElement !== $('lesson-player')) exitLandscape(); });
@@ -678,20 +680,23 @@
     media.classList.toggle('audio-only', !pack.has_video);
     media.playbackRate = Number(progress.speed) || 1; $('speed').value = String(media.playbackRate);
     media.addEventListener('loadedmetadata', () => seek(sentences[selected].start), {once: true});
-    $('clip-summary').textContent = `${sentences.length} sentences · ${clock(pack.duration)} clip · original ${clock(pack.source_start)}–${clock(pack.source_end)}`;
+    ui($('clip-summary'), '{n} sentences · {duration} clip · original {start}–{end}', {n: sentences.length, duration: clock(pack.duration), start: clock(pack.source_start), end: clock(pack.source_end)});
+    I.raw(document.querySelector('title'), () => pack.title + ' · ' + t('Learning clip'));
+    $('sentence-text').lang = $('reading').lang = pack.source;
+    $('sentence-translation').lang = $('full-translation').lang = target;
     renderReading(); renderVocabulary(); select(selected, false);
     if (shared) {
       document.querySelectorAll('header > a').forEach(link => { link.hidden = true; });
       const note = document.createElement('p'); note.className = 'muted';
-      note.textContent = 'Shared learning clip · Link expires ' + new Date(pack.share_expires * 1000).toLocaleString() + '. Save offline before expiry. Your voice and progress stay on this device.';
+      ui(note, 'Shared learning clip · Link expires {date}. Save offline before expiry. Your voice and progress stay on this device.', () => ({date: new Date(pack.share_expires * 1000).toLocaleString(I.language)}));
       document.querySelector('header').append(note);
       const wordsNote = $('tab-words').querySelector('.muted');
-      if (wordsNote) wordsNote.textContent = 'Dictionary entries are included in this lesson. Your practice stays on this device.';
+      if (wordsNote) ui(wordsNote, 'Dictionary entries are included in this lesson. Your practice stays on this device.');
     } else if (location.protocol !== 'file:' && window.ytLearningShare) {
       window.ytLearningShare($('learning-share-tools'), pack.id);
     }
-    if (!storageAvailable) $('record-status').textContent = 'Browser storage is unavailable. You can still record and download attempts, but progress may not survive closing this page.';
+    if (!storageAvailable) ui($('record-status'), 'Browser storage is unavailable. You can still record and download attempts, but progress may not survive closing this page.');
     if ('serviceWorker' in navigator && window.isSecureContext && location.protocol !== 'file:') navigator.serviceWorker.register('learning_sw.js', {scope: './', updateViaCache: 'none'}).catch(() => {});
     offlineState().catch(() => {}); flushLookups();
-  })().catch(error => { $('play-status').textContent = 'Could not open this learning clip: ' + error.message; });
+  })().catch(error => { ui($('play-status'), 'Could not open this learning clip: {error}', {error: t(error.message)}); });
 })();

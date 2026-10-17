@@ -1591,7 +1591,7 @@ def scan_downloads(download_dir, files=None):
 # Bump when the index.html template changes: the fingerprint below only
 # covers the file listing, so without this an existing index.html would
 # keep the old template until some video is added or removed.
-INDEX_TEMPLATE_VERSION = 114
+INDEX_TEMPLATE_VERSION = 115
 
 
 def static_folder_url(item):
@@ -2037,7 +2037,7 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         '        <div id="pl-dict" hidden></div>',
         '        <div id="pl-sentence" role="status" aria-live="polite" hidden style="visibility:hidden"></div>',
         '        <div id="pl-sub-tools">',
-        '        <button id="pl-export-learning" type="button" hidden>Export learning page</button>',
+        '        <button id="pl-export-learning" type="button" hidden data-i18n="Export learning page">Export learning page</button>',
         '        <button id="pl-copy-subs" type="button" hidden>Copy subtitles</button>',
         '        <button id="pl-translate-sentence" type="button" hidden disabled>Translate sentence</button>',
         '        <button type="button" class="study-open">Flashcards</button>',
@@ -3043,6 +3043,7 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "  var plSubRequest = 0;",
         '  plVideo.textTracks.addEventListener("change", plUpdateSubs);',
         "  var plIndex = -1;",
+        *Path(__file__).with_name("learning_i18n.js").read_text(encoding="utf-8").splitlines(),
         *Path(__file__).with_name("learning_share_ui.js").read_text(encoding="utf-8").splitlines(),
         *Path(__file__).with_name("learning_export_ui.js").read_text(encoding="utf-8").splitlines(),
         "  var plDragIndex = -1;",

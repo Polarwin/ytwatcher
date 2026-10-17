@@ -105,7 +105,7 @@ def _worker(pack_id, token, days, revoke):
             with tarfile.open(fileobj=process.stdin, mode='w|') as archive:
                 for name in sorted(FILES):
                     file = folder / name
-                    if name in ('learning_page.js', 'learning_page.css', 'learning_sw.js', 'learning_share_ui.js'):
+                    if name in ('learning_page.js', 'learning_page.css', 'learning_sw.js', 'learning_share_ui.js', 'learning_i18n.js'):
                         file = Path(__file__).with_name(name)
                     if not file.is_file():
                         continue

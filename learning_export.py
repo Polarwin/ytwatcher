@@ -26,7 +26,7 @@ log = logging.getLogger("ytwatcher.learning")
 ASSETS = Path(__file__).parent
 OUTPUT = Path('/srv/files/static/LearningClips')
 PUBLIC = '/ytwatcher/static/LearningClips/'
-VERSION = 3
+VERSION = 4
 MAX_SECONDS = 7200
 MAX_ACTIVE = 2
 _jobs = {}
@@ -447,9 +447,11 @@ def publish_library():
     rows = []
     for created, name, pack in sorted(cards, reverse=True):
         title = html.escape(pack['title'])
-        summary = f"{len(pack['sentences'])} sentences · {pack['duration'] / 60:.1f} minutes"
+        summary_values = html.escape(json.dumps({'n': len(pack['sentences']), 'minutes': f"{pack['duration'] / 60:.1f}"}), quote=True)
+        summary = f'''<span data-i18n="{{n}} sentences · {{minutes}} minutes" data-i18n-values="{summary_values}">{len(pack['sentences'])} sentences · {pack['duration'] / 60:.1f} minutes</span>'''
         rows.append(f'<article><h2><a href="{name}/index.html">{title}</a></h2><p>{summary}</p></article>')
-    atomic(OUTPUT / 'index.html', '<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Learning clips</title><style>body{font:17px/1.6 system-ui;max-width:850px;margin:2rem auto;padding:1rem;background:#111;color:#eee}a{color:#9cd7bf}article{padding:1rem;border-bottom:1px solid #555}h2{font-size:1.1rem}</style><a href="/ytwatcher/">← ytwatcher</a><h1>Learning clips</h1>' + ''.join(rows))
+    shutil.copyfile(ASSETS / 'learning_i18n.js', OUTPUT / 'learning_i18n.js')
+    atomic(OUTPUT / 'index.html', '<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title data-i18n="Learning clips">Learning clips</title><script src="learning_i18n.js" defer></script><style>body{font:17px/1.6 system-ui;max-width:850px;margin:2rem auto;padding:1rem;background:#111;color:#eee}a{color:#9cd7bf}article{padding:1rem;border-bottom:1px solid #555}h2{font-size:1.1rem}</style><body data-learning-page="true"><label><span data-i18n="Interface language">Interface language</span> <select data-ui-language aria-label="Interface language" data-i18n-aria-label="Interface language"></select></label><a href="/ytwatcher/">← ytwatcher</a><h1 data-i18n="Learning clips">Learning clips</h1>' + ''.join(rows))
 
 
 def _worker(job_id, media, subtitle, begin, end, target, exercises, llm_url, llm_gate):
@@ -515,7 +517,7 @@ def _worker(job_id, media, subtitle, begin, end, target, exercises, llm_url, llm
             page = template.replace('__PACK_DATA__', data).replace('__TITLE__', html.escape(pack['title']))
             atomic(temporary / 'index.html', page)
             atomic(temporary / 'pack.json', json.dumps(pack, ensure_ascii=False))
-            for name in ('learning_page.js', 'learning_page.css', 'learning_sw.js', 'learning_share_ui.js'):
+            for name in ('learning_page.js', 'learning_page.css', 'learning_sw.js', 'learning_share_ui.js', 'learning_i18n.js'):
                 shutil.copyfile(ASSETS / name, temporary / name)
             manifest = {'name': pack['title'], 'short_name': 'Learning clip', 'start_url': './index.html',
                         'scope': './', 'display': 'standalone', 'background_color': '#111b20', 'theme_color': '#111b20'}
@@ -523,7 +525,7 @@ def _worker(job_id, media, subtitle, begin, end, target, exercises, llm_url, llm
             vtt = 'WEBVTT\n\n' + '\n\n'.join(f"{_vtt_time(s['start'])} --> {_vtt_time(s['end'])}\n{s['text']}" for s in sentences) + '\n'
             atomic(temporary / 'subtitles.vtt', vtt)
             files = ['index.html', 'pack.json', 'learning_page.js', 'learning_page.css', 'learning_sw.js',
-                     'learning_share_ui.js', 'manifest.webmanifest', 'subtitles.vtt', pack['media']]
+                     'learning_share_ui.js', 'learning_i18n.js', 'manifest.webmanifest', 'subtitles.vtt', pack['media']]
             atomic(temporary / 'offline-files.json', json.dumps({'version': VERSION, 'id': job_id, 'files': files}))
             files.append('offline-files.json')
             atomic(temporary / 'README.txt', 'Open index.html from the hosted HTTPS page and choose Save offline before disconnecting.\nMicrophone recording requires browser permission and a trusted secure origin; use the hosted page offline.\nVoice recordings and practice progress stay in browser storage, not on the server.\nDownload recordings separately to keep backups.\n')

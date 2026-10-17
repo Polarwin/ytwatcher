@@ -13,7 +13,7 @@ import uuid
 
 ROOT = Path(__file__).resolve().parent / '.learning-shares'
 FILES = frozenset(('index.html', 'pack.json', 'learning_page.js', 'learning_page.css',
-                   'learning_sw.js', 'learning_share_ui.js', 'manifest.webmanifest', 'subtitles.vtt', 'media.mp4',
+                   'learning_sw.js', 'learning_i18n.js', 'learning_share_ui.js', 'manifest.webmanifest', 'subtitles.vtt', 'media.mp4',
                    'media.m4a', 'offline-files.json', 'README.txt'))
 TOKEN = re.compile(r'[a-f0-9]{32}')
 MAX_BYTES = 2 * 1024 ** 3

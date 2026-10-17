@@ -560,3 +560,19 @@ HTTP handler, behind the existing `ytwatcher.duckdns.org` HTTPS proxy. No home
 API or library route is exposed. Deploy both Python files together; the remote
 module uses only the Python standard library. Public links are excluded from
 indexing and send a no-referrer policy.
+
+### Learning-page interface languages
+
+Learning pages, the lesson library, export dialogs, and sharing controls support
+English, Spanish, German, and Chinese, including all lesson buttons, recording
+controls, quiz feedback, offline-save messages, and accessibility labels. Use
+**Interface language** to switch immediately; the preference is remembered on
+that browser. Changing it does not restart playback or reset recorded attempts,
+answers, or quiz progress. Shared pages and offline copies include the same
+translation catalog and need no network request or LLM for the interface.
+
+The interface language is independent of the subtitle and translation language.
+Original subtitle/reading text, vocabulary meanings, and generated questions keep
+their content language; use the separate **Translation** selector for meanings
+and sentence translations. Switching interface language does not generate extra
+LLM translations.
