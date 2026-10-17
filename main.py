@@ -38,6 +38,7 @@ from dotenv import load_dotenv
 
 import flashcards
 import lexicon_data
+import learning_export
 from dictionary_corrections import CORRECTIONS as DICTIONARY_CORRECTIONS
 
 CONFIG_FILE = Path(__file__).parent / "subscriptions.yaml"
@@ -1589,7 +1590,7 @@ def scan_downloads(download_dir, files=None):
 # Bump when the index.html template changes: the fingerprint below only
 # covers the file listing, so without this an existing index.html would
 # keep the old template until some video is added or removed.
-INDEX_TEMPLATE_VERSION = 110
+INDEX_TEMPLATE_VERSION = 112
 
 
 def static_folder_url(item):
@@ -1981,6 +1982,7 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
     lines.extend([
         '    <section class="study-shortcut"><button type="button" class="study-open">Flashcards</button>',
         '      <span id="study-save-status" role="status">Lookups are saved automatically.</span></section>',
+        *Path(__file__).with_name("learning_export_ui.html").read_text(encoding="utf-8").splitlines(),
         '    <dialog id="study-dialog" aria-labelledby="study-title">',
         '      <button type="button" id="study-close" aria-label="Close flashcards">×</button>',
         '      <h2 id="study-title">Vocabulary &amp; sentence flashcards</h2>',
@@ -2034,6 +2036,7 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         '        <div id="pl-dict" hidden></div>',
         '        <div id="pl-sentence" role="status" aria-live="polite" hidden style="visibility:hidden"></div>',
         '        <div id="pl-sub-tools">',
+        '        <button id="pl-export-learning" type="button" hidden>Export learning page</button>',
         '        <button id="pl-copy-subs" type="button" hidden>Copy subtitles</button>',
         '        <button id="pl-translate-sentence" type="button" hidden disabled>Translate sentence</button>',
         '        <button type="button" class="study-open">Flashcards</button>',
@@ -2918,6 +2921,7 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         '    plSubsEl.hidden = !item.subs;',
         '    plSubsEl.style.visibility = "hidden";',
         '    plCopySubs.hidden = !item.subs;',
+        '    document.getElementById("pl-export-learning").hidden = !item.subs;',
         '    plDictToSel.hidden = !item.subs;',
         "    // Keep audio mode during subtitle/library refreshes; metadata",
         "    // selects the mode when a different media file is loaded.",
@@ -3038,6 +3042,7 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "  var plSubRequest = 0;",
         '  plVideo.textTracks.addEventListener("change", plUpdateSubs);',
         "  var plIndex = -1;",
+        *Path(__file__).with_name("learning_export_ui.js").read_text(encoding="utf-8").splitlines(),
         "  var plDragIndex = -1;",
         "  function plItemId(item) {",
         "    if (item.static) return null; // Static media never receives watched marks.",
@@ -4352,7 +4357,13 @@ class ApiHandler(BaseHTTPRequestHandler):
         if not self._origin_allowed():
             self._json(403, {"error": "cross-origin request forbidden"})
             return
-        if self.path.startswith("/dictionary"):
+        if urllib.parse.urlsplit(self.path).path == "/learning-export":
+            query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+            result = learning_export.status((query.get("id") or [""])[0])
+            self._json(200 if result else 404, result or {"error": "Export status expired. Open All exported learning clips, or export again."})
+        elif self.path == "/learning-exports":
+            self._json(200, {"jobs": learning_export.jobs()})
+        elif self.path.startswith("/dictionary"):
             self._get_dictionary()
         elif urllib.parse.urlsplit(self.path).path == "/sentence-translation":
             query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
@@ -4407,7 +4418,9 @@ class ApiHandler(BaseHTTPRequestHandler):
         if not self._origin_allowed():
             self._json(403, {"error": "cross-origin request forbidden"})
             return
-        if self.path == "/watched":
+        if self.path == "/learning-export":
+            self._post_learning_export()
+        elif self.path == "/watched":
             self._post_watched()
         elif self.path == "/config":
             self._post_config()
@@ -4431,6 +4444,24 @@ class ApiHandler(BaseHTTPRequestHandler):
             self._post_cookies()
         else:
             self._json(404, {"error": "not found"})
+
+    def _post_learning_export(self):
+        body = self._read_body()
+        if body is None:
+            return
+        try:
+            data = json.loads(body or b"{}")
+            config = load_config()
+            settings = config.get("settings", {})
+            result = learning_export.start(data, settings.get("download_dir", "/srv/files"),
+                                           [item["path"] for item in config.get("static", [])],
+                                           LLM_URL, _sentence_gate)
+            self._json(200 if result["status"] == "done" else 202, result)
+        except (ValueError, TypeError) as exc:
+            self._json(400, {"error": str(exc)})
+        except Exception:
+            log.exception("Could not start learning export")
+            self._json(503, {"error": "Could not start the learning export. Try again."})
 
     def _study_api(self, action):
         try:

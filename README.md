@@ -479,3 +479,53 @@ logged and does not abort the round.
 
 `state.json` is created automatically and tracks every video ID ever
 scanned. Delete it to re-scan (and re-download) everything.
+
+## Export an offline learning clip
+
+Use **Learn** beside a video with subtitles, or **Export learning page** in the
+player. Select a time range and subtitle language. The export expands the range
+to complete sentences and creates an independent media clip: removing or marking
+the original video watched does not remove the exported lesson. Audio-only files
+are supported. Exports are available under `/ytwatcher/static/LearningClips/`.
+
+Each lesson includes:
+
+- Playback that pauses after each punctuated sentence, repeat/loop, slower speed,
+  original subtitles, optional translation, copying, and landscape display.
+- Microphone recording with multiple attempts per sentence, playback, comparison
+  with the original, and downloads of your recordings.
+- Original transcript reading, the clip’s offline dictionary entries, gap-fill
+  exercises, and multiple-choice vocabulary practice. Quiz choices favor words
+  answered incorrectly or slowly. Progress is saved on this browser/device.
+- Offline lookup records queued for your existing ytwatcher flashcard deck and
+  synced when the server is reachable again.
+
+On the finished lesson choose **Save offline** and wait for the completion message
+before disconnecting. Bookmark that lesson URL (or add it to the home screen).
+The page, clip, reading, and included dictionaries then work without the server.
+Sentence translations requested while connected are stored locally too. Missing
+word meanings or sentence translations still require a connection.
+
+Optionally select **Generate reading translations and comprehension questions**
+at export time. This uses the gateway’s default model, shares the sentence
+translation queue, and can take several minutes. Short clips (roughly 3–5 minutes,
+maximum 80 sentences) work best. If the model is busy or fails, the base lesson is
+still exported with a warning; export the same selection again to retry. Existing
+media is reused. No LLM work is triggered automatically by downloads or preload.
+Unpunctuated passages are divided into shorter review sections instead.
+
+**Download package ZIP** contains the independent media and all lesson assets for
+archiving or hosting elsewhere. For microphone recording and browser offline
+saving, use a trusted HTTPS origin (or localhost), allow microphone permission,
+and save the hosted page offline. Opening extracted files directly is suitable
+for basic reading/media but does not provide the full offline browser workflow.
+
+Voice recordings and answers stay in IndexedDB on the device. They are not
+uploaded or included in the exported ZIP, and clearing browser storage can remove
+them. Download important recordings separately. There is no automatic
+pronunciation score: compare the original and your recording by listening.
+
+Exports live outside the watcher’s download cleanup. Identical completed exports
+are reused; dictionaries are extracted from the existing local lexicons. Only
+explicit export requests create packages; at most two jobs can be pending and
+one media conversion runs at a time. Export errors are recorded in the server log.
