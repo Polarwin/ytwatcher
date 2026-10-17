@@ -26,6 +26,8 @@ import time
 import urllib.request
 from pathlib import Path
 
+from dictionary_corrections import CORRECTIONS
+
 KAIKKI_URL = {
     "es": "https://kaikki.org/dictionary/Spanish/kaikki.org-dictionary-Spanish.jsonl",
     "de": "https://kaikki.org/dictionary/German/kaikki.org-dictionary-German.jsonl",
@@ -38,16 +40,25 @@ OUT_FILE = {
 }
 
 
-def english_translation(entry):
+def english_meanings(entry):
+    """Read English definitions already present in English-Wiktionary entries."""
+    meanings = []
     for sense in entry.get("senses", []):
+        if (sense.get("form_of") or sense.get("alt_of")
+                or "form-of" in sense.get("tags", []) or "no-gloss" in sense.get("tags", [])):
+            continue
+        for gloss in sense.get("glosses", []):
+            if isinstance(gloss, str) and gloss and gloss not in meanings:
+                meanings.append(gloss)
         for tr in sense.get("translations", []):
-            if tr.get("lang_code") == "en" and tr.get("word"):
-                return tr["word"]
-    return None
+            if tr.get("lang_code") == "en" and tr.get("word") and tr["word"] not in meanings:
+                meanings.append(tr["word"])
+    return meanings[:6]
 
 
 def build(lang, url, out_path):
     out = {}
+    direct_glosses = set()
     n_lines = 0
     t0 = time.time()
     req = urllib.request.Request(url, headers={"User-Agent": "ytwatcher-lexicon/1.0"})
@@ -66,7 +77,7 @@ def build(lang, url, out_path):
             if not word or " " in word:
                 continue
             key = word.lower()
-            en = english_translation(entry)
+            glosses = english_meanings(entry)
             is_verb = "verb" in pos.lower()
             is_pure_form = "verb form" in pos.lower()
             form_of = entry.get("form_of") or []
@@ -74,15 +85,16 @@ def build(lang, url, out_path):
             if is_verb and form_of:
                 i = form_of[0].get("word")
             record = {}
-            if en:
-                record["g"] = [en]
+            if glosses:
+                record["g"] = glosses
+                direct_glosses.add(key)
             if pos and not is_pure_form:
                 record["p"] = pos
             if i:
                 record["i"] = i
             if record:
                 # First wins, but prefer records that carry a gloss.
-                if key not in out or (en and not out[key].get("g")):
+                if key not in out or (glosses and not out[key].get("g")):
                     out[key] = record
             # Reverse map: every conjugated form -> its infinitive.
             # Existing entries (real lemmas) always win; the second
@@ -93,9 +105,8 @@ def build(lang, url, out_path):
                     if not f or " " in f or f in out:
                         continue
                     out[f] = {"p": "verb", "i": word}
-    # Translation pass: the Spanish Wiktionary stores no machine-readable
-    # English glosses, but the English one lists Spanish equivalents in
-    # every entry's translation tables — a reverse es->en map.
+    # Reverse tables supplement entries without direct definitions. Their
+    # ordering does not identify the most common sense of a foreign word.
     print("pass 2: English Wiktionary (translations)...", flush=True)
     req = urllib.request.Request(ENGLISH_URL, headers={"User-Agent": "ytwatcher-lexicon/1.0"})
     with urllib.request.urlopen(req, timeout=300) as resp:
@@ -113,12 +124,14 @@ def build(lang, url, out_path):
                 continue
             for sense in entry.get("senses", []):
                 for tr in sense.get("translations", []):
-                    if tr.get("lang_code") != "es":
+                    if tr.get("lang_code") != lang:
                         continue
                     es = tr.get("word") or ""
                     if not es or " " in es:
                         continue
                     key = es.lower()
+                    if key in direct_glosses:
+                        continue
                     rec = out.get(key)
                     if rec is None:
                         out[key] = {"g": [word]}
@@ -133,6 +146,11 @@ def build(lang, url, out_path):
             lemma = out.get(rec["i"])
             if lemma and lemma.get("g"):
                 rec["g"] = list(lemma["g"])
+    for pair, correction in CORRECTIONS.items():
+        source, target, word = pair.split(":", 2)
+        if source == lang and target == "en":
+            out[word] = {"g": [correction["en"], *correction.get("meanings", [])],
+                         "p": correction["pos"], "i": correction["inf"]}
     print(f"done: {n_lines} lines -> {len(out)} entries in "
           f"{time.time() - t0:.0f}s", flush=True)
     tmp = Path(tempfile.mkstemp(dir=out_path.parent)[1])

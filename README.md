@@ -299,6 +299,14 @@ hold the web proxy connection open.
 
 ### Vocabulary and sentence flashcards
 
+The offline lexicon builder uses the source word's ordered English definitions
+from Kaikki/English Wiktionary before reverse translation-table fallbacks.
+Reviewed defaults in `dictionary_corrections.py` take precedence over old API
+and browser dictionary caches, including offline lookups. Rebuilding a subtitle
+dictionary also applies these corrections. The `ubicado` family defaults to
+**located / situated**; existing cards with the old **seemly** answer are repaired
+without resetting study progress or changing historical lookup events.
+
 Every successful word lookup (including offline/cached dictionary answers) and
 displayed sentence translation is automatically recorded. Repeated lookups
 update the same card and its lookup count; target languages and word/sentence

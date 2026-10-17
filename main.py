@@ -37,6 +37,7 @@ import yaml
 from dotenv import load_dotenv
 
 import flashcards
+from dictionary_corrections import CORRECTIONS as DICTIONARY_CORRECTIONS
 
 CONFIG_FILE = Path(__file__).parent / "subscriptions.yaml"
 STATE_FILE = Path(__file__).parent / "state.json"
@@ -812,6 +813,9 @@ def dictionary_lookup(word, src="es", dst="en"):
     """
     key = word.lower()
     cache_key = key if (src, dst) == ("es", "en") else f"{src}:{dst}:{key}"
+    correction = DICTIONARY_CORRECTIONS.get(f"{src}:{dst}:{key}")
+    if correction:
+        return dict(correction)
     with _dictionary_lock:
         global _dictionary_cache
         if _dictionary_cache is None:
@@ -1014,6 +1018,14 @@ def _run_dict_job(vtt, rel_vtt, job):
         words = subtitle_words(vtt)
         job["total"] = len(words)
         src = subtitle_language(vtt)
+        corrected = False
+        for word in words:
+            correction = DICTIONARY_CORRECTIONS.get(f"{src}:en:{word}")
+            if correction and out.get(word) != correction:
+                out[word] = dict(correction)
+                corrected = True
+        if corrected:
+            _save_dict_file(dict_path, out)
         pending = [w for w in words if w not in out]
         for i, w in enumerate(pending):
             try:
@@ -1574,7 +1586,7 @@ def scan_downloads(download_dir, files=None):
 # Bump when the index.html template changes: the fingerprint below only
 # covers the file listing, so without this an existing index.html would
 # keep the old template until some video is added or removed.
-INDEX_TEMPLATE_VERSION = 108
+INDEX_TEMPLATE_VERSION = 109
 
 
 def static_folder_url(item):
@@ -2781,7 +2793,10 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "  var plDictCache = {}; // item href -> {word: {en, pos, inf}} (offline dict)",
         '  var plLiveDict = {}; // "from:to:word" -> lookup result (this session)',
         '  var plSubLang = "es"; // language of the subtitle currently shown',
+        f'  var plDictionaryCorrections = {json.dumps(DICTIONARY_CORRECTIONS, ensure_ascii=False)};',
         "  function plDictRender(word, d) {",
+        '    d = plDictionaryCorrections[(plDictFrom || plSubLang || "es") + ":" +',
+        '      (plDictToSel.value || "en") + ":" + word.toLowerCase()] || d;',
         "    var body = \"<b>\" + d.en + \"</b>\";",
         "    if (d.meanings && d.meanings.length) {",
         "      body += '<span class=\"pl-dict-alt\"> \\u00b7 ' + d.meanings.slice(0, 5).join(\" \\u00b7 \") + \"</span>\";",

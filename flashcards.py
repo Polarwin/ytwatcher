@@ -12,6 +12,8 @@ import threading
 import time
 import unicodedata
 
+from dictionary_corrections import CORRECTIONS
+
 DB_FILE = Path(os.environ.get('YTWATCHER_FLASHCARDS_DB',
                               str(Path(__file__).with_name('.flashcards.sqlite3'))))
 _init_lock = threading.Lock()
@@ -61,6 +63,16 @@ def _connection():
                     );
                     CREATE INDEX IF NOT EXISTS events_deck_card ON events(deck, card);
                 ''')
+                # Repair the old wrong gloss without changing review progress
+                # or historical lookup events. Runs once per process startup.
+                with db:
+                    for pair, correction in CORRECTIONS.items():
+                        src, dst, word = pair.split(':', 2)
+                        db.execute('''UPDATE cards SET translation=?,meanings=?,pos=?,inf=?
+                            WHERE kind='word' AND src=? AND dst=? AND normalized=?
+                            AND lower(trim(translation))='seemly' ''',
+                            (correction['en'], json.dumps(correction.get('meanings', [])),
+                             correction['pos'], correction['inf'], src, dst, word))
             _initialized = True
     db = sqlite3.connect(DB_FILE, timeout=15)
     db.row_factory = sqlite3.Row
@@ -111,6 +123,11 @@ def record(deck, events):
     if not isinstance(events, list) or not 1 <= len(events) <= 50:
         raise ValueError('Expected 1–50 lookup records')
     events = [_event(event) for event in events]
+    for event in events:
+        correction = CORRECTIONS.get(f"{event['src']}:{event['dst']}:{event['source'].casefold()}")
+        if event['kind'] == 'word' and correction:
+            event.update(translation=correction['en'], meanings=correction.get('meanings', []),
+                         pos=correction['pos'], inf=correction['inf'])
     saved = 0
     with _connection() as db:
         db.execute('BEGIN IMMEDIATE')
