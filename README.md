@@ -297,6 +297,49 @@ the model name so the gateway chooses its configured default model. The app uses
 short job-status requests while generation runs, so loading the model does not
 hold the web proxy connection open.
 
+### Offline word dictionaries
+
+`build_lexicon.py` downloads and caches [Kaikki/Wiktionary data](https://kaikki.org/)
+and builds these compact language pairs:
+
+| Source | Target | Local file |
+| --- | --- | --- |
+| Spanish | English | `lexicon-es-en.json` |
+| Spanish | German | `lexicon-es-de.json` |
+| German | Spanish | `lexicon-de-es.json` |
+| Spanish | Chinese (Mandarin) | `lexicon-es-zh.json` |
+
+```bash
+.venv/bin/python build_lexicon.py --all
+.venv/bin/python refresh_offline_dictionaries.py
+```
+
+Use `--lang es --to de` to rebuild one pair. Downloaded source files remain in
+`.cache/lexicon-source/` so repeat builds reuse the same data. To download a
+newer dump, remove the corresponding cached JSONL file before rebuilding.
+`lexicon-build-info.json` records source sizes/dates and resulting word counts.
+Built files replace the previous versions atomically and load lazily on use;
+the server notices updated files without a restart. The old `lexicon-es.json`
+is retained only as a fallback when the new English pair is absent.
+
+English meanings use ordered definitions from the Spanish entries. Other pairs
+prefer explicit translations; fallbacks align translations within the same
+English sense label, with part-of-speech filtering and primary-definition
+preference. German spelling retains noun capitalization (`Essen` versus `essen`).
+Chinese uses Mandarin entries, preferring simplified spellings where supplied.
+Conjugated forms inherit translations from their known lemmas. These are
+dictionary meanings; sentence translation supplies context through the LLM.
+
+Downloads and **Preload offline** build/cache the subtitle's word list for every
+supported target of its source language. English entries retain their old
+top-level format; other targets live in `_targets`, with source/revision/coverage
+under `_meta`. Switching target language uses the corresponding cached map.
+Preload waits for dictionary building to finish and reports word coverage;
+words absent from the source data need a connection for the existing online
+lookup fallback. No LLM or Google calls are made during lexicon building or
+offline preload. Sentence translations remain on demand. Refresh the page and
+run **Preload offline** again to update dictionaries already cached on a phone.
+
 ### Vocabulary and sentence flashcards
 
 The offline lexicon builder uses the source word's ordered English definitions
