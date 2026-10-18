@@ -63,16 +63,16 @@ def _connection():
                     );
                     CREATE INDEX IF NOT EXISTS events_deck_card ON events(deck, card);
                 ''')
-                # Repair the old wrong gloss without changing review progress
+                # Repair old wrong glosses or echoed words without changing review progress
                 # or historical lookup events. Runs once per process startup.
                 with db:
                     for pair, correction in CORRECTIONS.items():
                         src, dst, word = pair.split(':', 2)
                         db.execute('''UPDATE cards SET translation=?,meanings=?,pos=?,inf=?
                             WHERE kind='word' AND src=? AND dst=? AND normalized=?
-                            AND lower(trim(translation))='seemly' ''',
+                            AND lower(trim(translation)) IN ('seemly', ?) ''',
                             (correction['en'], json.dumps(correction.get('meanings', [])),
-                             correction['pos'], correction['inf'], src, dst, word))
+                             correction['pos'], correction['inf'], src, dst, word, word))
             _initialized = True
     db = sqlite3.connect(DB_FILE, timeout=15)
     db.row_factory = sqlite3.Row

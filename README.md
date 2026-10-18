@@ -601,3 +601,9 @@ once. All generated languages are embedded in the lesson and are available throu
 its **Translation** selector, including offline and on shared links. A failure in
 one language does not discard valid translations in another. Existing lessons
 keep their saved languages; these defaults apply to new exports.
+
+Reviewed dictionary overrides also cover Spanish weather **DANA** ("depresión
+aislada en niveles altos"): English "cut-off low", Chinese "高空孤立低压", and
+German "abgetrenntes Höhentief", with a short explanation. These take precedence
+over an old unchanged-name lookup ("Dana"). Known echoed-word flashcards are
+corrected without resetting their review progress.

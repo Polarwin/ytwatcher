@@ -1591,7 +1591,7 @@ def scan_downloads(download_dir, files=None):
 # Bump when the index.html template changes: the fingerprint below only
 # covers the file listing, so without this an existing index.html would
 # keep the old template until some video is added or removed.
-INDEX_TEMPLATE_VERSION = 116
+INDEX_TEMPLATE_VERSION = 117
 
 
 def static_folder_url(item):

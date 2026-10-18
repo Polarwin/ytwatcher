@@ -20,3 +20,15 @@ for _target, _primary, _alternatives in (
             "en": _primary, "meanings": _alternatives,
             "pos": "past participle", "inf": "ubicar",
         }
+
+# Spanish weather term, not merely the given name "Dana". Reviewed against
+# AEMET: https://www.aemet.es/es/web/conocermas/borrascas
+# https://aemetblog.es/2023/06/03/que-es-una-dana-y-como-se-formapor-que-es-mas-adecuado-usar-este-termino-que-gota-fria/
+for _target, _meaning, _explanation in (
+        ('en', 'cut-off low', 'An isolated upper-level low-pressure system.'),
+        ('zh', '高空孤立低压', '高空与主气流分离的低压系统。'),
+        ('de', 'abgetrenntes Höhentief', 'Ein isoliertes Tiefdruckgebiet in der Höhe.')):
+    CORRECTIONS[f'es:{_target}:dana'] = {
+        'en': _meaning, 'meanings': [_explanation, 'DANA: depresión aislada en niveles altos.'],
+        'pos': 'noun', 'inf': '',
+    }
