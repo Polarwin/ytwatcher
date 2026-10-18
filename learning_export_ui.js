@@ -2,6 +2,7 @@
   // Independent exporter: keeps the current playlist/subtitle UI intact.
   var learnDialog = document.getElementById('learning-export-dialog');
   var learnItem = null, learnDuration = 0, learnJob = null, learnPoll = 0;
+  var learnLanguageNames = {en: 'English', zh: '中文', es: 'Español', de: 'Deutsch'};
   function learnClock(seconds) {
     return Math.floor(seconds / 60) + ':' + String(Math.floor(seconds % 60)).padStart(2, '0');
   }
@@ -9,6 +10,15 @@
     if (!/^\d+(?::\d{1,2}){0,2}(?:\.\d+)?$/.test(value.trim())) return NaN;
     return value.trim().split(':').reduce(function (sum, part) { return sum * 60 + Number(part); }, 0);
   }
+  function learnUpdateDefaultTargets() {
+    var selected = document.getElementById('learning-export-subtitle').selectedOptions[0];
+    var source = selected ? selected.textContent.split('-')[0].toLowerCase() : 'es';
+    var targets = learnDefaultTargets[source] || ['en'];
+    learnText(document.getElementById('learning-export-default'), 'Default: {languages}', {
+      languages: targets.map(function (code) { return learnLanguageNames[code] || code; }).join(' + ')
+    });
+  }
+  document.getElementById('learning-export-subtitle').onchange = learnUpdateDefaultTargets;
   function learnShow(item, current, duration) {
     if (!item) return;
     if (learnDialog.open) return;
@@ -26,8 +36,8 @@
     document.getElementById('learning-export-start').value = learnClock(from);
     document.getElementById('learning-export-end').value = learnClock(learnDuration ? Math.min(learnDuration, from + 180) : from + 180);
     document.getElementById('learning-export-whole').disabled = !learnDuration || learnDuration > 7200;
-    document.getElementById('learning-export-target').value = plDictToSel.value || 'en';
-    if (!document.getElementById('learning-export-target').value) document.getElementById('learning-export-target').value = 'en';
+    learnUpdateDefaultTargets();
+    document.getElementById('learning-export-target').value = 'default';
     document.getElementById('learning-export-submit').disabled = !selector.options.length || !!learnJob;
     if (!learnJob) {
       learnText(document.getElementById('learning-export-status'), selector.options.length ? '' : 'Download subtitles for this video first.');
@@ -60,7 +70,8 @@
   });
   function learnDisplay(job) {
     learnI.raw(document.getElementById('learning-export-status'), function () { return learnI.t(job.error || job.stage || job.status) +
-      (job.sentences ? '\n' + learnI.t('{n} sentences', {n: job.sentences}) : '') + (job.warnings?.length ? '\n' + job.warnings.map(function (warning) { return learnI.t(warning); }).join('\n') : ''); });
+      (job.sentences ? '\n' + learnI.t('{n} sentences', {n: job.sentences}) : '') +
+      (job.status === 'building' && job.translation_target ? '\n' + (learnLanguageNames[job.translation_target] || job.translation_target) + ' (' + (job.translation_targets.indexOf(job.translation_target) + 1) + '/' + job.translation_targets.length + ')' : '') + (job.warnings?.length ? '\n' + job.warnings.map(function (warning) { return learnI.t(warning); }).join('\n') : ''); });
     if (job.status === 'done') {
       document.getElementById('learning-export-open').href = job.url;
       document.getElementById('learning-export-result').hidden = false;

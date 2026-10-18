@@ -582,3 +582,22 @@ The Learning clips library groups lessons by their original subtitle language:
 section. Newest lessons appear first within each language. Empty groups remain
 visible. Interface and translation language choices do not move a lesson between
 groups. Existing lesson URLs and sharing links stay the same.
+
+### Default lesson translation languages
+
+The export dialog defaults to these targets, based on the selected subtitle:
+
+| Original subtitle | Default translations |
+| --- | --- |
+| Spanish | English and Chinese |
+| English | Chinese |
+| Chinese | English |
+| German | Spanish |
+
+An explicit language selection overrides the preset for that export. With local
+LLM generation enabled, Spanish clips generate both sentence/reading translations
+in sequence; comprehension questions and vocabulary explanations are generated
+once. All generated languages are embedded in the lesson and are available through
+its **Translation** selector, including offline and on shared links. A failure in
+one language does not discard valid translations in another. Existing lessons
+keep their saved languages; these defaults apply to new exports.

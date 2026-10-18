@@ -1591,7 +1591,7 @@ def scan_downloads(download_dir, files=None):
 # Bump when the index.html template changes: the fingerprint below only
 # covers the file listing, so without this an existing index.html would
 # keep the old template until some video is added or removed.
-INDEX_TEMPLATE_VERSION = 115
+INDEX_TEMPLATE_VERSION = 116
 
 
 def static_folder_url(item):
@@ -3045,6 +3045,7 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "  var plIndex = -1;",
         *Path(__file__).with_name("learning_i18n.js").read_text(encoding="utf-8").splitlines(),
         *Path(__file__).with_name("learning_share_ui.js").read_text(encoding="utf-8").splitlines(),
+        "  var learnDefaultTargets = " + json.dumps(learning_export.DEFAULT_TARGETS) + ";",
         *Path(__file__).with_name("learning_export_ui.js").read_text(encoding="utf-8").splitlines(),
         "  var plDragIndex = -1;",
         "  function plItemId(item) {",

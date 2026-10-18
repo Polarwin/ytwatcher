@@ -1005,6 +1005,11 @@
     "es": "Idiomas de los clips de aprendizaje",
     "de": "Sprachen der Lernclips",
     "zh": "学习片段语言"
+  },
+  "Default: {languages}": {
+    "es": "Predeterminado: {languages}",
+    "de": "Standard: {languages}",
+    "zh": "默认：{languages}"
   }
 };
   let language;

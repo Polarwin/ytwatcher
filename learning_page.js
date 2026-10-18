@@ -296,10 +296,13 @@
     }
   };
   $('copy-dialog-close').onclick = () => $('copy-dialog').close();
+  function bundledTranslation(sentence, language) {
+    return sentence.translations?.[language] || (language === pack.target && sentence.translation) || '';
+  }
   function translationKey(index = selected, language = target) { return `translation:${pack.id}:${language}:${index}`; }
   async function loadTranslation() {
     const index = selected, language = target, serial = translationSerial;
-    const text = language === pack.target && sentences[index].translation || await getValue(translationKey(index, language));
+    const text = bundledTranslation(sentences[index], language) || await getValue(translationKey(index, language));
     if (serial !== translationSerial || selected !== index || target !== language) return;
     I.raw($('sentence-translation'), text || '');
   }
@@ -307,7 +310,7 @@
     translationWanted = true;
     pauseAll();
     const index = selected, language = target, serial = ++translationSerial;
-    let text = language === pack.target && sentences[index].translation || await getValue(translationKey(index, language));
+    let text = bundledTranslation(sentences[index], language) || await getValue(translationKey(index, language));
     if (serial !== translationSerial) return;
     if (!text) {
       if (shared || !navigator.onLine || location.protocol === 'file:') {
@@ -531,7 +534,7 @@
   }
   async function renderReadingTranslation() {
     const language = target;
-    const texts = await Promise.all(sentences.map(sentence => language === pack.target && sentence.translation || getValue(translationKey(sentence.id, language))));
+    const texts = await Promise.all(sentences.map(sentence => bundledTranslation(sentence, language) || getValue(translationKey(sentence.id, language))));
     if (language !== target) return;
     const container = $('full-translation'); I.forget(container); container.replaceChildren();
     if (!texts.some(Boolean)) { ui(container, 'No saved reading translation for this language. Translate sentences while connected, or export with optional LLM exercises.'); return; }
@@ -670,7 +673,7 @@
     if (saved && typeof saved === 'object') progress = {...progress, ...saved};
     selected = Math.max(0, Math.min(sentences.length - 1, Number(progress.selected) || 0));
     target = progress.target || pack.target;
-    const targets = [...new Set([pack.target, ...Object.keys(pack.dictionary)])];
+    const targets = [...new Set([...(pack.targets || [pack.target]), ...Object.keys(pack.dictionary)])];
     if (!targets.includes(target)) target = pack.target;
     targets.forEach(code => $('target').append(new Option(labels[code] || code, code)));
     $('target').value = target;
