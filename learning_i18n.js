@@ -1010,6 +1010,11 @@
     "es": "Predeterminado: {languages}",
     "de": "Standard: {languages}",
     "zh": "默认：{languages}"
+  },
+  "Compare my voice → original": {
+    "es": "Comparar mi voz → original",
+    "de": "Meine Stimme → Original vergleichen",
+    "zh": "对比我的录音 → 原音"
   }
 };
   let language;

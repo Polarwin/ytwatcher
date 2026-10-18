@@ -1,6 +1,6 @@
 'use strict';
 const ROOT = new URL('./', self.location.href).href;
-const CACHE = 'ytwatcher-lesson:' + ROOT + ':v2';
+const CACHE = 'ytwatcher-lesson:' + ROOT + ':v3';
 const SHELL = ['index.html', 'learning_page.css', 'learning_page.js', 'learning_i18n.js', 'learning_share_ui.js', 'pack.json', 'manifest.webmanifest', 'offline-files.json', 'subtitles.vtt'];
 self.addEventListener('install', event => event.waitUntil((async () => {
   const cache = await caches.open(CACHE);

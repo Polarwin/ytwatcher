@@ -607,3 +607,7 @@ aislada en niveles altos"): English "cut-off low", Chinese "高空孤立低压",
 German "abgetrenntes Höhentief", with a short explanation. These take precedence
 over an old unchanged-name lookup ("Dana"). Known echoed-word flashcards are
 corrected without resetting their review progress.
+
+**Compare my voice → original** plays the selected saved recording first, then
+plays the original sentence once. Changing the sentence, recording attempt, or
+activity cancels the pending comparison.

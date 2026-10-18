@@ -4,7 +4,7 @@
   const $ = id => document.getElementById(id), media = $('media'), own = $('my-voice');
   const I = window.YtLessonI18n, t = I.t, ui = I.text;
   const API = '/ytwatcher/api', sentences = pack.sentences, shared = !!pack.shared;
-  const root = new URL('./', location.href).href, cacheName = 'ytwatcher-lesson:' + root + ':v2';
+  const root = new URL('./', location.href).href, cacheName = 'ytwatcher-lesson:' + root + ':v3';
   const labels = {en: 'English', de: 'Deutsch', es: 'Español', zh: '中文', fr: 'Français', it: 'Italiano', pt: 'Português'};
   const uid = () => Array.from(crypto.getRandomValues(new Uint8Array(16)), b => b.toString(16).padStart(2, '0')).join('');
   const normalize = value => value.normalize('NFC').trim().toLocaleLowerCase().replace(/\s+/g, ' ').replace(/[.!?。！？]+$/g, '');
@@ -16,6 +16,7 @@
   let translationSerial = 0, forceOne = false, issuedPlay = false, holding = false;
   let frame = 0, endTimer = 0, loopTimer = 0, afterOriginal = null, seekGuardUntil = 0;
   let recorder = null, stream = null, recording = false, startingRecord = false, recordClock = 0, recordLimit = 0;
+  let pendingOriginal = null;
   let recordingUrl = null, activeAttempt = null, recordStopPromise = null, recordingGeneration = 0;
   let flushing = null, quizCard = null, quizStarted = 0, quizAnswered = false, lastQuiz = '';
   let landscape = false, landscapeFullscreen = false;
@@ -163,7 +164,7 @@
   $('sentence-text').addEventListener('click', event => { const word = event.target.closest('[data-word]'); if (word) lookup(word.dataset.word); });
   function clearMonitor() { cancelAnimationFrame(frame); clearTimeout(endTimer); frame = endTimer = 0; }
   function pauseAll() {
-    clearTimeout(loopTimer); loopTimer = 0; afterOriginal = null;
+    clearTimeout(loopTimer); loopTimer = 0; afterOriginal = null; pendingOriginal = null;
     media.pause(); own.pause(); clearMonitor();
   }
   function seek(value) { seekGuardUntil = performance.now() + 300; media.currentTime = Math.max(0, value); }
@@ -255,7 +256,7 @@
   }
   media.addEventListener('play', () => {
     if (recording || startingRecord) { media.pause(); return; }
-    own.pause(); clearTimeout(loopTimer);
+    pendingOriginal = null; own.pause(); clearTimeout(loopTimer);
     if (!issuedPlay) {
       forceOne = false; afterOriginal = null;
       if (holding && $('pause-each').checked && selected + 1 < sentences.length) { select(selected + 1); issuedPlay = true; media.play().catch(() => {}); return; }
@@ -383,6 +384,7 @@
     showAttempt();
   }
   function showAttempt() {
+    pendingOriginal = null;
     own.pause();
     if (recordingUrl) URL.revokeObjectURL(recordingUrl);
     recordingUrl = activeAttempt ? URL.createObjectURL(activeAttempt.blob) : null;
@@ -466,13 +468,23 @@
     if (recording || startingRecord) { own.pause(); return; }
     media.pause(); clearMonitor();
   });
+  own.addEventListener('ended', () => {
+    const comparison = pendingOriginal;
+    pendingOriginal = null;
+    if (!comparison || activeAttempt?.id !== comparison.id || selected !== comparison.sentence || recording || startingRecord) return;
+    // Compare plays each part once, even when sentence looping is enabled.
+    playSelected(true, () => {});
+  });
   $('compare').onclick = () => {
     if (!activeAttempt || recording || startingRecord) return;
-    const id = activeAttempt.id;
-    playSelected(true, () => {
-      if (activeAttempt?.id !== id) return;
-      own.currentTime = 0;
-      own.play().catch(() => { ui($('record-status'), 'Tap Play on your recording to hear it.'); });
+    pauseAll();
+    const comparison = {id: activeAttempt.id, sentence: selected};
+    pendingOriginal = comparison;
+    own.currentTime = 0;
+    own.play().catch(() => {
+      if (pendingOriginal !== comparison) return;
+      pendingOriginal = null;
+      ui($('record-status'), 'Tap Play on your recording to hear it.');
     });
   };
   document.addEventListener('visibilitychange', () => {
