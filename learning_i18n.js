@@ -990,6 +990,21 @@
     "es": "expresión",
     "de": "Wendung",
     "zh": "短语"
+  },
+  "No learning clips yet.": {
+    "es": "Aún no hay clips de aprendizaje.",
+    "de": "Noch keine Lernclips.",
+    "zh": "暂无学习片段。"
+  },
+  "Other languages": {
+    "es": "Otros idiomas",
+    "de": "Weitere Sprachen",
+    "zh": "其他语言"
+  },
+  "Learning clip languages": {
+    "es": "Idiomas de los clips de aprendizaje",
+    "de": "Sprachen der Lernclips",
+    "zh": "学习片段语言"
   }
 };
   let language;

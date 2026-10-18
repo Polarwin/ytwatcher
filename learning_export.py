@@ -444,14 +444,28 @@ def publish_library():
             cards.append((pack.get('created', 0), directory.name, pack))
         except (OSError, ValueError):
             continue
-    rows = []
+    languages = [('en', 'English'), ('de', 'Deutsch'), ('es', 'Español'), ('zh', '中文')]
+    grouped = {code: [] for code, label in languages}
     for created, name, pack in sorted(cards, reverse=True):
+        source = lexicon_data.language(pack.get('source') or 'und')
+        if source not in dict(languages):
+            source = 'other'
         title = html.escape(pack['title'])
         summary_values = html.escape(json.dumps({'n': len(pack['sentences']), 'minutes': f"{pack['duration'] / 60:.1f}"}), quote=True)
         summary = f'''<span data-i18n="{{n}} sentences · {{minutes}} minutes" data-i18n-values="{summary_values}">{len(pack['sentences'])} sentences · {pack['duration'] / 60:.1f} minutes</span>'''
-        rows.append(f'<article><h2><a href="{name}/index.html">{title}</a></h2><p>{summary}</p></article>')
+        grouped.setdefault(source, []).append(f'<article><h3><a href="{name}/index.html">{title}</a></h3><p>{summary}</p></article>')
+    sections, navigation = [], []
+    if grouped.get('other'):
+        languages.append(('other', 'Other languages'))
+    for code, label in languages:
+        entries = grouped[code]
+        label_html = html.escape(label)
+        translated = ' data-i18n="Other languages"' if code == 'other' else ''
+        navigation.append(f'<a href="#language-{code}"><span{translated}>{label_html}</span> <span class="count">{len(entries)}</span></a>')
+        content = ''.join(entries) or '<p class="empty" data-i18n="No learning clips yet.">No learning clips yet.</p>'
+        sections.append(f'<section id="language-{code}"><h2><span{translated}>{label_html}</span> <span class="count">{len(entries)}</span></h2>{content}</section>')
     shutil.copyfile(ASSETS / 'learning_i18n.js', OUTPUT / 'learning_i18n.js')
-    atomic(OUTPUT / 'index.html', '<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title data-i18n="Learning clips">Learning clips</title><script src="learning_i18n.js" defer></script><style>body{font:17px/1.6 system-ui;max-width:850px;margin:2rem auto;padding:1rem;background:#111;color:#eee}a{color:#9cd7bf}article{padding:1rem;border-bottom:1px solid #555}h2{font-size:1.1rem}</style><body data-learning-page="true"><label><span data-i18n="Interface language">Interface language</span> <select data-ui-language aria-label="Interface language" data-i18n-aria-label="Interface language"></select></label><a href="/ytwatcher/">← ytwatcher</a><h1 data-i18n="Learning clips">Learning clips</h1>' + ''.join(rows))
+    atomic(OUTPUT / 'index.html', '<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title data-i18n="Learning clips">Learning clips</title><script src="learning_i18n.js" defer></script><style>html{scroll-behavior:smooth;scroll-padding-top:1rem}body{font:17px/1.6 system-ui;max-width:850px;margin:2rem auto;padding:1rem;background:#111;color:#eee}a{color:#9cd7bf}header{display:flex;gap:1rem;flex-wrap:wrap;align-items:center}nav{display:flex;gap:.7rem;flex-wrap:wrap;margin:1rem 0 2rem}nav a{padding:.4rem .8rem;border:1px solid #555;border-radius:.5rem;text-decoration:none}article{padding:.7rem 1rem;border-bottom:1px solid #333}h2{margin-top:2rem;border-bottom:1px solid #555;padding-bottom:.4rem}h3{font-size:1.1rem;margin:.3rem 0;overflow-wrap:anywhere}article p{margin:.3rem 0;color:#aaa}.count{font-size:.85em;color:#aaa;margin-left:.4rem}.empty{color:#aaa;padding:.5rem 1rem}select{font:inherit;background:#222;color:#eee;padding:.3rem}</style></head><body data-learning-page="true"><header><a href="/ytwatcher/">← ytwatcher</a><label><span data-i18n="Interface language">Interface language</span> <select data-ui-language aria-label="Interface language" data-i18n-aria-label="Interface language"></select></label></header><h1 data-i18n="Learning clips">Learning clips</h1><nav aria-label="Learning clip languages" data-i18n-aria-label="Learning clip languages">' + ''.join(navigation) + '</nav>' + ''.join(sections) + '</body></html>')
 
 
 def _worker(job_id, media, subtitle, begin, end, target, exercises, llm_url, llm_gate):

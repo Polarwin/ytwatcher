@@ -576,3 +576,9 @@ Original subtitle/reading text, vocabulary meanings, and generated questions kee
 their content language; use the separate **Translation** selector for meanings
 and sentence translations. Switching interface language does not generate extra
 LLM translations.
+
+The Learning clips library groups lessons by their original subtitle language:
+**English**, **Deutsch**, **Español**, and **中文**, with counts and links to each
+section. Newest lessons appear first within each language. Empty groups remain
+visible. Interface and translation language choices do not move a lesson between
+groups. Existing lesson URLs and sharing links stay the same.
