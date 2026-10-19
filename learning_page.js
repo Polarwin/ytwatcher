@@ -4,7 +4,7 @@
   const $ = id => document.getElementById(id), media = $('media'), own = $('my-voice');
   const I = window.YtLessonI18n, t = I.t, ui = I.text;
   const API = '/ytwatcher/api', sentences = pack.sentences, shared = !!pack.shared;
-  const root = new URL('./', location.href).href, cacheName = 'ytwatcher-lesson:' + root + ':v6';
+  const root = new URL('./', location.href).href, cacheName = 'ytwatcher-lesson:' + root + ':v7';
   const labels = {en: 'English', de: 'Deutsch', es: 'Español', zh: '中文', fr: 'Français', it: 'Italiano', pt: 'Português'};
   const uid = () => Array.from(crypto.getRandomValues(new Uint8Array(16)), b => b.toString(16).padStart(2, '0')).join('');
   const normalize = value => value.normalize('NFC').trim().toLocaleLowerCase().replace(/\s+/g, ' ').replace(/[.!?。！？]+$/g, '');
@@ -194,7 +194,7 @@
     $('sentence-panel').scrollTop = 0;
     ui($('sentence-counter'), '{n} / {total} sentences', {n: selected + 1, total: sentences.length});
     $('previous').disabled = selected === 0;
-    $('next').disabled = $('continue').disabled = selected === sentences.length - 1;
+    $('next').disabled = selected === sentences.length - 1;
     $('dictionary-panel').style.visibility = 'hidden';
     ui($('play-status'), '');
     sentenceButtons.forEach((button, i) => button.setAttribute('aria-current', String(i === selected)));
@@ -235,7 +235,7 @@
         $('sentence-panel').scrollTop = 0;
         ui($('sentence-counter'), '{n} / {total} sentences', {n: selected + 1, total: sentences.length});
         $('previous').disabled = index === 0;
-        $('next').disabled = $('continue').disabled = index === sentences.length - 1;
+        $('next').disabled = index === sentences.length - 1;
         $('dictionary-panel').style.visibility = 'hidden';
         sentenceButtons.forEach((button, i) => button.setAttribute('aria-current', String(i === index)));
         ui($('mark-reviewed'), progress.reviewed.includes(index) ? '✓ Reviewed' : 'Mark reviewed');
@@ -284,9 +284,10 @@
   media.addEventListener('ratechange', () => { saveProgress(); if (!media.paused) monitor(); });
   media.addEventListener('ended', () => { clearMonitor(); markReviewed(); ui($('play-status'), 'Clip finished. Choose a sentence to review.'); });
   $('previous').onclick = () => select(selected - 1);
-  $('next').onclick = () => select(selected + 1);
+  $('next').onclick = () => { if (select(selected + 1)) playSelected(false); };
   $('play-sentence').onclick = () => playSelected(true);
-  $('continue').onclick = () => { if (select(selected + 1)) playSelected(false); };
+  // Older saved pages can still contain the retired Continue control.
+  $('continue')?.remove();
   $('mark-reviewed').onclick = markReviewed;
   $('pause-each').onchange = $('loop-sentence').onchange = () => { saveProgress(); if (!media.paused) monitor(); };
   $('speed').onchange = () => { media.playbackRate = Number($('speed').value); saveProgress(); };
@@ -389,7 +390,7 @@
     $('stop-record').disabled = !recording;
     document.querySelectorAll('[data-tab], .playback button, #speed, #copy-sentence, #translate-sentence, #target, #pause-each, #loop-sentence').forEach(button => { button.disabled = recording || startingRecord; });
     if (!recording && !startingRecord) {
-      $('previous').disabled = selected === 0; $('next').disabled = $('continue').disabled = selected === sentences.length - 1;
+      $('previous').disabled = selected === 0; $('next').disabled = selected === sentences.length - 1;
     }
     media.controls = own.controls = !recording && !startingRecord;
     $('attempts').disabled = recording || startingRecord || !activeAttempt;
