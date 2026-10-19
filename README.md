@@ -621,3 +621,9 @@ Shared lessons can use the same link when no translation was included. Opening
 it pauses playback. Google Translate requires internet access; its results are
 not automatically imported into the lesson’s offline translations or flashcards.
 Saved local translations continue to work offline without this fallback.
+
+On Frankfurt shared lessons, **Translate sentence** opens Google Translate
+directly when that sentence has no saved translation and the device is online.
+The tab opens inside the original button click so mobile browsers can allow it.
+Saved translations still display within the lesson. The separate Google link
+remains available if the browser blocks the new tab.

@@ -4,7 +4,7 @@
   const $ = id => document.getElementById(id), media = $('media'), own = $('my-voice');
   const I = window.YtLessonI18n, t = I.t, ui = I.text;
   const API = '/ytwatcher/api', sentences = pack.sentences, shared = !!pack.shared;
-  const root = new URL('./', location.href).href, cacheName = 'ytwatcher-lesson:' + root + ':v4';
+  const root = new URL('./', location.href).href, cacheName = 'ytwatcher-lesson:' + root + ':v5';
   const labels = {en: 'English', de: 'Deutsch', es: 'Español', zh: '中文', fr: 'Français', it: 'Italiano', pt: 'Português'};
   const uid = () => Array.from(crypto.getRandomValues(new Uint8Array(16)), b => b.toString(16).padStart(2, '0')).join('');
   const normalize = value => value.normalize('NFC').trim().toLocaleLowerCase().replace(/\s+/g, ' ').replace(/[.!?。！？]+$/g, '');
@@ -299,6 +299,7 @@
     }
   };
   $('copy-dialog-close').onclick = () => $('copy-dialog').close();
+  const translationMemory = new Map();
   function bundledTranslation(sentence, language) {
     return sentence.translations?.[language] || (language === pack.target && sentence.translation) || '';
   }
@@ -307,6 +308,7 @@
     const index = selected, language = target, serial = translationSerial;
     const text = bundledTranslation(sentences[index], language) || await getValue(translationKey(index, language));
     if (serial !== translationSerial || selected !== index || target !== language) return;
+    if (text) { translationMemory.set(translationKey(index, language), text); $('google-translate').hidden = true; }
     I.raw($('sentence-translation'), text || '');
   }
   $('google-translate').addEventListener('click', pauseAll);
@@ -319,12 +321,25 @@
     });
     link.hidden = navigator.onLine === false;
   }
-  $('translate-sentence').onclick = async () => {
+  $('translate-sentence').onclick = async event => {
     translationWanted = true;
     $('google-translate').hidden = true;
     pauseAll();
     const index = selected, language = target, serial = ++translationSerial;
-    let text = bundledTranslation(sentences[index], language) || await getValue(translationKey(index, language));
+    let text = bundledTranslation(sentences[index], language) || translationMemory.get(translationKey(index, language));
+    if (!text && (shared || location.protocol === 'file:') && navigator.onLine !== false) {
+      googleTranslation(index, language);
+      // Stay inside the original click: awaiting IndexedDB first can make
+      // browsers block the new tab as an unsolicited popup.
+      if (event?.isTrusted) {
+        window.open($('google-translate').href, '_blank', 'noopener,noreferrer');
+        ui($('play-status'), 'Opening Google Translate…');
+      } else {
+        ui($('play-status'), 'No saved translation for this sentence. You can open Google Translate while online.');
+      }
+      return;
+    }
+    if (!text) text = await getValue(translationKey(index, language));
     if (serial !== translationSerial) return;
     if (!text) {
       if (shared || !navigator.onLine || location.protocol === 'file:') {
@@ -356,6 +371,7 @@
     }
     if (serial !== translationSerial || selected !== index || target !== language) return;
     $('google-translate').hidden = true;
+    translationMemory.set(translationKey(index, language), text);
     I.raw($('sentence-translation'), text);
     remember({kind: 'sentence', source: sentences[index].text, translation: text}).catch(() => {});
   };

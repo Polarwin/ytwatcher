@@ -1025,6 +1025,11 @@
     "es": "No hay traducción guardada de esta frase. Puedes abrir el Traductor de Google con conexión.",
     "de": "Keine gespeicherte Übersetzung für diesen Satz. Du kannst bei Internetverbindung Google Übersetzer öffnen.",
     "zh": "本句暂无已保存的译文，联网时可以打开谷歌翻译。"
+  },
+  "Opening Google Translate…": {
+    "es": "Abriendo el Traductor de Google…",
+    "de": "Google Übersetzer wird geöffnet…",
+    "zh": "正在打开谷歌翻译…"
   }
 };
   let language;
