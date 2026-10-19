@@ -10,7 +10,7 @@
     const share = document.createElement('button'); share.type = 'button'; ui(share, 'Create temporary link');
     const status = document.createElement('p'); status.setAttribute('role', 'status'); status.style.minHeight = '1.6em';
     const result = document.createElement('div'); result.hidden = true;
-    const link = document.createElement('a'); link.target = '_blank'; link.rel = 'noopener noreferrer'; ui(link, 'Open shared lesson');
+    const link = document.createElement('a'); link.target = '_blank'; link.rel = 'noopener noreferrer'; ui(link, 'Open Frankfurt link');
     const input = document.createElement('input'); input.type = 'text'; input.readOnly = true; input.style.width = '100%'; I.attribute(input, 'aria-label', 'Temporary lesson link');
     const copy = document.createElement('button'); copy.type = 'button'; ui(copy, 'Copy link');
     const revoke = document.createElement('button'); revoke.type = 'button'; ui(revoke, 'Revoke link');
@@ -28,6 +28,7 @@
       if (active) link.href = input.value = job.url;
       clearTimeout(poll);
       if (busy) poll = setTimeout(refresh, 1500);
+      else if (active) poll = setTimeout(refresh, Math.min(60000, Math.max(1000, job.expires * 1000 - Date.now())));
     }
     async function refresh() {
       if (container.dataset.shareId !== id) return;
@@ -59,4 +60,46 @@
     };
     refresh();
   };
+
+  // The library only displays existing shares; publishing stays in the lesson.
+  const cards = [...document.querySelectorAll('[data-learning-share-card]')];
+  if (!cards.length) return;
+  const jobs = new Map();
+  function renderCard(card) {
+    const job = jobs.get(card.dataset.learningShareCard);
+    const active = job?.status === 'done' && job.expires * 1000 > Date.now();
+    card.hidden = !active;
+    if (!active) { card.replaceChildren(); return; }
+    let link = card.querySelector('a'), expiry = card.querySelector('span');
+    if (!link) {
+      link = document.createElement('a'); link.target = '_blank'; link.rel = 'noopener noreferrer';
+      ui(link, 'Open Frankfurt link');
+      expiry = document.createElement('span');
+      card.append(link, document.createTextNode(' · '), expiry);
+    }
+    link.href = job.url;
+    ui(expiry, 'Link expires {date}', () => ({date: new Date(job.expires * 1000).toLocaleString(I.language)}));
+  }
+  let refreshing = false;
+  async function refreshCards() {
+    if (refreshing || document.hidden) return;
+    refreshing = true;
+    const pending = [...cards];
+    async function worker() {
+      while (pending.length) {
+        const card = pending.shift(), id = card.dataset.learningShareCard;
+        try {
+          const response = await fetch('/ytwatcher/api/learning-share?' + new URLSearchParams({id}), {cache: 'no-store'});
+          if (response.ok) jobs.set(id, await response.json());
+        } catch (_) { /* Keep the last known link until expiry while disconnected. */ }
+        renderCard(card);
+      }
+    }
+    try { await Promise.all([worker(), worker(), worker()]); }
+    finally { refreshing = false; }
+  }
+  window.addEventListener('focus', refreshCards);
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) refreshCards(); });
+  setInterval(() => { cards.forEach(renderCard); refreshCards(); }, 60000);
+  refreshCards();
 })();

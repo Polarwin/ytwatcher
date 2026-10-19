@@ -416,6 +416,11 @@
     "de": "Temporären Link erstellen",
     "zh": "创建临时链接"
   },
+  "Open Frankfurt link": {
+    "es": "Abrir enlace de Frankfurt",
+    "de": "Frankfurt-Link öffnen",
+    "zh": "打开法兰克福分享链接"
+  },
   "Open shared lesson": {
     "es": "Abrir lección compartida",
     "de": "Geteilte Lektion öffnen",
