@@ -1015,6 +1015,16 @@
     "es": "Comparar mi voz → original",
     "de": "Meine Stimme → Original vergleichen",
     "zh": "对比我的录音 → 原音"
+  },
+  "Open Google Translate": {
+    "es": "Abrir Traductor de Google",
+    "de": "Google Übersetzer öffnen",
+    "zh": "打开谷歌翻译"
+  },
+  "No saved translation for this sentence. You can open Google Translate while online.": {
+    "es": "No hay traducción guardada de esta frase. Puedes abrir el Traductor de Google con conexión.",
+    "de": "Keine gespeicherte Übersetzung für diesen Satz. Du kannst bei Internetverbindung Google Übersetzer öffnen.",
+    "zh": "本句暂无已保存的译文，联网时可以打开谷歌翻译。"
   }
 };
   let language;

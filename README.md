@@ -611,3 +611,13 @@ corrected without resetting their review progress.
 **Compare my voice → original** plays the selected saved recording first, then
 plays the original sentence once. Changing the sentence, recording attempt, or
 activity cancels the pending comparison.
+
+### Sentence translation fallback
+
+The main player and learning lessons offer **Open Google Translate** while a
+local sentence translation is pending or unavailable. The link opens a new tab
+with the complete sentence and the selected source/target languages already set.
+Shared lessons can use the same link when no translation was included. Opening
+it pauses playback. Google Translate requires internet access; its results are
+not automatically imported into the lesson’s offline translations or flashcards.
+Saved local translations continue to work offline without this fallback.

@@ -1591,7 +1591,7 @@ def scan_downloads(download_dir, files=None):
 # Bump when the index.html template changes: the fingerprint below only
 # covers the file listing, so without this an existing index.html would
 # keep the old template until some video is added or removed.
-INDEX_TEMPLATE_VERSION = 117
+INDEX_TEMPLATE_VERSION = 118
 
 
 def static_folder_url(item):
@@ -2622,13 +2622,26 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
     plSentenceEl.textContent = "";
     plSentenceEl.style.visibility = "hidden";
   }
-  function plSentenceShow(original, translation) {
+  function plSentenceShow(original, translation, from, to) {
     var source = document.createElement("div");
     source.className = "pl-sentence-original";
     source.textContent = original;
     var target = document.createElement("div");
     target.textContent = translation;
     plSentenceEl.replaceChildren(source, target);
+    if (from && navigator.onLine !== false) {
+      var google = document.createElement("a");
+      var sourceLanguage = from.split("-")[0], targetLanguage = (to || "en").split("-")[0];
+      google.href = "https://translate.google.com/?" + new URLSearchParams({
+        sl: sourceLanguage === "zh" ? "zh-CN" : sourceLanguage,
+        tl: targetLanguage === "zh" ? "zh-CN" : targetLanguage, text: original, op: "translate"
+      });
+      google.target = "_blank"; google.rel = "noopener noreferrer";
+      google.addEventListener("click", function () { plVideo.pause(); });
+      if (window.YtLessonI18n) window.YtLessonI18n.text(google, "Open Google Translate");
+      else google.textContent = "Open Google Translate";
+      plSentenceEl.appendChild(google);
+    }
     plSentenceEl.scrollTop = 0;
     plSentenceEl.style.visibility = "visible";
   }
@@ -2713,11 +2726,12 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
     var request = ++plSentenceRequest;
     plSentenceWanted = text;
     plSentenceFrom = from;
-    plSentenceShow(text, "Translating…");
+    var to = plDictToSel.value || "en";
+    plSentenceShow(text, "Translating…", from, to);
     try {
       var response = await fetch(API + "/translate-sentence", {
         method: "POST", headers: {"Content-Type": "application/json"},
-        body: JSON.stringify({text: text, from: from, to: plDictToSel.value || "en"})
+        body: JSON.stringify({text: text, from: from, to: to})
       });
       var job = await response.json();
       if (!response.ok) throw new Error(job.error || "Translation unavailable");
@@ -2738,7 +2752,7 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         video_title: plIndex >= 0 && pl[plIndex] ? pl[plIndex].name : "",
         video_href: plIndex >= 0 && pl[plIndex] ? pl[plIndex].href : ""});
     } catch (e) {
-      if (request === plSentenceRequest) plSentenceShow(text, e.message || "Translation unavailable");
+      if (request === plSentenceRequest) plSentenceShow(text, e.message || "Translation unavailable", from, to);
     }
   }
   plSentenceBtn.addEventListener("click", function () {
