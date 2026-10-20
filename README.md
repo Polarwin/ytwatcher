@@ -138,6 +138,12 @@ invalid):
 
 ## Manual downloads
 
+Dictionary lookups keep the subtitle language fixed, including `es-orig` → `es`.
+Fallback-cache entries record their provider, language pair, and lookup version.
+Legacy fallback answers from the former language-detection path are rechecked
+before reuse; offline lexicon entries and reviewed corrections take precedence.
+
+
 Each library item with a YouTube ID has a **⇩ Subtitles** button alongside
 **⇩ Video**. It fetches published subtitles, falling back to auto-generated
 captions for each requested language, and saves WebVTT files next to the media.

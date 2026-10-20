@@ -178,7 +178,9 @@ def build(pairs, directory):
                 meta["l"] = key(lemmas[0]["word"], src)
                 if pos == "verb":
                     meta["i"] = meta["l"]
-            existing = forms.setdefault(normalized, {})
+            # New form-only entries have no direct gloss, but their lemma/POS
+            # must still be recorded so the final pass can resolve them.
+            existing = forms.setdefault(normalized, dict(meta))
             if normalized not in canonical and existing.get("p") == pos:
                 existing.update({name: value for name, value in meta.items() if value and not existing.get(name)})
             for pair in pairs:

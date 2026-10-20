@@ -703,7 +703,7 @@ def _google_translate_best(word, src="es", dst="en"):
     auto-detection turned Spanish slang into unrelated foreign-language words.
     """
     try:
-        return _google_translate(word, src, dst)
+        return _google_translate(word, lexicon_data.language(src), lexicon_data.language(dst))
     except Exception as e:
         log.warning("google translate failed for %r (%s): %s", word, src, e)
         return None
@@ -816,6 +816,9 @@ def dictionary_lookup(word, src="es", dst="en"):
     pairs are cached as "src:dst:word". Results always use the "en"
     field for the gloss (historical name, any target language).
     """
+    # Caption track labels such as es-orig describe Spanish, not a separate
+    # language. Normalize before cache keys, corrections, and providers.
+    src, dst = lexicon_data.language(src), lexicon_data.language(dst)
     key = word.lower()
     cache_key = key if (src, dst) == ("es", "en") else f"{src}:{dst}:{key}"
     if lexicon_data.language(src) == "de":
@@ -841,13 +844,22 @@ def dictionary_lookup(word, src="es", dst="en"):
                             if isinstance(v, dict) and v.get("en")}
                 except (json.JSONDecodeError, OSError) as e:
                     log.warning("could not read dictionary.json: %s", e)
-        if cache_key in _dictionary_cache:
-            return _dictionary_cache[cache_key]
-        net = (_dictionary_google(word, src, dst)
-               or _dictionary_llm(word, src, dst))
+        cached = _dictionary_cache.get(cache_key)
+        provenance = cached.get("_lookup", {}) if cached else {}
+        # Old fallback answers were produced by the broken parser/auto-language
+        # retry and have no provenance. Re-check instead of serving them again.
+        if (provenance.get("version") == 2 and provenance.get("src") == src
+                and provenance.get("dst") == dst):
+            return cached
+        provider = "google"
+        net = _dictionary_google(word, src, dst)
+        if not net:
+            provider = "local-llm"
+            net = _dictionary_llm(word, src, dst)
         if not net:
             return None
-        result = {"en": net["en"]}
+        result = {"en": net["en"], "_lookup": {
+            "version": 2, "provider": provider, "src": src, "dst": dst}}
         if net.get("pos"):
             result["pos"] = net["pos"]
         if net.get("inf"):
@@ -1593,7 +1605,7 @@ def scan_downloads(download_dir, files=None):
 # Bump when the index.html template changes: the fingerprint below only
 # covers the file listing, so without this an existing index.html would
 # keep the old template until some video is added or removed.
-INDEX_TEMPLATE_VERSION = 121
+INDEX_TEMPLATE_VERSION = 122
 
 
 def static_folder_url(item):
@@ -2824,8 +2836,8 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         *Path(__file__).with_name("offline_dictionary_ui.js").read_text(encoding="utf-8").splitlines(),
         f'  var plDictionaryCorrections = {json.dumps(DICTIONARY_CORRECTIONS, ensure_ascii=False)};',
         "  function plDictRender(word, d) {",
-        '    d = plDictionaryCorrections[(plDictFrom || plSubLang || "es") + ":" +',
-        '      (plDictToSel.value || "en") + ":" + word.toLowerCase()] || d;',
+        '    d = plDictionaryCorrections[plBaseLanguage(plDictFrom || plSubLang || "es") + ":" +',
+        '      plBaseLanguage(plDictToSel.value || "en") + ":" + word.toLowerCase()] || d;',
         "    var body = \"<b>\" + plDictEscape(d.en) + \"</b>\";",
         "    if (d.meanings && d.meanings.length) {",
         "      body += '<span class=\"pl-dict-alt\"> \\u00b7 ' + d.meanings.slice(0, 5).map(plDictEscape).join(\" \\u00b7 \") + \"</span>\";",
