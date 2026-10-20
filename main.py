@@ -1595,7 +1595,7 @@ def scan_downloads(download_dir, files=None):
 # Bump when the index.html template changes: the fingerprint below only
 # covers the file listing, so without this an existing index.html would
 # keep the old template until some video is added or removed.
-INDEX_TEMPLATE_VERSION = 119
+INDEX_TEMPLATE_VERSION = 120
 
 
 def static_folder_url(item):
@@ -1894,6 +1894,9 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "    li.pl-current a { color: #7bd88a; }",
         "    li.pl-current-video .entry-row > a { color: #7bd88a; }",
         "    .pl-remove { flex-shrink: 0; }",
+        "    #pl-items > li { display: block; }",
+        "    #pl-items .entry-row { width: 100%; }",
+        "    .playlist .entry-actions .watch-btn { padding: .15rem .55rem; font-size: .8rem; }",
         "    #pl-items li { cursor: grab; }",
         "    #pl-items li.pl-drop-target { border-top: 2px solid #8ab4f8; }",
         "    #pl-items .pl-dur { color: #999; font-size: .85rem; margin-left: .6rem; white-space: nowrap; }",
@@ -2189,8 +2192,8 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
     lines.append('    <div id="video-sections">')
     if latest:
         lines.append('    <section class="channel latest">')
-        lines.append('      <h2>🆕 Latest</h2>')
-        lines.append('      <ul>')
+        lines.append('      <h2>🆕 Latest <button class="watch-btn latest-toggle" type="button" aria-expanded="false">Show</button></h2>')
+        lines.append('      <ul hidden>')
         for entry in latest:
             lines.extend(entry_lines(entry, show_channel=True))
         lines.append('      </ul>')
@@ -2298,6 +2301,7 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "  // entries in Latest. Watched entries drop out immediately",
         "  // (the server omits them at the next index rebuild; this",
         "  // covers the time in between).",
+        "  var latestVisible = false;",
         "  function applyLatestVisibility() {",
         '    document.querySelectorAll("section.latest li[data-channel]").forEach(function (li) {',
         "      var st = secState[li.dataset.channel] || {};",
@@ -3136,12 +3140,31 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "    var h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60);",
         '    return (h ? h + ":" + ("0" + m).slice(-2) : m) + ":" + ("0" + (s % 60)).slice(-2);',
         "  }",
+        *r"""
+  function bindMediaActions(li) {
+    li.querySelectorAll('.media-toggle, .subtitle-download').forEach(function (btn) {
+      btn.dataset.label = btn.textContent;
+      btn.addEventListener('click', function () {
+        var rel = decodeURIComponent(li.querySelector('a').getAttribute('href').split(/[?#]/)[0]);
+        btn.disabled = true; btn.textContent = '\u2026';
+        fetch(API + btn.dataset.action, {
+          method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({rel: rel})
+        }).then(function (r) {
+          if (!r.ok) return r.json().then(function (d) { throw new Error(d.error || ('HTTP ' + r.status)); });
+          return r.json();
+        }).then(function (d) { pollVideoUpgrade(btn, d.job_id); })
+          .catch(function (e) { vuFail(btn, e.message); });
+      });
+    });
+  }
+""".splitlines(),
         "  function plRender() {",
         "    plItems.innerHTML = \"\";",
         "    plEmpty.style.display = pl.length ? \"none\" : \"\";",
         "    if (plIndex >= 0 && pl[plIndex]) {",
         "      plNow.textContent = (plIndex + 1) + \"/\" + pl.length + \" \\u2014 \" + pl[plIndex].name;",
         "    }",
+        '    var available = Array.from(document.querySelectorAll("#video-sections li[data-id], #static-sections li[data-static]"));',
         "    pl.forEach(function (item, i) {",
         "      var li = document.createElement(\"li\");",
         "      if (i === plIndex) li.className = \"pl-current\";",
@@ -3172,26 +3195,60 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "          x.classList.remove(\"pl-drop-target\");",
         "        });",
         "      });",
-        "      var a = document.createElement(\"a\");",
-        "      a.href = item.href;",
-        "      a.textContent = item.name;",
-        "      a.title = item.name;",
-        "      a.addEventListener(\"click\", function (ev) { ev.preventDefault(); plPlayAt(i); });",
-        "      var dur = item.dur || DURATIONS[item.href.split(/[?#]/)[0]];",
-        "      if (dur) {",
-        "        var d = document.createElement(\"span\");",
-        "        d.className = \"pl-dur\";",
-        "        d.textContent = plFmtDur(dur);",
-        "        li.appendChild(d);",
-        "      }",
-        "      var rm = document.createElement(\"button\");",
-        "      rm.className = \"pl-remove\";",
-        "      rm.type = \"button\";",
-        "      rm.textContent = \"\\u2715\";",
-        '      rm.title = item.static ? "Remove from playlist" : "Remove and mark watched";',
-        "      rm.addEventListener(\"click\", function () { plRemoveAt(i, true); });",
-        "      li.appendChild(a);",
-        "      li.appendChild(rm);",
+        *r"""
+      var source = available.find(function (entry) {
+        var link = entry.querySelector('a');
+        return (item.id && entry.dataset.id === item.id) || (link && link.getAttribute('href') === item.href);
+      });
+      var originalRow = source && source.querySelector('.entry-row');
+      var row = originalRow ? originalRow.cloneNode(true) : document.createElement('div');
+      row.className = 'entry-row';
+      var a = row.querySelector('a');
+      if (!a) { a = document.createElement('a'); row.appendChild(a); }
+      a.href = item.href; a.textContent = item.name; a.title = item.name;
+      a.addEventListener('click', function (ev) { ev.preventDefault(); plPlayAt(i); });
+      var column = row.querySelector('.entry-col');
+      if (!column) { column = document.createElement('div'); column.className = 'entry-col'; row.appendChild(column); }
+      var actions = column.querySelector('.entry-actions');
+      if (!actions) { actions = document.createElement('span'); actions.className = 'entry-actions'; column.prepend(actions); }
+      row.querySelectorAll('.pl-add').forEach(function (button) { button.remove(); });
+      var metadata = column.querySelector('.entry-meta');
+      if (!metadata) { metadata = document.createElement('span'); metadata.className = 'entry-meta'; column.appendChild(metadata); }
+      if (source) {
+        var channel = source.dataset.channel || source.closest('section[data-channel]')?.dataset.channel;
+        if (channel && !source.closest('section.latest')) metadata.textContent = channel + (metadata.textContent ? ' · ' + metadata.textContent : '');
+        item.meta = metadata.textContent;
+      } else {
+        var dur = item.dur || DURATIONS[item.href.split(/[?#]/)[0]];
+        metadata.textContent = item.meta || (dur ? plFmtDur(dur) : '');
+      }
+      var id = plItemId(item), mark = row.querySelector('.watch-toggle');
+      li.classList.toggle('watched', !!id && watched.has(id));
+      if (mark) {
+        mark.textContent = watched.has(id) ? '\u2713 Watched' : 'Mark watched';
+        mark.onclick = function () {
+          var isWatched = !watched.has(id);
+          if (isWatched) watched.add(id); else watched.delete(id);
+          save(watched); report(id, isWatched); applyAll();
+        };
+      }
+      var learn = row.querySelector('.learning-export-row');
+      if (!learn && item.subs && item.subs !== '{}') {
+        learn = document.createElement('button'); learn.type = 'button';
+        learn.className = 'watch-btn learning-export-row'; actions.appendChild(learn);
+      }
+      if (learn) {
+        learn.textContent = learnI.t('Learn');
+        learn.onclick = function () { learnShow(item, 0, Number(item.dur || source?.dataset.dur)); };
+      }
+      li.appendChild(row); bindMediaActions(li);
+      var rm = document.createElement('button'); rm.className = 'watch-btn pl-remove'; rm.type = 'button';
+      rm.textContent = '\u2715';
+      rm.title = item.static ? 'Remove from playlist' : 'Remove and mark watched';
+      rm.setAttribute('aria-label', rm.title);
+      rm.addEventListener('click', function () { plRemoveAt(i, true); });
+      actions.prepend(rm);
+""".splitlines(),
         "      plItems.appendChild(li);",
         "    });",
         "    plUpdateButtons();",
@@ -3407,9 +3464,9 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "  function plQueueFrom(selector, shuffle, autoplay, includeHidden) {",
         "    // Queue every matching listed video that isn't queued yet.",
         "    // Hidden entries are skipped: 'old' files, entries of a",
-        "    // collapsed section, and watched/hidden Latest items — the",
-        "    // bulk buttons queue exactly what is visible. includeHidden",
-        "    // bypasses only the section-collapse check (Spanish mode must",
+        "    // collapsed section, and watched/hidden Latest items.",
+        "    // The Latest disclosure hides presentation only, not its queue source.",
+        "    // includeHidden bypasses only the section-collapse check (Spanish mode must",
         "    // queue the Espanol videos even when the section is folded);",
         "    // 'old' entries stay excluded.",
         "    var have = {};",
@@ -3420,7 +3477,7 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "      if (!includeHidden) {",
         '        var ul = li.closest("ul");',
         '        var body = li.closest(".chan-body");',
-        "        if ((ul && ul.hidden) || (body && body.hidden)) return;",
+        '        if ((ul && ul.hidden && !li.closest("section.latest")) || (body && body.hidden)) return;',
         "      }",
         "      var a = li.querySelector(\"a\");",
         "      var href = a.getAttribute(\"href\");",
@@ -3720,8 +3777,21 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         '    if (pl.length === 1) plPlayAt(0);',
         '    else plRender();',
         '  });',
-        "  function applyAll() { applyFns.forEach(function (fn) { fn(); }); }",
+        "  function applyAll() { applyFns.forEach(function (fn) { fn(); }); plRender(); }",
         "  function bindAvailableVideos() {",
+        *r"""
+    var latest = document.querySelector('section.latest');
+    if (latest) {
+      var latestButton = latest.querySelector('.latest-toggle'), latestList = latest.querySelector('ul');
+      function updateLatestDisclosure() {
+        latestList.hidden = !latestVisible;
+        latestButton.textContent = latestVisible ? 'Hide' : 'Show';
+        latestButton.setAttribute('aria-expanded', String(latestVisible));
+      }
+      latestButton.onclick = function () { latestVisible = !latestVisible; updateLatestDisclosure(); };
+      updateLatestDisclosure();
+    }
+""".splitlines(),
         "    applyFns = [];",
         '    document.querySelectorAll("#video-sections ul").forEach(function (ul) {',
         '    var items = Array.prototype.slice.call(ul.querySelectorAll("li[data-id]"));',
@@ -3761,28 +3831,7 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "        report(id, isWatched);",
         "        applyAll();",
         "      });",
-        "      li.querySelectorAll(\".media-toggle, .subtitle-download\").forEach(function (btn) {",
-        "      btn.dataset.label = btn.textContent;",
-        "      btn.addEventListener(\"click\", function () {",
-        "        var endpoint = btn.dataset.action;",
-        "        var rel = decodeURIComponent(",
-        "          li.querySelector(\"a\").getAttribute(\"href\").split(/[?#]/)[0]);",
-        "        btn.disabled = true;",
-        "        btn.textContent = \"\\u2026\";",
-        "        fetch(API + endpoint, {",
-        "          method: \"POST\",",
-        "          headers: { \"Content-Type\": \"application/json\" },",
-        "          body: JSON.stringify({ rel: rel }),",
-        "        }).then(function (r) {",
-        "          if (!r.ok) return r.json().then(function (d) { throw new Error(d.error || (\"HTTP \" + r.status)); });",
-        "          return r.json();",
-        "        }).then(function (d) {",
-        "          pollVideoUpgrade(btn, d.job_id);",
-        "        }).catch(function (e) {",
-        "          vuFail(btn, e.message);",
-        "        });",
-        "      });",
-        "      });",
+        "      bindMediaActions(li);",
         "    });",
         "    });",
         "    // Per-section controls: Hide/Show collapses the list,",
@@ -3928,7 +3977,8 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "            if (pl[plIndex] === item) { plApplyTracks(item); plLoadSubs(item); }",
         "          }",
         "        });",
-        "        if (plChanged) { plSave(); plRender(); }",
+        "        if (plChanged) plSave();",
+        "        plRender();",
         "      })",
         "      .catch(function () {})",
         "      .then(function () { libraryRefreshBusy = false; });",

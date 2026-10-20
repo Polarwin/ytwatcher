@@ -259,6 +259,10 @@ struck through, and moved to the bottom of their list. The watched state
 is kept in the browser's `localStorage` (keyed by the YouTube video ID in
 the filename), so it survives index rebuilds.
 
+Playlist rows use the same title, metadata, and media tools as Latest. The separate
+Latest list starts collapsed; use **Show** to open it. **Add latest** and
+**Auto-add latest** work while it is collapsed.
+
 Each entry also has a **+ Playlist** button. Queued entries are marked
 without relying on color: the button reads **✓ In playlist** (click it
 again to remove the video) and the link gets a "≡" marker and bold text.
