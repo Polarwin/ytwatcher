@@ -32,3 +32,16 @@ for _target, _meaning, _explanation in (
         'en': _meaning, 'meanings': [_explanation, 'DANA: depresión aislada en niveles altos.'],
         'pos': 'noun', 'inf': '',
     }
+
+# Spanish colloquial clipping of película. The source marks it alt-of, which
+# older builds skipped. A Google auto-language retry then cached Sesotho "two".
+# https://en.wiktionary.org/wiki/peli#Spanish
+for _word, _english, _alternatives, _german in (
+        ('peli', 'movie', ['film'], 'Film'),
+        ('pelis', 'movies', ['films'], 'Filme')):
+    for _target, _meaning, _other in (
+            ('en', _english, _alternatives), ('de', _german, []), ('zh', '电影', [])):
+        CORRECTIONS[f'es:{_target}:{_word}'] = {
+            'en': _meaning, 'meanings': _other, 'pos': 'noun', 'inf': '',
+            'replaces': ['two'],
+        }

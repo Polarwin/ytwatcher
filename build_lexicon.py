@@ -170,8 +170,10 @@ def build(pairs, directory):
                 definitions[src][normalized] = own_meanings
                 canonical.add(normalized)
             meta = {"p": pos}
+            aliases = entry.get("alt_of", []) + [v for sense in entry.get("senses", [])
+                                                 for v in sense.get("alt_of", [])]
             lemmas = entry.get("form_of", []) + [v for sense in entry.get("senses", [])
-                                                for v in sense.get("form_of", [])]
+                                                for v in sense.get("form_of", [])] + aliases
             if lemmas and source_word(lemmas[0].get("word")):
                 meta["l"] = key(lemmas[0]["word"], src)
                 if pos == "verb":
@@ -189,7 +191,7 @@ def build(pairs, directory):
                 if values:
                     add(outputs[pair], word, values, forms[normalized], src=src)
                     direct[pair].add(normalized)
-            if not meta.get("l"):
+            if not meta.get("l") or aliases:
                 for form in entry.get("forms", []):
                     value = form.get("form")
                     if not source_word(value) or key(value, src) == normalized:

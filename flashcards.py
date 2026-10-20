@@ -68,11 +68,13 @@ def _connection():
                 with db:
                     for pair, correction in CORRECTIONS.items():
                         src, dst, word = pair.split(':', 2)
+                        previous = ['seemly', word, *correction.get('replaces', [])]
+                        placeholders = ','.join('?' for _ in previous)
                         db.execute('''UPDATE cards SET translation=?,meanings=?,pos=?,inf=?
                             WHERE kind='word' AND src=? AND dst=? AND normalized=?
-                            AND lower(trim(translation)) IN ('seemly', ?) ''',
+                            AND lower(trim(translation)) IN (''' + placeholders + ')',
                             (correction['en'], json.dumps(correction.get('meanings', [])),
-                             correction['pos'], correction['inf'], src, dst, word, word))
+                             correction['pos'], correction['inf'], src, dst, word, *previous))
             _initialized = True
     db = sqlite3.connect(DB_FILE, timeout=15)
     db.row_factory = sqlite3.Row

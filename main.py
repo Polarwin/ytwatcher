@@ -677,38 +677,36 @@ def _google_translate(text, lang="auto", target="en", timeout=15):
     }, timeout=timeout)
     resp.raise_for_status()
     data = resp.json()
+    # A fixed-language request returns ["translation"]. Auto-detection can
+    # return [["translation", "detected-language"]]. Keep both shapes distinct.
+    if not isinstance(data, list):
+        return None
     parts = []
-    for seg in data:
-        # Shape is [["translation"], ...]; language-detection misses come
-        # back as [[word, "detected-lang"]] — lists, skipped here.
-        if (seg and isinstance(seg, list) and isinstance(seg[0], str)
-                and seg[0]):
-            parts.append(seg[0])
+    for segment in data:
+        if isinstance(segment, str) and segment:
+            parts.append(segment)
+        elif (isinstance(segment, list) and segment
+                and isinstance(segment[0], str) and segment[0]):
+            detected = segment[1] if len(segment) > 1 else None
+            if (lang != "auto" and isinstance(detected, str)
+                    and _LANGUAGE_RE.fullmatch(detected)
+                    and lexicon_data.language(detected) != lexicon_data.language(lang)):
+                continue
+            parts.append(segment[0])
     return " ".join(parts).strip() or None
 
 
 def _google_translate_best(word, src="es", dst="en"):
-    """Translate, retrying with auto-detection on echo/miss.
+    """Preserve the known subtitle language; never reinterpret it as another.
 
-    The subtitle language is known, so it is tried first; sl=auto covers
-    the echo cases (proper nouns) and any wrong guesses. Returns the
-    first translation that differs from the input, else the last
-    non-None result.
+    An echoed word is not evidence that the language is wrong. Retrying with
+    auto-detection turned Spanish slang into unrelated foreign-language words.
     """
-    fallback = None
-    for lang in dict.fromkeys((src, "auto")):
-        try:
-            out = _google_translate(word, lang, dst)
-        except Exception as e:
-            log.warning("google translate failed for %r (%s): %s",
-                        word, lang, e)
-            return fallback
-        if not out:
-            continue
-        fallback = out
-        if out.strip().lower() != word.strip().lower():
-            return out
-    return fallback
+    try:
+        return _google_translate(word, src, dst)
+    except Exception as e:
+        log.warning("google translate failed for %r (%s): %s", word, src, e)
+        return None
 
 
 def _wiktionary_spanish_verb(word, timeout=15):
@@ -1595,7 +1593,7 @@ def scan_downloads(download_dir, files=None):
 # Bump when the index.html template changes: the fingerprint below only
 # covers the file listing, so without this an existing index.html would
 # keep the old template until some video is added or removed.
-INDEX_TEMPLATE_VERSION = 120
+INDEX_TEMPLATE_VERSION = 121
 
 
 def static_folder_url(item):
