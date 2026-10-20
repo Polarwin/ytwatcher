@@ -314,6 +314,10 @@ def validate_config(config):
             problems.append(
                 f"{label}: 'subtitles' must be a language code or a list of them"
             )
+        if "require_subtitles" in sub and not isinstance(sub["require_subtitles"], bool):
+            problems.append(f"{label}: 'require_subtitles' must be true or false")
+        if sub.get("require_subtitles") is True and not subtitles:
+            problems.append(f"{label}: 'require_subtitles' needs subtitle languages in 'subtitles'")
         if "shorts_max_duration" in sub and not isinstance(
             sub["shorts_max_duration"], (int, float)
         ):
@@ -5227,10 +5231,11 @@ def download_video(sub, video, download_dir, subdir=None):
     syntax like "es.*"), sidecar subtitles are downloaded too: real subs
     first, auto-generated ones for languages without them
     (--write-auto-subs), normalized to .vtt. A subtitle download failure
-    (e.g. HTTP 429) is retried once without subtitles, so the media still
-    lands: subtitles must not gate the download. Returns
-    (status, file path, duration). status is "ok", "failed",
-    "members_only", or "live"; path and duration are None unless "ok".
+    (e.g. HTTP 429) normally retries once without subtitles. With
+    require_subtitles, fetch usable captions first and never fall back to
+    media only. Returns (status, file path, duration). status is "ok",
+    "failed", "members_only", "live", or "subtitles_unavailable";
+    path and duration are None unless "ok".
     """
     out_dir = Path(download_dir) / sub["name"]
     if subdir:
@@ -5261,6 +5266,43 @@ def download_video(sub, video, download_dir, subdir=None):
             "--convert-subs", "vtt",
         ]
     url = f"https://www.youtube.com/watch?v={video['id']}"
+    required_sidecars = []
+    if sub.get("require_subtitles"):
+        if not sub_flags:
+            raise ValueError("require_subtitles needs configured subtitle languages")
+        # Fetch caption files before requesting any media bytes. A metadata
+        # listing alone cannot guarantee the timedtext endpoint is usable.
+        with tempfile.TemporaryDirectory(prefix="ytwatcher-required-subs-") as folder:
+            try:
+                caption_result = run_yt_dlp([
+                    YT_DLP, "--skip-download", "--no-playlist", "--ignore-errors",
+                    *sub_flags, "--sub-format", "vtt/best",
+                    "-o", str(Path(folder) / (video["id"] + ".%(ext)s")), url,
+                ], context=f"[{sub['name']}] required subtitles {video['id']}")
+            except subprocess.TimeoutExpired:
+                log.warning("[%s] %s: required subtitle download timed out; no media downloaded",
+                            sub["name"], video["id"])
+                return "subtitles_unavailable", None, None
+            for sidecar in Path(folder).iterdir():
+                if (not sidecar.name.startswith(video["id"] + ".")
+                        or sidecar.suffix != ".vtt"):
+                    continue
+                text = sidecar.read_text(encoding="utf-8-sig", errors="replace")
+                if (text.startswith("WEBVTT")
+                        and re.search(r"(?m)^\d{2}(?::\d{2})?:\d{2}[.,]\d{3}\s+-->", text)
+                        and subtitle_words(sidecar)):
+                    required_sidecars.append((sidecar.name[len(video["id"]):], sidecar.read_bytes()))
+            if not required_sidecars:
+                if is_members_only_error(caption_result.stderr):
+                    return "members_only", None, None
+                if is_live_error(caption_result.stderr):
+                    return "live", None, None
+                log.info("[%s] %s: no usable required subtitles for %s; no media downloaded",
+                         sub["name"], video["id"], ",".join(sub_langs))
+                return "subtitles_unavailable", None, None
+        # These captions are already downloaded and validated. Do not request
+        # them again alongside media, where a transient failure could abort it.
+        sub_flags = []
     result = run_yt_dlp(cmd + sub_flags + [url])
     if result.returncode != 0 and sub_flags:
         # A failed subtitle download (e.g. HTTP 429 on the timedtext API)
@@ -5294,6 +5336,14 @@ def download_video(sub, video, download_dir, subdir=None):
             sub["name"], video["id"],
         )
         return "failed", None, None
+    for suffix, content in required_sidecars:
+        target = downloaded.parent / (downloaded.stem + suffix)
+        temporary = _tmp_path(target)
+        try:
+            temporary.write_bytes(content)
+            temporary.replace(target)
+        finally:
+            temporary.unlink(missing_ok=True)
     return "ok", downloaded, parse_duration_print(result.stdout)
 
 
@@ -6073,6 +6123,12 @@ def process_subscription(sub, settings, seen, failed, scan_only=False):
                 # run for hours before its VOD becomes downloadable.
                 seen.discard(video["id"])
                 log.info("[%s] still live, will retry: %s", name, video["title"])
+            elif status == "subtitles_unavailable":
+                # Captions may be published later, or recover from rate limits.
+                # This is a subscription condition, not a media download failure.
+                seen.discard(video["id"])
+                log.info("[%s] required subtitles unavailable, will retry: %s",
+                         name, video["title"])
             elif status == "failed":
                 note_download_failure(name, video, failed, seen)
         except Exception as e:

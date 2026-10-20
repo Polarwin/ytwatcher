@@ -65,6 +65,12 @@ settings:
 #                              language has none; stored as .vtt next to the
 #                              video and shown by the web player.
 
+#   require_subtitles: true    optional; default false. Requires 'subtitles'.
+#                              Fetch a usable published/automatic caption file
+#                              in a requested language BEFORE downloading media.
+#                              No captions or caption errors: no media download;
+#                              retry on later scans without marking it seen.
+
 # Static media gets + Playlist buttons; these folders are never cleaned by the watcher.
 # The shared nginx route serves every folder under /srv/files/static/.
 # Create/move folders there as your normal user (not sudo on an NFS share).

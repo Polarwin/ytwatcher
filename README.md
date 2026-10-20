@@ -59,6 +59,13 @@ the real file is gitignored):
     `#shortvideo`, or `#shortsfeed` (case-insensitive), regardless of duration.
     Also skip videos at or below `shorts_max_duration` seconds (default `60`).
     Original titles are checked too when fetched for matching or exclusions.
+  - `subtitles` — optional subtitle language selectors, such as `["es.*"]`;
+    download published captions, with automatic captions as fallback.
+  - `require_subtitles` — optional (default `false`); requires `subtitles`.
+    Fetch and validate at least one subtitle file in the requested languages
+    before downloading audio/video. If captions are missing or cannot be fetched,
+    skip the media and retry on later scans without marking the video as seen.
+    Published and automatic captions both qualify. Existing files are unaffected.
   - `keep_watched` — optional (default `false`); when `true`, files you
     mark as watched are moved into a `watched` subdirectory of the
     channel folder instead of being deleted.
