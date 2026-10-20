@@ -1605,7 +1605,7 @@ def scan_downloads(download_dir, files=None):
 # Bump when the index.html template changes: the fingerprint below only
 # covers the file listing, so without this an existing index.html would
 # keep the old template until some video is added or removed.
-INDEX_TEMPLATE_VERSION = 124
+INDEX_TEMPLATE_VERSION = 125
 
 
 def static_folder_url(item):
@@ -1663,14 +1663,16 @@ def channel_speeds(config):
 
 
 def fingerprint(groups, site_title="", speeds=None, watched=None, static=None,
-                latest_excluded=None):
+                latest_excluded=None, latest=None):
     """Return a stable hash of the current download listing and page title.
 
     The watched set is part of the hash so that marking a video as
     watched regenerates the page: the "Latest" section filters watched
     entries out even before their files are deleted or archived. The
     latest_excluded channel set is hashed for the same reason: toggling
-    a subscription's exclude_from_latest must rebuild the page.
+    a subscription's exclude_from_latest must rebuild the page. Include the
+    current Latest membership and old-file flags so age windows update even
+    when no files or watched marks change.
     """
     data = []
     for channel, entries in groups.items():
@@ -1679,6 +1681,7 @@ def fingerprint(groups, site_title="", speeds=None, watched=None, static=None,
             "entries": [
                 {"rel": e["rel"], "size": e["size"], "mtime": e["mtime"],
                  "duration": e.get("duration"),
+                 "old": bool(e.get("old")),
                  # Subtitle sidecars influence the page (data-subs), so a
                  # newly added .vtt must also regenerate it.
                  "subs": sorted(e.get("subs", {}).values())}
@@ -1690,10 +1693,11 @@ def fingerprint(groups, site_title="", speeds=None, watched=None, static=None,
     watched_json = json.dumps(sorted(watched or ()), separators=(",", ":"))
     static_json = json.dumps(static or [], sort_keys=True, separators=(",", ":"))
     excluded_json = json.dumps(sorted(latest_excluded or ()), separators=(",", ":"))
+    latest_json = json.dumps([e["rel"] for e in (latest or ())], separators=(",", ":"))
     return hashlib.sha1(
         (f"{INDEX_TEMPLATE_VERSION}\n" + site_title + "\n" + canonical
          + "\n" + speeds_json + "\n" + watched_json + "\n" + static_json
-         + "\n" + excluded_json).encode("utf-8")
+         + "\n" + excluded_json + "\n" + latest_json).encode("utf-8")
     ).hexdigest()
 
 
@@ -4183,8 +4187,6 @@ def update_index_html(download_dir, api_port=DEFAULT_API_PORT,
         )
         channels = len(groups)
         watched = load_watched()
-        fp = fingerprint(groups, site_title, speeds, watched, static,
-                         latest_excluded=latest_excluded)
         index_path = Path(download_dir) / "index.html"
         for name, content in (("sw.js", SERVICE_WORKER_JS),
                               ("manifest.json", PWA_MANIFEST)):
@@ -4197,8 +4199,6 @@ def update_index_html(download_dir, api_port=DEFAULT_API_PORT,
                 tmp = _tmp_path(sidecar)
                 tmp.write_text(content, encoding="utf-8")
                 tmp.replace(sidecar)
-        if read_existing_fingerprint(index_path) == fp:
-            return False, total, channels
         # Newest videos across all channels; the window is controlled by
         # settings.latest_max_age_days (24h in the shipped config), not by
         # a fixed entry count. Watched videos are excluded even before the
@@ -4216,6 +4216,10 @@ def update_index_html(download_dir, api_port=DEFAULT_API_PORT,
         if latest_max_age_days:
             cutoff = time.time() - latest_max_age_days * 86400
             latest = [e for e in latest if e["mtime"] >= cutoff]
+        fp = fingerprint(groups, site_title, speeds, watched, static,
+                         latest_excluded=latest_excluded, latest=latest)
+        if read_existing_fingerprint(index_path) == fp:
+            return False, total, channels
         now_str = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
         html_content = generate_index_html(groups, total, channels, now_str, fp, latest=latest, api_port=api_port, site_title=site_title, speeds=speeds, static=static)
         tmp = _tmp_path(index_path)
