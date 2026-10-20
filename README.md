@@ -341,14 +341,28 @@ is retained only as a fallback when the new English pair is absent.
 Full lexicons rebuild only when the build command is explicitly run. Saved
 per-video word lists are reused across server restarts and preload requests;
 they refresh only when their subtitles, lexicon revision, or format changes.
+The refresh command also updates dictionaries and UI assets in existing local
+learning clips, preserving their media, sentences, and clip IDs. Existing device
+caches need another Preload offline / Save offline to receive the new data.
 
-English meanings use ordered definitions from the Spanish entries. Other pairs
-prefer explicit translations; fallbacks align translations within the same
-English sense label, with part-of-speech filtering and primary-definition
-preference. German spelling retains noun capitalization (`Essen` versus `essen`).
-Chinese uses Mandarin entries, preferring simplified spellings where supplied.
-Conjugated forms inherit translations from their known lemmas. These are
-dictionary meanings; sentence translation supplies context through the LLM.
+Dictionary format 3 keeps each source part of speech and sense separately,
+including grammatical tags, source sense IDs, and same-POS lemma references.
+For example, `criados` keeps both the plural noun linked to `criado` (servant)
+and the participle linked through `criado` to `criar`; a verb cannot overwrite
+the noun. Alternative forms and abbreviations also retain their source links.
+No six-meaning limit is applied. Source order is retained, with rare/archaic
+senses labelled and reviewed defaults retained as labelled additional senses.
+
+Other pairs prefer direct translations. English-pivot translations fill gaps
+only for source words with the same part of speech, and only within one English
+sense. They are labelled separately and link back to the pivot source. The
+lookup UI displays grammatical meanings separately and links to Wiktionary.
+An exact source English definition can bridge to the primary matching English
+sense when its part of speech also matches; that path is labelled Via English.
+A cached projection of the relevant English translation groups is pinned to
+the original dump size/mtime, and preserves sense labels, tags, and source IDs.
+Downloaded sources are reused for this one-time rebuild; rebuilding does not
+call Google or a language model. Old lookup caches cannot override source data.
 
 Downloads and **Preload offline** build/cache the subtitle's word list for every
 supported target of its source language. English entries retain their old

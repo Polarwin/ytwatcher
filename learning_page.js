@@ -4,7 +4,7 @@
   const $ = id => document.getElementById(id), media = $('media'), own = $('my-voice');
   const I = window.YtLessonI18n, t = I.t, ui = I.text;
   const API = '/ytwatcher/api', sentences = pack.sentences, shared = !!pack.shared;
-  const root = new URL('./', location.href).href, cacheName = 'ytwatcher-lesson:' + root + ':v7';
+  const root = new URL('./', location.href).href, cacheName = 'ytwatcher-lesson:' + root + ':v8';
   const labels = {en: 'English', de: 'Deutsch', es: 'Español', zh: '中文', fr: 'Français', it: 'Italiano', pt: 'Português'};
   const uid = () => Array.from(crypto.getRandomValues(new Uint8Array(16)), b => b.toString(16).padStart(2, '0')).join('');
   const normalize = value => value.normalize('NFC').trim().toLocaleLowerCase().replace(/\s+/g, ' ').replace(/[.!?。！？]+$/g, '');
@@ -133,6 +133,17 @@
     return entries[wordKey(word)] || entries[word.toLowerCase()] ||
       (pack.source === 'de' && entries[word.charAt(0).toUpperCase() + word.slice(1).toLowerCase()]);
   }
+  function dictionaryText(value) {
+    if (!value) return '';
+    if (value.senses?.length) return value.senses.map(sense =>
+      [t(sense.pos || ''), (sense.meanings || []).join(' · '),
+       (sense.tags || []).filter(tag => tag !== 'form-of' && tag !== 'alt-of').map(tag => t(tag)).join(', '),
+       sense.form || '', sense.inf ? '← ' + sense.inf : '',
+       (sense.translation_method || sense.method) === 'reviewed' ? t('Reviewed meaning') : (sense.translation_method || sense.method) === 'aligned' ? t('Via English') : '']
+        .filter(Boolean).join(' — ')).join('\n\n');
+    return value.en + (value.meanings?.length ? '\n' + t('Also: {meanings}', {meanings: value.meanings.join(' · ')}) : '') +
+      (value.pos ? '\n' + t(value.pos) : '') + (value.inf ? ' ← ' + value.inf : '');
+  }
   async function lookup(word, dialog = false) {
     pauseAll();
     const chosenTarget = target, chosenSentence = selected, serial = ++lookupSerial;
@@ -144,8 +155,7 @@
       } catch (error) {}
     }
     if (serial !== lookupSerial || chosenTarget !== target || chosenSentence !== selected) return;
-    const message = () => value ? value.en + (value.meanings?.length ? '\n' + t('Also: {meanings}', {meanings: value.meanings.join(' · ')}) : '') +
-      (value.pos ? '\n' + t(value.pos) : '') + (value.inf ? ' ← ' + value.inf : '') : t(shared ? 'Not in this shared clip’s dictionary.' : 'Not in this clip’s offline dictionary. Connect to look up this word.');
+    const message = () => value ? dictionaryText(value) : t(shared ? 'Not in this shared clip’s dictionary.' : 'Not in this clip’s offline dictionary. Connect to look up this word.');
     if (dialog) {
       $('word-dialog-title').textContent = word;
       I.raw($('word-dialog-body'), message);
@@ -598,7 +608,7 @@
       if (!entry || search && !(word + ' ' + entry.en).toLocaleLowerCase().includes(search)) continue;
       const row = document.createElement('tr'), source = document.createElement('td'), meaning = document.createElement('td'), note = document.createElement('td');
       const button = document.createElement('button'); button.type = 'button'; button.textContent = word; button.onclick = () => lookup(word, true);
-      source.append(button); meaning.textContent = entry.en + (entry.meanings?.length ? '\n' + entry.meanings.join(' · ') : '');
+      source.append(button); meaning.textContent = dictionaryText(entry);
       I.raw(note, () => [notes.get(word.toLowerCase()), t(entry.pos || ''), entry.inf ? '← ' + entry.inf : ''].filter(Boolean).join(' · '));
       row.append(source, meaning, note); rows.push(row);
       if (rows.length >= 300) break;

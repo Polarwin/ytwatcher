@@ -1,6 +1,8 @@
 'use strict';
 (() => {
   const messages = {
+  "Reviewed meaning": {"es": "Significado revisado", "de": "Geprüfte Bedeutung", "zh": "已核对释义"},
+  "Via English": {"es": "A través del inglés", "de": "Über Englisch", "zh": "经英语词义对应"},
   "Interface language": {
     "es": "Idioma de la interfaz",
     "de": "Sprache der Oberfläche",

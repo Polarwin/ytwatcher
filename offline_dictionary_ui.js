@@ -69,3 +69,31 @@ async function plPrepareDictionary(item, source, url, cache) {
   plDictCache[plDictionaryKey(item, source)] = data;
   return data;
 }
+// Keep each grammatical meaning together; noun and verb entries must not
+// share one POS label or a verb infinitive inherited by an unrelated noun.
+function plDictionaryBody(data) {
+  if (data.senses && data.senses.length) {
+    return data.senses.map(function (sense) {
+      var meanings = sense.meanings || [];
+      var body = '<b>' + meanings.map(plDictEscape).join(' · ') + '</b>';
+      if (sense.pos) body += '<span class="pl-dict-pos">' + plDictEscape(sense.pos) + '</span>';
+      var tags = (sense.tags || []).filter(function (tag) { return tag !== 'form-of' && tag !== 'alt-of'; });
+      if (tags.length) body += '<span class="pl-dict-pos"> · ' + tags.map(plDictEscape).join(', ') + '</span>';
+      var method = sense.translation_method || sense.method;
+      var label = method === 'reviewed' ? 'Reviewed meaning' : method === 'aligned' ? 'Via English' : '';
+      if (label) body += '<span class="pl-dict-pos"> · ' + plDictEscape(window.YtLessonI18n.t(label)) + '</span>';
+      if (sense.form) body += '<div class="pl-dict-form">' + plDictEscape(sense.form) + '</div>';
+      if (sense.inf) body += '<span class="pl-dict-inf">← ' + plDictEscape(sense.inf) + '</span>';
+      if (sense.source_url && sense.source_url.startsWith('https://en.wiktionary.org/wiki/')) {
+        body += ' <a class="pl-dict-source" target="_blank" rel="noopener noreferrer" href="' + plDictEscape(sense.source_url) + '">Wiktionary</a>';
+      }
+      if (sense.translation_source_url && sense.translation_source_url.startsWith('https://en.wiktionary.org/wiki/')) body += ' <a class="pl-dict-source" target="_blank" rel="noopener noreferrer" href="' + plDictEscape(sense.translation_source_url) + '">English</a>';
+      return '<div class="pl-dict-sense">' + body + '</div>';
+    }).join('');
+  }
+  var body = '<b>' + plDictEscape(data.en) + '</b>';
+  if (data.meanings && data.meanings.length) body += '<span class="pl-dict-alt"> · ' + data.meanings.map(plDictEscape).join(' · ') + '</span>';
+  if (data.pos) body += '<span class="pl-dict-pos">' + plDictEscape(data.pos) + '</span>';
+  if (data.inf) body += '<span class="pl-dict-inf">← ' + plDictEscape(data.inf) + '</span>';
+  return body;
+}

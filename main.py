@@ -824,12 +824,12 @@ def dictionary_lookup(word, src="es", dst="en"):
     if lexicon_data.language(src) == "de":
         cache_key = f"{src}:{dst}:{word}"
     correction = DICTIONARY_CORRECTIONS.get(f"{src}:{dst}:{key}")
-    if correction:
-        return dict(correction)
     lex = lexicon_data.lookup(_lexicon_for(src, dst), word, src)
     offline = lexicon_data.result(lex)
     if offline:
-        return offline  # Rebuilt dictionaries take precedence over old lookup caches.
+        return offline  # Includes labelled reviewed defaults and source alternatives.
+    if correction:
+        return dict(correction)
     with _dictionary_lock:
         global _dictionary_cache
         if _dictionary_cache is None:
@@ -1043,8 +1043,8 @@ def _run_dict_job(vtt, rel_vtt, job):
             lexicon = _lexicon_for(src, dst)
             translated = {}
             for word in words:
-                result = (DICTIONARY_CORRECTIONS.get(f"{src}:{dst}:{word}")
-                          or lexicon_data.result(lexicon_data.lookup(lexicon, word, src)))
+                result = (lexicon_data.result(lexicon_data.lookup(lexicon, word, src))
+                          or DICTIONARY_CORRECTIONS.get(f"{src}:{dst}:{word}"))
                 if result:
                     translated[word] = result
                 job["done"] += 1
@@ -1605,7 +1605,7 @@ def scan_downloads(download_dir, files=None):
 # Bump when the index.html template changes: the fingerprint below only
 # covers the file listing, so without this an existing index.html would
 # keep the old template until some video is added or removed.
-INDEX_TEMPLATE_VERSION = 122
+INDEX_TEMPLATE_VERSION = 124
 
 
 def static_folder_url(item):
@@ -1897,6 +1897,9 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "      background: none; border: none; color: #bbb; cursor: pointer;",
         "      font-size: 1rem; }",
         "    .pl-dict-word { color: #8ab4f8; font-weight: bold; margin-right: .5rem; }",
+        "    .pl-dict-sense + .pl-dict-sense { border-top: 1px solid #345; margin-top: .45rem; padding-top: .45rem; }",
+        "    #pl-dict { max-height: 45vh; overflow: auto; }",
+        "    .pl-dict-form, .pl-dict-source { color: #bbb; font-size: .82em; }",
         "    .pl-dict-pos { color: #bbb; font-size: .85em; margin-left: .4rem; }",
         "    .pl-dict-alt { color: #bbb; margin-left: .4rem; }",
         "    .pl-dict-inf { color: #7bd88a; margin-left: .4rem; }",
@@ -2836,14 +2839,9 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         *Path(__file__).with_name("offline_dictionary_ui.js").read_text(encoding="utf-8").splitlines(),
         f'  var plDictionaryCorrections = {json.dumps(DICTIONARY_CORRECTIONS, ensure_ascii=False)};',
         "  function plDictRender(word, d) {",
-        '    d = plDictionaryCorrections[plBaseLanguage(plDictFrom || plSubLang || "es") + ":" +',
+        '    if (!d.senses || !d.senses.length) d = plDictionaryCorrections[plBaseLanguage(plDictFrom || plSubLang || "es") + ":" +',
         '      plBaseLanguage(plDictToSel.value || "en") + ":" + word.toLowerCase()] || d;',
-        "    var body = \"<b>\" + plDictEscape(d.en) + \"</b>\";",
-        "    if (d.meanings && d.meanings.length) {",
-        "      body += '<span class=\"pl-dict-alt\"> \\u00b7 ' + d.meanings.slice(0, 5).map(plDictEscape).join(\" \\u00b7 \") + \"</span>\";",
-        "    }",
-        "    if (d.pos) body += '<span class=\"pl-dict-pos\">' + plDictEscape(d.pos) + \"</span>\";",
-        "    if (d.inf) body += '<span class=\"pl-dict-inf\">\\u2190 ' + plDictEscape(d.inf) + \"</span>\";",
+        "    var body = plDictionaryBody(d);",
         "    plDictShow(word, body);",
         '    study.record({kind: "word", source: word, translation: d.en,',
         '      src: plDictFrom || plSubLang || "es", dst: plDictToSel.value || "en",',

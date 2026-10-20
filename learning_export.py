@@ -343,7 +343,7 @@ def vocabulary(sentences, source):
         entries = lexicon_data.load(source, target)
         translated = {}
         for word in counts:
-            answer = CORRECTIONS.get(f'{source}:{target}:{word.lower()}') or lexicon_data.result(lexicon_data.lookup(entries, word, source))
+            answer = lexicon_data.result(lexicon_data.lookup(entries, word, source)) or CORRECTIONS.get(f'{source}:{target}:{word.lower()}')
             if answer:
                 translated[word] = answer
         dictionaries[target] = translated
