@@ -1,6 +1,9 @@
 """Token-scoped, expiring lesson files on Frankfurt; uploads use SSH only."""
 import json
+import hashlib
 import logging
+from logging.handlers import RotatingFileHandler
+from datetime import datetime, timezone
 import mimetypes
 from pathlib import Path
 import re
@@ -8,6 +11,7 @@ import shutil
 import sys
 import tarfile
 import time
+import threading
 import urllib.parse
 import uuid
 
@@ -19,6 +23,54 @@ TOKEN = re.compile(r'[a-f0-9]{32}')
 MAX_BYTES = 2 * 1024 ** 3
 MAX_STORAGE_BYTES = 2 * 1024 ** 3
 log = logging.getLogger('ytwatcher.learning-share')
+ACCESS_LOG = ROOT.parent / '.learning-access-logs' / 'access.jsonl'
+_access_logger = None
+_access_lock = threading.Lock()
+
+
+def record_access(handler, status):
+    """Bounded request logs; never record bearer URLs, cookies or credentials."""
+    global _access_logger
+    try:
+        with _access_lock:
+            if _access_logger is None:
+                ACCESS_LOG.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+                ACCESS_LOG.touch(mode=0o600, exist_ok=True)
+                sink = RotatingFileHandler(ACCESS_LOG, maxBytes=10 * 1024 ** 2,
+                                           backupCount=5, encoding='utf-8')
+                sink.setFormatter(logging.Formatter('%(message)s'))
+                _access_logger = logging.getLogger('ytwatcher.learning-share.access')
+                _access_logger.setLevel(logging.INFO)
+                _access_logger.propagate = False
+                _access_logger.addHandler(sink)
+        path = urllib.parse.unquote(urllib.parse.urlsplit(handler.path).path)
+        match = re.fullmatch(r'/learn/([a-f0-9]{32})(?:/([^/]*))?', path)
+        token, name = match.groups() if match else (None, None)
+        info = metadata(token) if token else None
+        asset = (name or 'index.html') if match else None
+        row = {'time': datetime.now(timezone.utc).isoformat(),
+               'method': handler.command, 'status': status,
+               'share_id': hashlib.sha256(token.encode()).hexdigest()[:16] if token else None,
+               'lesson_id': info.get('id') if info else None,
+               'asset': asset if asset in FILES else None,
+               'page_view': handler.command == 'GET' and status == 200 and asset == 'index.html',
+               'user_agent': handler.headers.get('User-Agent', '')[:400]}
+        _access_logger.info(json.dumps(row, ensure_ascii=True))
+    except Exception:
+        # Analytics must not interrupt playback, including when storage is full.
+        log.exception('Could not write learning-page access log')
+
+
+class _AccessHandler:
+    def __init__(self, handler):
+        self.handler = handler
+
+    def __getattr__(self, name):
+        return getattr(self.handler, name)
+
+    def send_response(self, code, message=None):
+        self.handler.send_response(code, message)
+        record_access(self.handler, code)
 
 
 def metadata(token):
@@ -58,6 +110,7 @@ def serve(handler):
     path = urllib.parse.unquote(urllib.parse.urlsplit(handler.path).path)
     if path != '/learn' and not path.startswith('/learn/'):
         return False
+    handler = _AccessHandler(handler)
     match = re.fullmatch(r'/learn/([a-f0-9]{32})(?:/([^/]*))?', path)
     if not match:
         message(handler, 404, 'Learning link not found.')

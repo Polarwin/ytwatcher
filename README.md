@@ -592,6 +592,27 @@ API or library route is exposed. Deploy both Python files together; the remote
 module uses only the Python standard library. Public links are excluded from
 indexing and send a no-referrer policy.
 
+Frankfurt learning requests are recorded as JSON lines in
+`.learning-access-logs/access.jsonl`, exposed on the host through the symlink
+`/tmp/ytwatcher-learning-logs`. Keeping the underlying directory inside the project
+makes it accessible across the downloader's private `/tmp` namespace and restarts.
+The log rotates at 10 MiB with five backups. Records contain UTC time, HTTP method
+and status, lesson ID, a hashed share identifier, asset and user agent; credentials,
+full share URLs and IP addresses are omitted. `page_view: true` marks successful
+GET requests for lesson HTML. Reloads, crawlers and offline-save requests can count;
+offline opens do not reach the server, so this is not a unique-person count.
+To count retained HTML requests on Frankfurt:
+
+```bash
+python3 - <<'PY'
+import json
+from pathlib import Path
+print(sum(bool(json.loads(line).get('page_view'))
+          for path in Path('/tmp/ytwatcher-learning-logs').glob('access.jsonl*')
+          for line in path.read_text().splitlines() if line.strip()))
+PY
+```
+
 ### Learning-page interface languages
 
 Learning pages, the lesson library, export dialogs, and sharing controls support
