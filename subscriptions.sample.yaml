@@ -54,6 +54,9 @@ settings:
 #   shorts_max_duration: 60    videos this many seconds or shorter count
 #                              as Shorts (default 60)
 #
+#   deduplicate_episodes: true optional; skip alternate uploads of the same
+#                              series/season/episode within a channel folder
+#                              (only unambiguous numbered episodes)
 #   keep_watched: true         optional; instead of deleting files you mark
 #                              as watched, move them into a 'watched'
 #                              subdirectory of the channel folder (default

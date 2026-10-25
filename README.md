@@ -61,6 +61,16 @@ the real file is gitignored):
     Original titles are checked too when fetched for matching or exclusions.
   - `subtitles` — optional subtitle language selectors, such as `["es.*"]`;
     download published captions, with automatic captions as fallback.
+  - `deduplicate_episodes` — optional (default `false`); prevent alternate uploads
+    of the same series, season and episode within a source folder. Enabled for
+    Animation in the live configuration. The first completed release wins;
+    bilingual/regular editions do not count as separate episodes. Existing files
+    seed a persistent `.episode-history.json` inside the subscription folder, so
+    deleting media does not erase download history. Unknown or ambiguous episode
+    titles, compilations and split parts are left to the normal filters. This
+    matches episode metadata, not audio/video fingerprints; unnumbered reuploads
+    cannot be detected. Manual downloads remain explicit, and existing duplicates
+    are not removed.
   - `require_subtitles` — optional (default `false`); requires `subtitles`.
     Fetch and validate at least one subtitle file in the requested languages
     before downloading audio/video. If captions are missing or cannot be fetched,

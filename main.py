@@ -328,6 +328,8 @@ def validate_config(config):
                 problems.append(f"{label}: '{key}' must be a number")
         if "keep_watched" in sub and not isinstance(sub["keep_watched"], bool):
             problems.append(f"{label}: 'keep_watched' must be true or false")
+        if "deduplicate_episodes" in sub and not isinstance(sub["deduplicate_episodes"], bool):
+            problems.append(f"{label}: 'deduplicate_episodes' must be true or false")
         if "exclude_from_latest" in sub and not isinstance(
                 sub["exclude_from_latest"], bool):
             problems.append(
@@ -6028,6 +6030,13 @@ def process_subscription(sub, settings, seen, failed, scan_only=False):
             log.error("[%s] failed to list videos from %s: %s", name, url, e)
 
     log.info("[%s] scanned %d recent videos", name, len(videos))
+    episode_history = None
+    if sub.get("deduplicate_episodes"):
+        from episode_history import EpisodeHistory
+        episode_root = Path(settings["download_dir"]) / name
+        episode_history = EpisodeHistory(episode_root, walk_video_files(episode_root))
+        if not scan_only:
+            episode_history.save()
     for video in videos:
         if video["id"] in seen:
             log.info("[%s] skipped (already seen): %s", name, video["title"])
@@ -6138,6 +6147,15 @@ def process_subscription(sub, settings, seen, failed, scan_only=False):
             if not scan_only:
                 seen.add(video["id"])
             continue
+        episode_title = original_title or video["title"]
+        episode_source = video_subdirs.get(video["id"], "")
+        previous_episode = episode_history.find(episode_source, episode_title) if episode_history else None
+        if previous_episode and previous_episode["video_id"] != video["id"]:
+            log.info("[%s] skipped duplicate episode: %s (already downloaded as %s: %s)",
+                     name, video["title"], previous_episode["video_id"], previous_episode["title"])
+            if not scan_only:
+                seen.add(video["id"])
+            continue
         if scan_only:
             log.info("[%s] new, MATCHED (would download): %s", name, video["title"])
             continue
@@ -6153,6 +6171,9 @@ def process_subscription(sub, settings, seen, failed, scan_only=False):
                 sub, video, settings["download_dir"],
                 subdir=video_subdirs.get(video["id"]))
             if status == "ok":
+                if episode_history:
+                    episode_history.remember(episode_source, episode_title, video["id"])
+                    episode_history.save()
                 failed.pop(video["id"], None)
                 if downloaded:
                     # File date/time should reflect the YouTube upload
