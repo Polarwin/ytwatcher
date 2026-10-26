@@ -384,6 +384,14 @@ lookup fallback. No LLM or Google calls are made during lexicon building or
 offline preload. Sentence translations remain on demand. Refresh the page and
 run **Preload offline** again to update dictionaries already cached on a phone.
 
+On each device, cached playlist media, subtitles and word dictionaries expire
+90 minutes after the server records a watched mark. Undoing the mark cancels
+pending expiry. Cleanup runs roughly once per minute while the library is
+visible, and when it opens, resumes or reconnects. A closed browser postpones
+cleanup until the next opening; offline cleanup uses the last confirmed marks.
+The current video is retained while playing on that page. Unwatched downloads,
+exported learning clips and server retention settings are unaffected.
+
 ### Vocabulary and sentence flashcards
 
 The offline lexicon builder uses the source word's ordered English definitions

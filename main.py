@@ -1607,7 +1607,7 @@ def scan_downloads(download_dir, files=None):
 # Bump when the index.html template changes: the fingerprint below only
 # covers the file listing, so without this an existing index.html would
 # keep the old template until some video is added or removed.
-INDEX_TEMPLATE_VERSION = 125
+INDEX_TEMPLATE_VERSION = 126
 
 
 def static_folder_url(item):
@@ -2298,6 +2298,7 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "  }",
         "  function save(s) { localStorage.setItem(KEY, JSON.stringify(Array.from(s))); }",
         "  var watched = load();",
+        *Path(__file__).with_name("offline_cache_expiry.js").read_text(encoding="utf-8").splitlines(),
         "  // Per-section UI state (collapsed / show-old), keyed by channel",
         "  // name and persisted across reloads and library refreshes.",
         '  var SEC_KEY = "ytwatcher:section-state";',
@@ -2347,6 +2348,8 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "  }).then(function (d) {",
         "    watched = new Set(d.ids || []);",
         "    save(watched);",
+        "    plCacheExpirySync(d);",
+        "    plCacheExpiryRefresh();",
         "    // Drop playlist entries whose files are gone: watched-marked",
         "    // files are deleted or moved to watched/ at the next scan",
         "    // round, leaving dead links in the stored playlist.",
@@ -2371,6 +2374,9 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         '      body: JSON.stringify({ id: id, watched: isWatched }),',
         "    }).then(function (r) {",
         '      if (!r.ok) throw new Error("HTTP " + r.status);',
+        "      return r.json();",
+        "    }).then(function (data) {",
+        "      plCacheExpiryMark(id, isWatched, data.marked_at);",
         '      watchStatus.textContent = "";',
         "    }).catch(function () {",
         "      // The server did not record the mark: undo the optimistic",
@@ -3670,6 +3676,8 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "    btn.disabled = true;",
         "    try {",
         "      var cache = await caches.open(\"ytwatcher-media-v1\");",
+        "      var expiryState = plCacheExpiryRead();",
+        "      plCacheExpiryRemember(expiryState); plCacheExpiryWrite(expiryState);",
         "      var done = 0, failed = 0, dictPending = 0, coverage = {};",
         "      for (var i = 0; i < pl.length; i++) {",
         "        btn.textContent = \"Caching \" + (i + 1) + \"/\" + pl.length + \"…\";",
@@ -4471,7 +4479,8 @@ class ApiHandler(BaseHTTPRequestHandler):
             # marks sync across browsers and the server stays the source
             # of truth.
             with _watched_lock:
-                self._json(200, {"ids": sorted(load_watched())})
+                marks = load_watched_marks()
+                self._json(200, {"ids": sorted(marks), "marks": marks})
         elif self.path == "/config":
             try:
                 body = CONFIG_FILE.read_bytes()
@@ -4714,7 +4723,7 @@ class ApiHandler(BaseHTTPRequestHandler):
                 "marked %s: %s",
                 "watched" if data.get("watched") else "unwatched", video_id,
             )
-            self._json(200, {"ok": True})
+            self._json(200, {"ok": True, "marked_at": marks.get(video_id)})
         except (ValueError, json.JSONDecodeError) as e:
             log.warning("bad /watched request: %s", e)
             self._json(400, {"error": str(e)})
