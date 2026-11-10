@@ -318,6 +318,19 @@ def validate_config(config):
             problems.append(f"{label}: 'require_subtitles' must be true or false")
         if sub.get("require_subtitles") is True and not subtitles:
             problems.append(f"{label}: 'require_subtitles' needs subtitle languages in 'subtitles'")
+        speech_filter = sub.get("speech_filter")
+        if speech_filter is not None:
+            if not isinstance(speech_filter, dict):
+                problems.append(f"{label}: 'speech_filter' must be a mapping")
+            else:
+                if not isinstance(speech_filter.get("enabled", False), bool):
+                    problems.append(f"{label}: speech_filter.enabled must be true or false")
+                for key, default in (("min_duration", 1200), ("min_gap", 30), ("padding", 2)):
+                    value = speech_filter.get(key, default)
+                    if not isinstance(value, (int, float)) or isinstance(value, bool) or not 0 < value < 86400:
+                        problems.append(f"{label}: speech_filter.{key} must be a positive number below 86400")
+                if speech_filter.get("enabled") and "audio" not in sub.get("quality", ""):
+                    problems.append(f"{label}: speech_filter requires an audio download quality")
         if "shorts_max_duration" in sub and not isinstance(
             sub["shorts_max_duration"], (int, float)
         ):
@@ -5340,9 +5353,14 @@ def download_video(sub, video, download_dir, subdir=None):
         ]
     url = f"https://www.youtube.com/watch?v={video['id']}"
     required_sidecars = []
-    if sub.get("require_subtitles"):
+    speech_options = sub.get("speech_filter") or {}
+    filter_speech = bool(speech_options.get("enabled")) and (
+        video.get("duration") is None or video["duration"] > speech_options.get("min_duration", 1200))
+    if sub.get("require_subtitles") or filter_speech:
         if not sub_flags:
-            raise ValueError("require_subtitles needs configured subtitle languages")
+            if sub.get("require_subtitles"):
+                raise ValueError("require_subtitles needs configured subtitle languages")
+            sub_flags = ["--write-subs", "--write-auto-subs", "--sub-langs", "en.*", "--convert-subs", "vtt"]
         # Fetch caption files before requesting any media bytes. A metadata
         # listing alone cannot guarantee the timedtext endpoint is usable.
         with tempfile.TemporaryDirectory(prefix="ytwatcher-required-subs-") as folder:
@@ -5353,9 +5371,11 @@ def download_video(sub, video, download_dir, subdir=None):
                     "-o", str(Path(folder) / (video["id"] + ".%(ext)s")), url,
                 ], context=f"[{sub['name']}] required subtitles {video['id']}")
             except subprocess.TimeoutExpired:
-                log.warning("[%s] %s: required subtitle download timed out; no media downloaded",
+                log.warning("[%s] %s: subtitle prefetch timed out",
                             sub["name"], video["id"])
-                return "subtitles_unavailable", None, None
+                if sub.get("require_subtitles"):
+                    return "subtitles_unavailable", None, None
+                caption_result = None
             for sidecar in Path(folder).iterdir():
                 if (not sidecar.name.startswith(video["id"] + ".")
                         or sidecar.suffix != ".vtt"):
@@ -5365,7 +5385,7 @@ def download_video(sub, video, download_dir, subdir=None):
                         and re.search(r"(?m)^\d{2}(?::\d{2})?:\d{2}[.,]\d{3}\s+-->", text)
                         and subtitle_words(sidecar)):
                     required_sidecars.append((sidecar.name[len(video["id"]):], sidecar.read_bytes()))
-            if not required_sidecars:
+            if not required_sidecars and sub.get("require_subtitles"):
                 if is_members_only_error(caption_result.stderr):
                     return "members_only", None, None
                 if is_live_error(caption_result.stderr):
@@ -5373,8 +5393,8 @@ def download_video(sub, video, download_dir, subdir=None):
                 log.info("[%s] %s: no usable required subtitles for %s; no media downloaded",
                          sub["name"], video["id"], ",".join(sub_langs))
                 return "subtitles_unavailable", None, None
-        # These captions are already downloaded and validated. Do not request
-        # them again alongside media, where a transient failure could abort it.
+        # Reuse prefetched captions. If optional captions failed, the speech
+        # filter falls back to CPU VAD rather than requesting captions again.
         sub_flags = []
     result = run_yt_dlp(cmd + sub_flags + [url])
     if result.returncode != 0 and sub_flags:
@@ -5417,7 +5437,20 @@ def download_video(sub, video, download_dir, subdir=None):
             temporary.replace(target)
         finally:
             temporary.unlink(missing_ok=True)
-    return "ok", downloaded, parse_duration_print(result.stdout)
+    duration = parse_duration_print(result.stdout)
+    if filter_speech:
+        try:
+            from speech_filter import process
+            tracks = [p for p in downloaded.parent.iterdir()
+                      if p.name.startswith(downloaded.stem + ".") and p.suffix == ".vtt"]
+            original_duration = duration
+            downloaded, duration = process(downloaded, tracks, speech_options)
+            log.info("[%s] %s: speech filter completed; duration %s -> %.1fs",
+                     sub["name"], video["id"], original_duration, duration)
+        except Exception:
+            log.exception("[%s] %s: speech filtering failed; retaining original media",
+                          sub["name"], video["id"])
+    return "ok", downloaded, duration
 
 
 def download_manually(url, out_dir, fmt=None, sort=None, job_id=None):

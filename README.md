@@ -71,6 +71,38 @@ the real file is gitignored):
     matches episode metadata, not audio/video fingerprints; unnumbered reuploads
     cannot be detected. Manual downloads remain explicit, and existing duplicates
     are not removed.
+  - `speech_filter` — optional mapping, disabled by default. The live YahooFinance
+    subscription enables it only for videos **longer than 20 minutes**. All other
+    subscriptions retain their normal downloads. Edit `subscriptions.yaml`:
+
+    ```yaml
+    speech_filter:
+      enabled: true
+      min_duration: 1200  # exclusive lower bound, seconds
+      min_gap: 30        # minimum stretch without detected speech
+      padding: 2        # retain around speech boundaries
+    ```
+
+    Captions are fetched before media. Usable caption timestamps identify long
+    gaps, ignoring music/noise annotations; empty or clearly truncated captions
+    fall back to the pinned [Silero VAD](https://github.com/snakers4/silero-vad)
+    ONNX model on CPU. Install `.venv/bin/pip install -r requirements-speech-filter.txt`.
+    The model is checksum-verified and cached in `.cache/silero-vad/`; initial
+    download needs internet. FFmpeg cuts and joins the retained audio to AAC/m4a,
+    and rewrites all VTT timestamps. Word dictionaries are regenerated afterward.
+    The original is kept if detection, rendering or installation fails. Processing
+    is for audio-only subscriptions; it does not transcribe speech or use a GPU/LLM.
+    Missing speech in captions or VAD mistakes can affect cuts: this detects
+    non-speech intervals, not a guaranteed music classification. A per-video
+    `.speech-filter.json` report records the cuts and method. Existing files are
+    not automatically rewritten. To analyse an existing file without changing it:
+
+    ```bash
+    .venv/bin/python speech_filter.py /path/to/video.webm \
+      --subtitle /path/to/video.en.vtt --report /tmp/speech-report.json \
+      --preview /tmp/speech-preview.m4a
+    ```
+
   - `require_subtitles` — optional (default `false`); requires `subtitles`.
     Fetch and validate at least one subtitle file in the requested languages
     before downloading audio/video. If captions are missing or cannot be fetched,
