@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Manually download a video with yt-dlp into download_dir/manually/.
 
-Defaults to the best quality up to 720p; override with -f/--format or
+Defaults to audio only; override with -f/--format or
 -S/--format-sort exactly as in yt-dlp. Downloaded video IDs are added to
 state.json so the watcher doesn't re-download them, and index.html is
 rebuilt so the file shows up immediately. Because the filename carries
@@ -25,12 +25,12 @@ from main import (
 def main():
     parser = argparse.ArgumentParser(
         description="Manually download a video into download_dir/manually/ "
-                    "(default: best quality up to 720p)",
+                    "(default: audio only)",
     )
     parser.add_argument(
         "-f", "--format", default=None,
         help="yt-dlp format string, passed through as -f (if neither -f "
-             "nor -S is given, defaults to best quality up to 720p)",
+             "nor -S is given, defaults to audio only)",
     )
     parser.add_argument(
         "-S", "--format-sort", default=None,

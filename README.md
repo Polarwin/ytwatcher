@@ -198,13 +198,12 @@ progress/errors; the library and active player's subtitle tracks refresh when
 the job completes. The media itself is not downloaded again.
 
 The index page has a download form at the top: paste a video URL, pick a
-quality (720p / Best / Audio only), and click **Download**. The page polls
+quality (Audio only by default, with 720p / Best available), and click **Download**. The page polls
 the API for the job status and reloads once the file appears.
 
 The same thing from the command line: `manual_download.py` downloads a
-single video by URL into `download_dir/manually/`, using the best quality
-up to 720p by default
-(`bestvideo[height<=720]+bestaudio/best[height<=720]`). Override the
+single video by URL into `download_dir/manually/`, using audio only
+(`bestaudio`) by default. Override the
 quality with `-f` or `-S`, passed through to yt-dlp exactly as-is:
 
 ```bash

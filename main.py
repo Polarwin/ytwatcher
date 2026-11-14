@@ -467,7 +467,7 @@ MANUAL_QUALITY_PRESETS = {
 }
 
 # Default format for manual_download.py when neither -f nor -S is given.
-MANUAL_DEFAULT_FORMAT = MANUAL_QUALITY_PRESETS["720"]
+MANUAL_DEFAULT_FORMAT = MANUAL_QUALITY_PRESETS["audio"]
 
 # In-memory status of recent manual download jobs started via the API.
 MAX_DOWNLOAD_JOBS = 20
@@ -1620,7 +1620,7 @@ def scan_downloads(download_dir, files=None):
 # Bump when the index.html template changes: the fingerprint below only
 # covers the file listing, so without this an existing index.html would
 # keep the old template until some video is added or removed.
-INDEX_TEMPLATE_VERSION = 126
+INDEX_TEMPLATE_VERSION = 127
 
 
 def static_folder_url(item):
@@ -1991,9 +1991,9 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         '        <input type="url" id="dl-url" '
         'placeholder="https://www.youtube.com/watch?v=&hellip;" required>',
         '        <select id="dl-quality">',
-        '          <option value="720" selected>720p</option>',
+        '          <option value="720">720p</option>',
         '          <option value="best">Best</option>',
-        '          <option value="audio">Audio only</option>',
+        '          <option value="audio" selected>Audio only</option>',
         '        </select>',
         '        <button type="submit">Download</button>',
         '        <span class="tool-status" id="dl-status"></span>',
@@ -4802,7 +4802,7 @@ class ApiHandler(BaseHTTPRequestHandler):
             self._json(400, {"error": str(e)})
             return
         url = str(data.get("url", "")).strip()
-        quality = data.get("quality", "")
+        quality = data.get("quality", "audio")
         if not url.startswith(("http://", "https://")):
             self._json(400, {"error": "url must start with http:// or https://"})
             return
