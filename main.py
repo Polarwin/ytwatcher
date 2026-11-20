@@ -1620,7 +1620,7 @@ def scan_downloads(download_dir, files=None):
 # Bump when the index.html template changes: the fingerprint below only
 # covers the file listing, so without this an existing index.html would
 # keep the old template until some video is added or removed.
-INDEX_TEMPLATE_VERSION = 127
+INDEX_TEMPLATE_VERSION = 128
 
 
 def static_folder_url(item):
@@ -1987,8 +1987,8 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
 
     lines.extend([
         '    <section class="tools">',
-        '      <form id="dl-form">',
-        '        <input type="url" id="dl-url" '
+        '      <form id="dl-form" autocomplete="off">',
+        '        <input type="url" id="dl-url" autocomplete="off" '
         'placeholder="https://www.youtube.com/watch?v=&hellip;" required>',
         '        <select id="dl-quality">',
         '          <option value="720">720p</option>',
