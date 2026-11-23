@@ -16,6 +16,7 @@ import html
 import ipaddress
 import json
 import logging
+import math
 from logging.handlers import RotatingFileHandler
 import os
 import re
@@ -1620,7 +1621,7 @@ def scan_downloads(download_dir, files=None):
 # Bump when the index.html template changes: the fingerprint below only
 # covers the file listing, so without this an existing index.html would
 # keep the old template until some video is added or removed.
-INDEX_TEMPLATE_VERSION = 128
+INDEX_TEMPLATE_VERSION = 129
 
 
 def static_folder_url(item):
@@ -2311,6 +2312,7 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "  }",
         "  function save(s) { localStorage.setItem(KEY, JSON.stringify(Array.from(s))); }",
         "  var watched = load();",
+        *Path(__file__).with_name("watched_sync.js").read_text(encoding="utf-8").splitlines(),
         *Path(__file__).with_name("offline_cache_expiry.js").read_text(encoding="utf-8").splitlines(),
         "  // Per-section UI state (collapsed / show-old), keyed by channel",
         "  // name and persisted across reloads and library refreshes.",
@@ -2351,22 +2353,23 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "    });",
         "  }",
         '  var watchStatus = document.getElementById("watch-status");',
-        "  // The server (watched.json) is the source of truth: replace the",
-        "  // local set with its IDs so marks sync across browsers, un-marks",
-        "  // propagate, and stale localStorage heals. On failure keep the",
-        "  // local state.",
-        '  fetch(API + "/watched").then(function (r) {',
+        "  var watchedSnapshotGeneration;",
+        "  // Sync queued local changes first, then overlay any still pending",
+        "  // intent on the server snapshot. Offline changes survive reloads.",
+        "  plWatchedFlush().then(function () {",
+        "    watchedSnapshotGeneration = plCacheExpiryGeneration;",
+        '    return fetch(API + "/watched", {cache: "no-store"});',
+        "  }).then(function (r) {",
         '    if (!r.ok) throw new Error("HTTP " + r.status);',
         "    return r.json();",
         "  }).then(function (d) {",
-        "    watched = new Set(d.ids || []);",
-        "    save(watched);",
-        "    plCacheExpirySync(d);",
+        "    if (watchedSnapshotGeneration !== plCacheExpiryGeneration) return;",
+        "    plWatchedApplyRemote(d);",
         "    plCacheExpiryRefresh();",
         "    // Drop playlist entries whose files are gone: watched-marked",
         "    // files are deleted or moved to watched/ at the next scan",
         "    // round, leaving dead links in the stored playlist.",
-        "    var serverWatched = new Set(d.ids || []);",
+        "    var serverWatched = watched;",
         "    var playing = plIndex >= 0 ? pl[plIndex] : null;",
         "    pl = pl.filter(function (item) {",
         "      var id = plItemId(item);",
@@ -2380,27 +2383,6 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         "    plRender();",
         "    applyAll();",
         "  }).catch(function () {});",
-        "  function report(id, isWatched) {",
-        '    fetch(API + "/watched", {',
-        '      method: "POST",',
-        '      headers: { "Content-Type": "text/plain" },',
-        '      body: JSON.stringify({ id: id, watched: isWatched }),',
-        "    }).then(function (r) {",
-        '      if (!r.ok) throw new Error("HTTP " + r.status);',
-        "      return r.json();",
-        "    }).then(function (data) {",
-        "      plCacheExpiryMark(id, isWatched, data.marked_at);",
-        '      watchStatus.textContent = "";',
-        "    }).catch(function () {",
-        "      // The server did not record the mark: undo the optimistic",
-        "      // local change. Without the server record the file would",
-        "      // never be deleted, so don't pretend it is marked.",
-        "      if (isWatched) { watched.delete(id); } else { watched.add(id); }",
-        "      save(watched);",
-        "      applyAll();",
-        '      watchStatus.textContent = "watched mark NOT saved (API unreachable) \\u2014 try again";',
-        "    });",
-        "  }",
         "  var dlForm = document.getElementById(\"dl-form\");",
         "  var dlStatus = document.getElementById(\"dl-status\");",
         "  function pollDownloads(jobId) {",
@@ -4728,7 +4710,11 @@ class ApiHandler(BaseHTTPRequestHandler):
             with _watched_lock:
                 marks = load_watched_marks()
                 if data.get("watched"):
-                    marks[video_id] = time.time()
+                    stamp = data.get("marked_at", time.time())
+                    if (not isinstance(stamp, (int, float)) or isinstance(stamp, bool)
+                            or not math.isfinite(stamp) or stamp < 0):
+                        raise ValueError("marked_at must be a non-negative timestamp")
+                    marks[video_id] = min(float(stamp), time.time())
                 else:
                     marks.pop(video_id, None)
                 save_watched_marks(marks)

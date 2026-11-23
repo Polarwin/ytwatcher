@@ -416,12 +416,23 @@ offline preload. Sentence translations remain on demand. Refresh the page and
 run **Preload offline** again to update dictionaries already cached on a phone.
 
 On each device, cached playlist media, subtitles and word dictionaries expire
-90 minutes after the server records a watched mark. Undoing the mark cancels
+90 minutes after a video is marked watched, including offline. Undoing the mark cancels
 pending expiry. Cleanup runs roughly once per minute while the library is
 visible, and when it opens, resumes or reconnects. A closed browser postpones
 cleanup until the next opening; offline cleanup uses the last confirmed marks.
 The current video is retained while playing on that page. Unwatched downloads,
 exported learning clips and server retention settings are unaffected.
+
+Watched/unwatched changes (including Autowatch) are saved in a durable queue on
+the device before sending them to the server. They survive closing/reopening the
+page, and retry on reconnect, resume, opening and once per minute while visible.
+The latest queued change per video is applied; pending local changes take
+precedence over server snapshots until acknowledged. A status message shows
+how many changes are waiting. Reconnection must reach the home ytwatcher server,
+not just the internet. Original watched timestamps are sent on every retry, so
+the 90-minute server/device cleanup period does not restart on synchronization.
+Clearing browser site data removes unsynced changes. Refresh online once after
+upgrading to get the new sync code in the offline page copy.
 
 ### Vocabulary and sentence flashcards
 

@@ -55,6 +55,12 @@ function plCacheExpirySync(data) {
     if (/^m_?[a-f0-9]{10}$/.test(id) && !(id in marks) &&
         Date.now() - state.marks[id] >= plCacheExpiryGrace) marks[id] = state.marks[id];
   });
+  // Unsynced local intent takes precedence until the server acknowledges it.
+  var pending = plWatchedPending();
+  Object.keys(pending).forEach(function (id) {
+    if (pending[id].watched) marks[id] = pending[id].marked_at * 1000;
+    else delete marks[id];
+  });
   state.marks = marks;
   plCacheExpiryRemember(state);
   plCacheExpiryWrite(state);
@@ -88,6 +94,7 @@ async function plCacheExpiryRefresh() {
   if (plCacheExpiryBusy || document.hidden) return;
   plCacheExpiryBusy = true;
   try {
+    await plWatchedFlush();
     try {
       var generation = plCacheExpiryGeneration;
       var controller = new AbortController();
@@ -95,7 +102,7 @@ async function plCacheExpiryRefresh() {
       try {
         var response = await fetch(API + '/watched', {cache: 'no-store', signal: controller.signal});
         var data = response.ok ? await response.json() : null;
-        if (data && generation === plCacheExpiryGeneration) plCacheExpirySync(data);
+        if (data && generation === plCacheExpiryGeneration) plWatchedApplyRemote(data);
       } finally { clearTimeout(timeout); }
     } catch (e) { /* Offline: use previously confirmed watched timestamps. */ }
     await plCacheExpirySweep();
