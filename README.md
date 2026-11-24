@@ -434,6 +434,15 @@ the 90-minute server/device cleanup period does not restart on synchronization.
 Clearing browser site data removes unsynced changes. Refresh online once after
 upgrading to get the new sync code in the offline page copy.
 
+**Mark videos older than 2 days watched** uses the dates shown in the library
+(more than 48 hours old). It includes folded sections and hidden old entries,
+and counts duplicate Latest rows only once. Categories configured with
+`keep_watched: true` (such as Animation and Espanol), and static learning content,
+are excluded. After confirming the count, eligible videos are marked watched and
+removed from the playlist. If the current item is removed, playback continues
+with the next remaining item, following Repeat at the end. Offline changes use
+the normal durable sync queue. Files follow the existing 90-minute grace period.
+
 ### Vocabulary and sentence flashcards
 
 The offline lexicon builder uses the source word's ordered English definitions

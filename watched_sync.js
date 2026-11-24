@@ -71,20 +71,69 @@ async function plWatchedSend() {
     else await send();
   } finally { plWatchedSyncBusy = false; plWatchedStatus(); }
 }
-function report(id, isWatched) {
+function plWatchedQueueChanges(changes) {
   var pending = plWatchedPending();
   var stamp = Date.now() / 1000;
-  pending[id] = {watched: isWatched, marked_at: stamp, token: stamp + ':' + Math.random()};
+  changes.forEach(function (change) {
+    pending[change.id] = {watched: change.watched, marked_at: stamp, token: stamp + ':' + Math.random()};
+  });
   try {
     localStorage.setItem(plWatchedPendingKey, JSON.stringify(pending));
   } catch (e) {
+    watchStatus.textContent = 'Watched change could not be saved on this device.';
+    return false;
+  }
+  plCacheExpiryMarkMany(changes, stamp);
+  plWatchedStatus();
+  return true;
+}
+function report(id, isWatched) {
+  if (!plWatchedQueueChanges([{id: id, watched: isWatched}])) {
     if (isWatched) watched.delete(id); else watched.add(id);
     save(watched); applyAll();
-    watchStatus.textContent = 'Watched change could not be saved on this device.';
     return;
   }
-  plCacheExpiryMark(id, isWatched, stamp);
-  plWatchedStatus();
   plWatchedFlush();
 }
 watched = plWatchedOverlay(watched);
+
+document.getElementById('watch-old').addEventListener('click', function () {
+  var protectedIds = new Set(), candidates = new Set();
+  var cutoff = Date.now() / 1000 - 2 * 86400;
+  var entries = document.querySelectorAll('#video-sections li[data-id]');
+  entries.forEach(function (li) {
+    if (li.dataset.keepWatched === 'true') protectedIds.add(li.dataset.id);
+  });
+  // Include folded sections and old hidden rows; ignore duplicate Latest rows.
+  entries.forEach(function (li) {
+    var age = Number(li.dataset.added), id = li.dataset.id;
+    if (li.dataset.added && Number.isFinite(age) && age < cutoff &&
+        !protectedIds.has(id)) candidates.add(id);
+  });
+  var status = document.getElementById('watch-old-status');
+  var changes = Array.from(candidates).filter(function (id) { return !watched.has(id); })
+    .map(function (id) { return {id: id, watched: true}; });
+  var oldPlaylist = pl.slice(), current = plIndex >= 0 ? pl[plIndex] : null;
+  var remaining = pl.filter(function (item) { return !candidates.has(plItemId(item)); });
+  var removed = pl.length - remaining.length;
+  if (!changes.length && !removed) { status.textContent = 'No eligible unwatched videos older than 2 days.'; return; }
+  if (!window.confirm('Mark ' + changes.length + ' videos older than 2 days as watched and remove ' + removed + ' playlist items? Categories that keep watched files are excluded.')) return;
+  if (changes.length && !plWatchedQueueChanges(changes)) return;
+  candidates.forEach(function (id) { watched.add(id); });
+  save(watched);
+  var next = null;
+  if (current && !remaining.includes(current)) {
+    next = oldPlaylist.slice(plIndex + 1).find(function (item) { return remaining.includes(item); });
+    if (!next && plRepeat.checked) next = remaining[0];
+    plVideo.pause();
+    if (!next) plPlayer.hidden = true;
+  }
+  pl = remaining;
+  plIndex = current ? pl.indexOf(current) : -1;
+  plSave();
+  if (next) plPlayAt(pl.indexOf(next));
+  else plSavePos();
+  applyAll();
+  status.textContent = changes.length + ' videos marked watched; ' + removed + ' removed from playlist.';
+  plWatchedFlush();
+});

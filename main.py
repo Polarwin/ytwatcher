@@ -1621,7 +1621,7 @@ def scan_downloads(download_dir, files=None):
 # Bump when the index.html template changes: the fingerprint below only
 # covers the file listing, so without this an existing index.html would
 # keep the old template until some video is added or removed.
-INDEX_TEMPLATE_VERSION = 129
+INDEX_TEMPLATE_VERSION = 130
 
 
 def static_folder_url(item):
@@ -1679,7 +1679,7 @@ def channel_speeds(config):
 
 
 def fingerprint(groups, site_title="", speeds=None, watched=None, static=None,
-                latest_excluded=None, latest=None):
+                latest_excluded=None, latest=None, keep_channels=None):
     """Return a stable hash of the current download listing and page title.
 
     The watched set is part of the hash so that marking a video as
@@ -1710,10 +1710,11 @@ def fingerprint(groups, site_title="", speeds=None, watched=None, static=None,
     static_json = json.dumps(static or [], sort_keys=True, separators=(",", ":"))
     excluded_json = json.dumps(sorted(latest_excluded or ()), separators=(",", ":"))
     latest_json = json.dumps([e["rel"] for e in (latest or ())], separators=(",", ":"))
+    kept_json = json.dumps(sorted(keep_channels or ()), separators=(",", ":"))
     return hashlib.sha1(
         (f"{INDEX_TEMPLATE_VERSION}\n" + site_title + "\n" + canonical
          + "\n" + speeds_json + "\n" + watched_json + "\n" + static_json
-         + "\n" + excluded_json + "\n" + latest_json).encode("utf-8")
+         + "\n" + excluded_json + "\n" + latest_json + "\n" + kept_json).encode("utf-8")
     ).hexdigest()
 
 
@@ -1729,9 +1730,10 @@ def read_existing_fingerprint(index_path):
     return match.group(1) if match else None
 
 
-def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_port=DEFAULT_API_PORT, site_title=DEFAULT_SITE_TITLE, speeds=None, static=None):
+def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_port=DEFAULT_API_PORT, site_title=DEFAULT_SITE_TITLE, speeds=None, static=None, keep_channels=None):
     """Build the index.html page."""
     latest = latest or []
+    keep_channels = set(keep_channels or ())
     escaped_title = html.escape(site_title)
     speeds_json = json.dumps(speeds or {}, ensure_ascii=False)
     # href (without ?v=) -> duration seconds, so the playlist can show
@@ -1958,6 +1960,10 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         'title="Rescan the download folders and regenerate this page '
         '(takes a moment on large libraries)">Rebuild index</button> '
         '<span class="tool-status" id="rebuild-status"></span></p>',
+        '      <p><button class="watch-btn" type="button" id="watch-old" '
+        'title="Use the library dates; exclude categories that keep watched files">'
+        'Mark videos older than 2 days watched</button> '
+        '<span class="tool-status" id="watch-old-status" role="status"></span></p>',
         '      <p class="tool-status" id="watch-status"></p>',
         "    </header>",
     ]
@@ -2137,6 +2143,9 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         if show_channel:
             meta_parts.insert(0, html.escape(entry.get("channel", "")))
         data_attr = f' data-id="{entry_id(entry)}"'
+        data_attr += f' data-added="{entry["mtime"]}"'
+        if entry.get("channel", entry["rel"].split("/")[0]) in keep_channels:
+            data_attr += ' data-keep-watched="true"'
         # Latest entries carry their channel so collapsing a section can
         # also hide them there (see applyLatestVisibility in the page JS).
         if show_channel:
@@ -4192,6 +4201,8 @@ def update_index_html(download_dir, api_port=DEFAULT_API_PORT,
         )
         channels = len(groups)
         watched = load_watched()
+        keep_channels = {s["name"] for s in config.get("subscriptions", [])
+                         if isinstance(s, dict) and s.get("keep_watched") and "name" in s}
         index_path = Path(download_dir) / "index.html"
         for name, content in (("sw.js", SERVICE_WORKER_JS),
                               ("manifest.json", PWA_MANIFEST)):
@@ -4222,11 +4233,11 @@ def update_index_html(download_dir, api_port=DEFAULT_API_PORT,
             cutoff = time.time() - latest_max_age_days * 86400
             latest = [e for e in latest if e["mtime"] >= cutoff]
         fp = fingerprint(groups, site_title, speeds, watched, static,
-                         latest_excluded=latest_excluded, latest=latest)
+                         latest_excluded=latest_excluded, latest=latest, keep_channels=keep_channels)
         if read_existing_fingerprint(index_path) == fp:
             return False, total, channels
         now_str = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
-        html_content = generate_index_html(groups, total, channels, now_str, fp, latest=latest, api_port=api_port, site_title=site_title, speeds=speeds, static=static)
+        html_content = generate_index_html(groups, total, channels, now_str, fp, latest=latest, api_port=api_port, site_title=site_title, speeds=speeds, static=static, keep_channels=keep_channels)
         tmp = _tmp_path(index_path)
         tmp.write_text(html_content, encoding="utf-8")
         tmp.replace(index_path)

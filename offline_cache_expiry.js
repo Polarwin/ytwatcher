@@ -66,11 +66,16 @@ function plCacheExpirySync(data) {
   plCacheExpiryWrite(state);
 }
 function plCacheExpiryMark(id, isWatched, timestamp) {
+  plCacheExpiryMarkMany([{id: id, watched: isWatched}], timestamp);
+}
+function plCacheExpiryMarkMany(changes, timestamp) {
   plCacheExpiryGeneration++;
   var state = plCacheExpiryRead();
   plCacheExpiryRemember(state);
-  if (isWatched) state.marks[id] = Number.isFinite(timestamp) ? timestamp * 1000 : Date.now();
-  else delete state.marks[id];
+  changes.forEach(function (change) {
+    if (change.watched) state.marks[change.id] = Number.isFinite(timestamp) ? timestamp * 1000 : Date.now();
+    else delete state.marks[change.id];
+  });
   plCacheExpiryWrite(state);
 }
 async function plCacheExpirySweep() {
