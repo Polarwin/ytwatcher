@@ -434,9 +434,12 @@ the 90-minute server/device cleanup period does not restart on synchronization.
 Clearing browser site data removes unsynced changes. Refresh online once after
 upgrading to get the new sync code in the offline page copy.
 
-Choose **Older than 1 day or 2 days** (2 days by default), then click
-**Mark watched and remove from playlist**. This uses the dates shown in the
-library (more than 24 or 48 hours old). It includes folded sections and hidden old entries,
+Choose **Calendar days old: 1 day or 2 days** (2 days by default), then click
+**Mark watched and remove from playlist**. Age is counted using the device's
+local calendar dates and time zone, including daylight-saving changes. **1 day**
+includes yesterday and earlier; **2 days** includes the day before yesterday
+and earlier. Today's videos are excluded. The confirmation shows the local
+cutoff date. It includes folded sections and hidden old entries,
 and counts duplicate Latest rows only once. Categories configured with
 `keep_watched: true` (such as Animation and Espanol), and static learning content,
 are excluded. After confirming the count, eligible videos are marked watched and

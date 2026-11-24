@@ -1621,7 +1621,7 @@ def scan_downloads(download_dir, files=None):
 # Bump when the index.html template changes: the fingerprint below only
 # covers the file listing, so without this an existing index.html would
 # keep the old template until some video is added or removed.
-INDEX_TEMPLATE_VERSION = 131
+INDEX_TEMPLATE_VERSION = 132
 
 
 def static_folder_url(item):
@@ -1960,11 +1960,11 @@ def generate_index_html(groups, total, channels, now_str, fp, latest=None, api_p
         'title="Rescan the download folders and regenerate this page '
         '(takes a moment on large libraries)">Rebuild index</button> '
         '<span class="tool-status" id="rebuild-status"></span></p>',
-        '      <p><label for="watch-old-days">Older than</label> '
+        '      <p><label for="watch-old-days">Calendar days old</label> '
         '<select id="watch-old-days"><option value="1">1 day</option>'
         '<option value="2" selected>2 days</option></select> '
         '<button class="watch-btn" type="button" id="watch-old" '
-        'title="Use the library dates; exclude categories that keep watched files">'
+        'title="Count calendar dates in this device’s time zone; exclude categories that keep watched files">'
         'Mark watched and remove from playlist</button> '
         '<span class="tool-status" id="watch-old-status" role="status"></span></p>',
         '      <p class="tool-status" id="watch-status"></p>',
