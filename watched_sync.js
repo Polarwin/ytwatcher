@@ -98,8 +98,11 @@ function report(id, isWatched) {
 watched = plWatchedOverlay(watched);
 
 document.getElementById('watch-old').addEventListener('click', function () {
+  var days = Number(document.getElementById('watch-old-days').value);
+  if (days !== 1 && days !== 2) return;
+  var ageLabel = days + (days === 1 ? ' day' : ' days');
   var protectedIds = new Set(), candidates = new Set();
-  var cutoff = Date.now() / 1000 - 2 * 86400;
+  var cutoff = Date.now() / 1000 - days * 86400;
   var entries = document.querySelectorAll('#video-sections li[data-id]');
   entries.forEach(function (li) {
     if (li.dataset.keepWatched === 'true') protectedIds.add(li.dataset.id);
@@ -116,8 +119,8 @@ document.getElementById('watch-old').addEventListener('click', function () {
   var oldPlaylist = pl.slice(), current = plIndex >= 0 ? pl[plIndex] : null;
   var remaining = pl.filter(function (item) { return !candidates.has(plItemId(item)); });
   var removed = pl.length - remaining.length;
-  if (!changes.length && !removed) { status.textContent = 'No eligible unwatched videos older than 2 days.'; return; }
-  if (!window.confirm('Mark ' + changes.length + ' videos older than 2 days as watched and remove ' + removed + ' playlist items? Categories that keep watched files are excluded.')) return;
+  if (!changes.length && !removed) { status.textContent = 'No eligible unwatched videos older than ' + ageLabel + '.'; return; }
+  if (!window.confirm('Mark ' + changes.length + ' videos older than ' + ageLabel + ' as watched and remove ' + removed + ' playlist items? Categories that keep watched files are excluded.')) return;
   if (changes.length && !plWatchedQueueChanges(changes)) return;
   candidates.forEach(function (id) { watched.add(id); });
   save(watched);
